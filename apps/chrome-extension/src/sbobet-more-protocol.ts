@@ -1,3 +1,5 @@
+import { SBOBET_RETRY_AFTER_EXPRESSION } from "./sbobet-request-backoff.js";
+
 /** Exact public request observed on the SBOBET More control, 2026-09-08. */
 export interface SbobetMoreRequest {
   readonly url: string;
@@ -86,8 +88,7 @@ export function buildSbobetMoreFetchExpression(request: SbobetMoreRequest, execu
         cache: 'no-store', redirect: 'error', signal: controller.signal });
       if (response.status !== 200) {
         const retry = response.headers?.get('retry-after');
-        return { status: response.status, ...(typeof retry === 'string' && /^\\d+$/u.test(retry)
-          ? { retryAfterMs: Math.min(Number(retry) * 1000, 300000) } : {}) };
+        return { status: response.status, retryAfterMs: ${SBOBET_RETRY_AFTER_EXPRESSION}(retry) };
       }
       if (Number(response.headers?.get('content-length')) > 4000000) return { status: 0 };
       const body = await response.text();

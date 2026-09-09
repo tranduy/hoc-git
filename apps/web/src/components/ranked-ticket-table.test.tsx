@@ -8,9 +8,56 @@ import type { RankedTicket } from "../watch/ranked-tickets.js";
 import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
 import type { TicketReportRequest } from "../api/ticket-report.js";
 import { RankedTicketTable } from "./ranked-ticket-table.js";
+import { capturedRefundExample } from "../watch/conditional-roi.test-fixtures.js";
 import "../styles.css";
 
 afterEach(cleanup);
+
+it.each(["handicap", "total", "break-even"] as const)("explains captured %s conditional ROI in the ticket detail", kind => {
+  const { row, plan } = capturedRefundExample(kind);
+  const candidate: RankedTicket = { key: row.key, eventKey: "saved-event", row, plan, state: "OBSERVATION",
+    reason: null, movementMagnitude: "0", gapsBySelection: {} };
+  render(<RankedTicketTable event={{ ...event, category: "FOOTBALL", eventScope: "REGULATION", bestOf: null,
+    isVirtual: false, sportVariant: "FOOTBALL", liveState: null }}
+    providers={row.cells.map(c => c.provider)} tickets={[candidate]} />);
+  expect(screen.getByText("Guaranteed 0 VND")).toBeTruthy();
+  if (kind === "break-even") expect(screen.queryByText(/ROI khi không hoàn tiền/u)).toBeNull();
+  else {
+    expect(screen.getByText(`ROI khi không hoàn tiền: ${kind === "handicap" ? "1.24" : "0.28"}%`)).toBeTruthy();
+    expect(screen.getByText("Hoàn đủ hai cược: lãi 0 VND")).toBeTruthy();
+  }
+  expect(screen.getAllByText("ROI 0.00%").every(node => node.classList.contains("roi-badge--neutral"))).toBe(true);
+});
+
+it("keeps a real tiny positive estimate visibly nonzero", () => {
+  const base = ticket(1);
+  render(<RankedTicketTable event={event} providers={["SABA", "IM"]} tickets={[{ ...base,
+    plan: { ...base.plan!, worstCaseProfit: "0.000001", roi: "0.00000001" } }]} />);
+  expect(screen.getByText("Guaranteed <0.01 VND")).toBeTruthy();
+  expect(screen.getAllByText("ROI <0.01%").every(node => node.classList.contains("roi-badge--medium"))).toBe(true);
+});
+
+it("renders screenshot-scale negative ROI and profit with compact bounds", () => {
+  const base = ticket(1);
+  render(<RankedTicketTable event={event} providers={["SABA", "IM"]} tickets={[{ ...base,
+    plan: { ...base.plan!, worstCaseProfit: "-2e-34", roi: "-2.17e-40" } }]} />);
+  expect(screen.getByText("Guaranteed >-0.01 VND")).toBeTruthy();
+  expect(screen.getAllByText("ROI >-0.01%")
+    .every(node => node.classList.contains("roi-badge--negative"))).toBe(true);
+});
+
+it.each([["PUSH", "Hoàn tiền", "0"], ["SPLIT", "Chia tiền", "5000"]] as const)(
+  "shows the %s outcome in addition to full-win profits", (kind, label, profit) => {
+    const base = ticket(1);
+    const candidate = { ...base, plan: { ...base.plan!, worstCaseProfit: profit,
+      roi: kind === "PUSH" ? "0" : "0.025", settlementScenarios: [{ kind, profit }] } };
+    render(<RankedTicketTable event={event} providers={["SABA", "IM"]} tickets={[candidate]} />);
+    expect(screen.getByText(label)).toBeTruthy();
+    if (kind === "PUSH") {
+      expect(screen.getByText("Guaranteed 0 VND")).toBeTruthy();
+      expect(screen.getAllByText("ROI 0.00%").every(node => node.classList.contains("roi-badge--neutral"))).toBe(true);
+    }
+  });
 
 const event: ProviderEvent = { provider: "SABA", category: "LOL", providerEventId: "event-a", competition: "LCK",
   seasonStage: null, startAtUtcMs: 10_000, participantA: "Nongshim Academy", participantB: "Dplus Challengers",
@@ -50,6 +97,24 @@ function ticket(index: number, state: RankedTicket["state"] = "OBSERVATION"): Ra
 describe("RankedTicketTable", () => {
   const stakePolicy = { currency: "VND", baseStake: "100000", minStake: "30000",
     maxStake: "1000000", stakeStep: "1000", balance: "1000000" } as const;
+
+  it("shows an exact waiting row without ROI, stake inputs or ticket actions and honors removed sides", () => {
+    const original = ticket(1);
+    const waiting: RankedTicket = { ...original, plan: null, hasOpposingSources: true,
+      opposingProviderPairs: [["SABA", "IM"]], reason: "APSPORT quote freshness not confirmed",
+      row: { ...original.row, cells: original.row.cells.map(cell => cell.provider === "IM" ? { ...cell, quotes: [] } : cell) } };
+    const view = render(<RankedTicketTable event={event} providers={["SABA", "IM"]} tickets={[waiting]}
+      compact onOpenProviderTicket={vi.fn()} realtimeCheckApi={{ check: vi.fn() }} />);
+    expect(screen.getByRole("row", { name: `Ticket ${waiting.key}` })).toBeTruthy();
+    expect(screen.getByText("Đã ghép kèo; chờ giá mới")).toBeTruthy();
+    expect(screen.getByText("APSPORT: chờ xác nhận giá mới")).toBeTruthy();
+    expect(within(screen.getByRole("row", { name: `Ticket ${waiting.key}` })).queryByText(/ROI/u)).toBeNull();
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Mở kèo|Kiểm tra giá thật/u })).toBeNull();
+
+    view.rerender(<RankedTicketTable event={event} providers={["SABA", "BTI"]} tickets={[waiting]} compact />);
+    expect(screen.queryByRole("row", { name: `Ticket ${waiting.key}` })).toBeNull();
+  });
 
   it("renders providers and stake legs in the canonical order even when inputs arrive reversed", () => {
     const reversed = ticket(1);

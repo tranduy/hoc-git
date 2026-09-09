@@ -21,6 +21,14 @@ it("filters a catalog event by its provider-confirmed live state", () => {
   expect(matchesEventPhase(live, new Set(["LIVE"]))).toBe(true);
 });
 
+it.each([
+  ["+200", 3], ["-200", 1.5], ["+100", 2], ["-100", 2],
+  ["99", null], ["-99", null], ["0", null], ["Infinity", null]
+])("converts American odds %s without accepting values inside even money", (rawOdds, expected) => {
+  const quote = catalog("SABA", "american-format", ["2.10", "1.90"]).quotes[0]!;
+  expect(decimalOdds({ ...quote, rawFormat: "AMERICAN", rawOdds })).toBe(expected);
+});
+
 it("converts positive Hong Kong odds to decimal and rejects unsafe HK values", () => {
   const base: ProviderQuote = {
     provider: "SABA", category: "FOOTBALL", providerEventId: "event", providerMarketId: "market",
@@ -114,6 +122,43 @@ const lolCatalog = (provider: "SABA" | "IM", id: string, participantA: string, p
 };
 
 describe("catalog comparison", () => {
+  it.each([false, true])("shares unchanged total quotes with native provenance across worker cloning (reversed=%s)", (reversed) => {
+    const left = catalog("SABA", "shared-left", ["2.10", "1.90"]);
+    const right = catalog("SBOBET", "shared-right", ["1.95", "2.05"]);
+    const source = reversed ? { ...right, events: [{ ...right.events[0]!,
+      participantA: right.events[0]!.participantB, participantB: right.events[0]!.participantA }] } : right;
+    for (const item of [...left.markets, ...left.quotes, ...source.markets, ...source.quotes]) Object.freeze(item);
+    const before = JSON.stringify([left, source]);
+    const result = buildComparisonEvents([left, source]);
+    expect(result[0]?.rows).toHaveLength(1);
+    const cell = result[0]!.rows[0]!.cells.find((item) => item.provider === "SBOBET")!;
+    expect(cell.market).toEqual(source.markets[0]);
+    expect(cell.quotes).toEqual(source.quotes);
+    expect(cell.market).toBe(cell.sourceMarket);
+    for (const quote of cell.quotes) expect(quote).toBe(cell.sourceQuotes!.find((item) =>
+      item.providerSelectionId === quote.providerSelectionId));
+    const copied = structuredClone(cell);
+    expect(copied.market).toBe(copied.sourceMarket);
+    for (const quote of copied.quotes) expect(quote).toBe(copied.sourceQuotes!.find((item) =>
+      item.providerSelectionId === quote.providerSelectionId));
+    expect(JSON.stringify([left, source])).toBe(before);
+  });
+
+  it("copies only the same-orientation records whose native line needs canonicalization", () => {
+    const base = catalog("SABA", "mixed-lines", ["2.10", "1.90"]);
+    const source = { ...base, markets: [{ ...base.markets[0]!, line: "2.50" }],
+      quotes: [base.quotes[0]!, { ...base.quotes[1]!, line: "2.500" }] };
+    for (const item of [...source.markets, ...source.quotes]) Object.freeze(item);
+    const cell = buildComparisonEvents([source])[0]!.observedRows[0]!.cells[0]!;
+    expect(cell.market).toEqual({ ...source.markets[0], line: "2.5" });
+    expect(cell.market).not.toBe(source.markets[0]);
+    expect(cell.quotes[0]).toBe(source.quotes[0]);
+    expect(cell.quotes[1]).not.toBe(source.quotes[1]);
+    expect(cell.quotes[1]).toEqual({ ...source.quotes[1], line: "2.5" });
+    expect(cell.sourceMarket?.line).toBe("2.50");
+    expect(cell.sourceQuotes?.map((quote) => quote.line)).toEqual(["2.5", "2.500"]);
+  });
+
   it("renders every supported football binary market and outcome in English", () => {
     expect(selectionLabel(event("SABA", "labels"), "OVER")).toBe("Over");
     expect(selectionLabel(event("SABA", "labels"), "UNDER")).toBe("Under");
@@ -160,16 +205,16 @@ describe("catalog comparison", () => {
     expect(result[0]?.rows).toEqual([]);
   });
 
-  it("keeps push-capable Asian tickets out of comparison and excludes three-way tickets", () => {
+  it("observes push-capable Asian tickets and excludes three-way tickets", () => {
     const quarter = handicapCatalog("SABA", "quarter", "-0.75", ["0.82", "-0.90"]);
     const threeWay = threeWayCatalog("SBOBET", "three", ["2.1", "3.2", "3.4"]);
 
     const result = buildComparisonEvents([quarter, threeWay]);
-    expect(result.find((item) => item.event.providerEventId === "quarter")?.observedRows).toEqual([]);
+    expect(result.find((item) => item.event.providerEventId === "quarter")?.observedRows).toHaveLength(1);
     expect(result.some((item) => item.event.providerEventId === "three")).toBe(false);
   });
 
-  it("keeps quarter-goal totals out of verified ranking rows", () => {
+  it("compares quarter-goal totals with their split-settlement margin", () => {
     const combine = (focused: LiveCatalogResponse, unsupported: LiveCatalogResponse): LiveCatalogResponse => ({
       ...focused,
       markets: [...focused.markets, ...unsupported.markets],
@@ -186,7 +231,7 @@ describe("catalog comparison", () => {
     ]);
 
     expect(result[0]?.rows.map((row) => [row.marketType, row.line])).toEqual([
-      ["FT_AH", "-0.5"]
+      ["FT_TOTAL", "2.25"], ["FT_AH", "-0.5"]
     ]);
   });
 
@@ -367,11 +412,12 @@ describe("catalog comparison", () => {
     expect(matched[0]?.rows).toHaveLength(1);
   });
 
-  it("fails closed when one provider has duplicate same-team fixtures at the same kickoff", () => {
+  it("fails closed when one provider prices duplicate same-team fixtures at the same kickoff", () => {
     const saba = handicapCatalog("SABA", "saba-one", "-0.5", ["0.82", "-0.90"]);
     const sbobet = handicapCatalog("SBOBET", "sbo-one", "-0.5", ["0.78", "-0.86"]);
-    const ambiguousSaba = { ...saba, events: [...saba.events,
-      { ...saba.events[0]!, providerEventId: "saba-rematch" }] };
+    const duplicate = handicapCatalog("SABA", "saba-rematch", "-0.5", ["0.84", "-0.92"]);
+    const ambiguousSaba = { ...saba, events: [...saba.events, ...duplicate.events],
+      markets: [...saba.markets, ...duplicate.markets], quotes: [...saba.quotes, ...duplicate.quotes] };
 
     const result = buildComparisonEvents([ambiguousSaba, sbobet]);
     expect(result.some((item) => item.providers.length > 1)).toBe(false);
@@ -474,6 +520,8 @@ describe("catalog comparison", () => {
     const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
     const sbobet = handicapCatalog("SBOBET", "sbo-event", "0.5", ["0.78", "-0.86"]);
     const reversed = { ...sbobet, events: [{ ...sbobet.events[0]!, participantA: "Molde", participantB: "Kristiansund BK" }] };
+    for (const item of [...sbobet.markets, ...sbobet.quotes]) Object.freeze(item);
+    const original = JSON.stringify(sbobet);
 
     const result = buildComparisonEvents([saba, reversed]);
     expect(result).toHaveLength(1);
@@ -487,6 +535,10 @@ describe("catalog comparison", () => {
     expect(sourceCell?.sourceQuotes?.map((quote) => [quote.providerSelectionId, quote.selection, quote.line])).toEqual([
       ["sbo-event-HOME", "HOME", "0.5"], ["sbo-event-AWAY", "AWAY", "0.5"]
     ]);
+    expect(sourceCell?.market).not.toBe(sourceCell?.sourceMarket);
+    for (const quote of sourceCell!.quotes) expect(quote).not.toBe(sourceCell!.sourceQuotes!.find((item) =>
+      item.providerSelectionId === quote.providerSelectionId));
+    expect(JSON.stringify(sbobet)).toBe(original);
   });
 
   it("canonicalizes equivalent numeric lines before matching the same market", () => {
@@ -595,7 +647,7 @@ describe("catalog comparison", () => {
     expect(result[0]?.bestMargin).toBeNull();
   });
 
-  it("rejects an ambiguous provider contribution instead of merging duplicate semantic markets", () => {
+  it("keeps each whole native quote pair for equivalent source markets", () => {
     const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
     const duplicateMarket = { ...saba.markets[0]!, providerMarketId: "saba-duplicate" };
     const duplicateQuotes = saba.quotes.map((quote) => ({ ...quote,
@@ -608,8 +660,11 @@ describe("catalog comparison", () => {
     const result = buildComparisonEvents([ambiguous, sbobet]);
 
     expect(result[0]?.observedRows).toHaveLength(1);
-    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SBOBET"]);
-    expect(result[0]?.rows).toEqual([]);
+    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SABA", "SBOBET"]);
+    expect(result[0]?.rows).toHaveLength(1);
+    const retained = result[0]?.rows[0]?.cells.find(cell => cell.market.providerMarketId === duplicateMarket.providerMarketId);
+    expect(retained?.sourceMarket).toEqual(duplicateMarket);
+    expect(retained?.sourceQuotes).toEqual(duplicateQuotes);
   });
 
   it("shows live events and every future pre-match event without a time horizon", () => {
@@ -653,11 +708,13 @@ describe("catalog comparison", () => {
     expect(result[0]?.bestMargin).toBeNull();
   });
 
-  it("requires two providers to expose the same complete two-outcome domain", () => {
+  it("pairs an available opposing quote with a complete two-outcome offer", () => {
     const complete = catalog("SABA", "saba-event", ["2.20", "1.70"]);
     const incomplete = withQuotes(catalog("SBOBET", "sbo-event", ["2.10", "1.80"]), ["OVER"]);
 
-    expect(buildComparisonEvents([complete, incomplete])[0]?.rows).toEqual([]);
+    const rows = buildComparisonEvents([complete, incomplete])[0]!.rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.cells.find(cell => cell.provider === "SBOBET")!.quotes.map(quote => quote.selection)).toEqual(["OVER"]);
   });
 
   it("rejects a two-selection fragment of a three-way market", () => {
@@ -810,6 +867,40 @@ describe("catalog comparison", () => {
       ["CARD_FH_AH", "FIRST_HALF"], ["CORNER_FT_TOTAL", "FULL_TIME"], ["SH_AH", "SECOND_HALF"]
     ].sort());
     expect(new Set(rows.map((row) => row.key)).size).toBe(3);
+  });
+
+  it("matches first-half team totals across reversed fixtures without mixing full-time settlement", () => {
+    const left = binaryCatalog("SABA", "left-team-fh", "HOME_FH_TOTAL", "FIRST_HALF", "0.5",
+      "football-home-goals-first-half", ["OVER", "UNDER"], ["2.2", "1.7"]);
+    const right = binaryCatalog("SBOBET", "right-team-fh", "AWAY_FH_TOTAL", "FIRST_HALF", "0.5",
+      "football-away-goals-first-half", ["OVER", "UNDER"], ["2.1", "1.8"]);
+    const reversed = { ...right, events: [{ ...right.events[0]!,
+      participantA: right.events[0]!.participantB, participantB: right.events[0]!.participantA }] };
+    expect(buildComparisonEvents([left, reversed])[0]?.rows.map(row => row.marketType))
+      .toEqual(["HOME_FH_TOTAL"]);
+    const fullTime = binaryCatalog("SBOBET", "right-team-ft", "HOME_FT_TOTAL", "FULL_TIME", "0.5",
+      "football-home-goals-regulation", ["OVER", "UNDER"], ["2.1", "1.8"]);
+    expect(buildComparisonEvents([left, fullTime]).flatMap(group => group.rows)).toEqual([]);
+  });
+
+  it("preserves unverified settlement when orienting a team-specific market", () => {
+    const left = binaryCatalog("SABA", "saba-team", "HOME_FT_TOTAL", "FULL_TIME", "1.5",
+      "football-home-goals-regulation", ["OVER", "UNDER"], ["2.2", "1.7"]);
+    const right = binaryCatalog("SBOBET", "sbo-team", "AWAY_FT_TOTAL", "FULL_TIME", "1.5",
+      "provider-specific-away-total-including-extra-time", ["OVER", "UNDER"], ["2.1", "1.8"]);
+    const reversedRight = { ...right,
+      events: [{ ...right.events[0]!, participantA: right.events[0]!.participantB,
+        participantB: right.events[0]!.participantA }] };
+
+    const groups = buildComparisonEvents([left, reversedRight]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.rows).toEqual([]);
+    expect(groups[0]?.bestMargin).toBeNull();
+    const orientedCell = groups[0]?.observedRows[0]?.cells.find((cell) => cell.provider === "SBOBET");
+    expect(orientedCell?.market).toMatchObject({ marketType: "HOME_FT_TOTAL",
+      settlementProfile: "provider-specific-away-total-including-extra-time" });
+    expect(orientedCell?.sourceMarket).toEqual(right.markets[0]);
   });
 
   it("pairs a provider card pseudo-event with the same card market inside a mixed fixture event", () => {

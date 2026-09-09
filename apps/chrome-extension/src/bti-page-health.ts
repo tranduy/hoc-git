@@ -48,7 +48,13 @@ export function parseBtiPageHealthProbe(value: unknown): BtiPageHealthProbe | nu
 }
 
 export function btiHardRecoveryAction(health: BtiPageHealthProbe | null): "REFRESH" | "RENEW" {
+  if (btiRequestsPaused(health)) return "REFRESH";
   return health?.status === "AUTH_ERROR" && health.code === "1008" ? "RENEW" : "REFRESH";
+}
+
+function btiRequestsPaused(health: BtiPageHealthProbe | null): boolean {
+  try { return JSON.parse(health?.rosterCoverage ?? "{}").requestPaused === true; }
+  catch { return false; }
 }
 
 export type BtiSourceControlCommand = "RELOAD" | "RESTORE" | "ENSURE";
@@ -57,6 +63,7 @@ export type BtiSourceControlAction = "REFRESH_CURRENT" | "RENEW_CURRENT" |
 
 export function btiSourceControlAction(command: BtiSourceControlCommand,
   health: BtiPageHealthProbe | null): BtiSourceControlAction {
+  if (btiRequestsPaused(health)) return "REFRESH_CURRENT";
   if (command === "RESTORE") return "RESTORE_DOCUMENT";
   if (command === "ENSURE") return "ENSURE_LAUNCH";
   return btiHardRecoveryAction(health) === "RENEW" ? "RENEW_CURRENT" : "REFRESH_CURRENT";
@@ -76,9 +83,9 @@ function parseRosterCoverage(value: unknown): string | null {
     "detailEmptyEvents", "detailFailedEvents", "detailEvictedEvents", "detailQueuedEvents",
     "detailInFlightEvents", "detailOldestReceiptAgeMs", "detailNearTtlMs", "detailDistantTtlMs",
     "detailDueEvents", "detailDeferredEvents", "detailRetainedEventCap", "detailQueueCap",
-    "detailOverCapEvents", "nativeRosterEvents", "nativePrematchEvents", "nativeLiveEvents",
+    "detailOverCapEvents", "requestStatus", "requestRetryInMs", "nativeRosterEvents", "nativePrematchEvents", "nativeLiveEvents",
     "nativeDetailEvents", "nativeMarketRows", "nativeSelectionRows", "nativeNumericIds", "nativeMalformedRows"];
-  const booleans = ["detailCoverageComplete", "rosterRefreshFailed", "nativeInventoryTruncated", "nativeTypeCountsTruncated"];
+  const booleans = ["detailCoverageComplete", "rosterRefreshFailed", "requestPaused", "authBlocked", "nativeInventoryTruncated", "nativeTypeCountsTruncated"];
   if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts"].includes(key)) ||
     !["INITIAL", "HYDRATING", "COMPLETE", "FAILED"].includes(String(candidate.phase))) return null;
   if (booleans.some((key) => candidate[key] !== undefined && typeof candidate[key] !== "boolean")) return null;
@@ -88,7 +95,7 @@ function parseRosterCoverage(value: unknown): string | null {
   for (const key of allowed.slice(1)) {
     if (key === "detailOldestReceiptAgeMs" && candidate[key] === null) continue;
     const maximum = key === "detailCachedBytes" ? 256 * 1024 * 1024
-      : key === "detailOldestReceiptAgeMs" ? Number.MAX_SAFE_INTEGER : 1_000_000;
+      : key === "detailOldestReceiptAgeMs" || key === "requestRetryInMs" ? Number.MAX_SAFE_INTEGER : 1_000_000;
     if (candidate[key] !== undefined && (!Number.isSafeInteger(candidate[key]) || Number(candidate[key]) < 0 ||
       Number(candidate[key]) > maximum)) return null;
   }
@@ -114,6 +121,7 @@ export class BtiPageRecoveryWatchdog {
   }
 
   async observe(health: BtiPageHealth): Promise<void> {
+    if (btiRequestsPaused(health)) return;
     if (health.status === "HEALTHY") {
       this.#lastAttemptAtMs.delete(health.sourceId);
       return;

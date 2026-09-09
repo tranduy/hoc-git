@@ -10,6 +10,7 @@ type SabaUnavailableCallback = (source: { readonly lobby: "SABA"; readonly sourc
 
 let constructedObserver: {
   readonly prepareSourceNavigation: ReturnType<typeof vi.fn>;
+  readonly beginBridgeSourceEpoch: ReturnType<typeof vi.fn>;
 } | undefined;
 let constructedObserverDependencies: {
   readonly onSabaSocketUnavailable?: SabaUnavailableCallback;
@@ -151,6 +152,7 @@ describe("background source launch memory", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.doUnmock("./network-observer.js");
+    vi.doUnmock("./local-bridge.js");
     vi.resetModules();
   });
 
@@ -229,6 +231,37 @@ describe("background source launch memory", () => {
       url: "https://prod20091.fxf774.com/vi/asian-view/today/B%C3%B3ng-%C4%91%C3%A1?operatorToken=logout"
     });
     expect(harness.api.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it("retires SBO catalog completion before requesting a current baseline on each API reconnect", async () => {
+    const harness = createChromeHarness("https://zenandfe.com/sportsbook");
+    harness.storage.local.get.mockResolvedValue({ installationKey: "test-key" });
+    vi.stubGlobal("chrome", harness.api);
+    let onOpen: (() => void) | undefined;
+    vi.doMock("./local-bridge.js", () => ({ LocalBridge: class {
+      constructor(options: { onOpen: () => void }) { onOpen = options.onOpen; }
+      connect() {} close() {} releaseSource() {}
+      serverContactAgeMs() { return 0; }
+      readinessLatched() { return false; }
+      async enqueue() {}
+    } }));
+    const refreshCatalog = vi.fn(async () => undefined);
+    mockNetworkObserver(undefined, refreshCatalog);
+    await import("./background.js");
+    await settleWorkerStart(harness.storage);
+    expect(onOpen).toBeTypeOf("function");
+    for (let connection = 0; connection < 2; connection++) {
+      refreshCatalog.mockClear();
+      constructedObserver!.beginBridgeSourceEpoch.mockClear();
+      onOpen!();
+      await vi.advanceTimersByTimeAsync(25);
+      expect(constructedObserver!.beginBridgeSourceEpoch).toHaveBeenCalledExactlyOnceWith("chrome:KSPORT:7");
+      expect(refreshCatalog).toHaveBeenCalledWith({ lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 }, {});
+      expect(constructedObserver!.beginBridgeSourceEpoch.mock.invocationCallOrder[0]).toBeLessThan(
+        refreshCatalog.mock.invocationCallOrder[0]!);
+    }
+    expect(harness.api.tabs.reload).not.toHaveBeenCalled();
+    expect(harness.api.tabs.update).not.toHaveBeenCalled();
   });
 
   it("uses a bounded roster-only refresh for APSPORT's periodic catalog lease", async () => {

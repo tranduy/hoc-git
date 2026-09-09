@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CatalogApi, CatalogReadError, catalogRetryDelayMs } from "./catalog.js";
+import { CatalogApi, CatalogReadError, catalogRetryDelayMs, parseLiveCatalogResponse } from "./catalog.js";
 
 const response = {
   dataMode: "LIVE",
@@ -16,6 +16,70 @@ const response = {
 afterEach(() => vi.useRealTimers());
 
 describe("CatalogApi", () => {
+  it.each([0, 21_000, 21_000.5])("preserves the optional paired catalog receipt anchor %s", observedMonotonicMs => {
+    expect(parseLiveCatalogResponse({ ...response, observedMonotonicMs }, "account-1"))
+      .toHaveProperty("observedMonotonicMs", observedMonotonicMs);
+    expect(parseLiveCatalogResponse(response, "account-1")).not.toHaveProperty("observedMonotonicMs");
+  });
+
+  it.each([null, "21000", -1, Number.NaN, Infinity, -Infinity, {}, true])
+  ("rejects a malformed paired catalog receipt anchor (%#)", observedMonotonicMs => {
+    expect(() => parseLiveCatalogResponse({ ...response, observedMonotonicMs }, "account-1"))
+      .toThrow("Invalid live catalog response");
+  });
+
+  it("distinguishes anchor-only changes in fallback revisions without server headers", async () => {
+    let observedMonotonicMs = 1_000;
+    const api = new CatalogApi(async () => new Response(JSON.stringify({ ...response, observedMonotonicMs })));
+    const before = await api.readRevision("account-1");
+    observedMonotonicMs = 2_000;
+    const after = await api.readRevision("account-1");
+    expect(after.revision).not.toBe(before.revision);
+    expect(after.catalog).toHaveProperty("observedMonotonicMs", 2_000);
+  });
+
+  it("requests per-event native counts and reuses their validated body on 304", async () => {
+    const nativeCoverageByEvent = [{ providerEventId: "event-1", normalized: 2, excluded: 3, unmapped: 4 }];
+    let calls = 0;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ++calls === 1
+      ? new Response(JSON.stringify({ ...response, nativeCoverageByEvent }), { headers: {
+        etag: '"revision-100-native-counts"', "x-catalog-revision": "revision-100"
+      } }) : new Response(null, { status: 304 }));
+    const api = new CatalogApi(fetcher, 10_000, 30_000, "counts");
+    const first = await api.readRevision("account-1");
+    expect(first).toEqual({ catalog: { ...response, nativeCoverageByEvent }, revision: "revision-100" });
+    expect(first.catalog).not.toHaveProperty("nativeMarketObservations");
+    expect((await api.readRevision("account-1")).catalog).toBe(first.catalog);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/catalog/accounts/account-1?nativeDetail=counts");
+    expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get("if-none-match"))
+      .toBe('"revision-100-native-counts"');
+  });
+
+  it("distinguishes unavailable native accounting from an observed empty inventory", () => {
+    expect(parseLiveCatalogResponse(response, "account-1")).not.toHaveProperty("nativeCoverageByEvent");
+    expect(parseLiveCatalogResponse({ ...response, nativeCoverageByEvent: [] }, "account-1"))
+      .toHaveProperty("nativeCoverageByEvent", []);
+  });
+
+  it.each([
+    null, {}, [null], [{ providerEventId: "", normalized: 0, excluded: 0, unmapped: 0 }],
+    [{ providerEventId: "event", normalized: -1, excluded: 0, unmapped: 0 }],
+    [{ providerEventId: "event", normalized: 0, excluded: 0.5, unmapped: 0 }],
+    [{ providerEventId: "event", normalized: 0, excluded: 0, unmapped: Number.MAX_SAFE_INTEGER + 1 }],
+    [{ providerEventId: "event", normalized: 0, excluded: 0 }],
+    [{ providerEventId: "event", normalized: 0, excluded: 0, unmapped: 0 },
+      { providerEventId: "event", normalized: 1, excluded: 0, unmapped: 0 }]
+  ].map((nativeCoverageByEvent) => ({ nativeCoverageByEvent })))
+  ("rejects malformed or duplicate native event counts (%#)", ({ nativeCoverageByEvent }) => {
+    expect(() => parseLiveCatalogResponse({ ...response, nativeCoverageByEvent }, "account-1"))
+      .toThrow("Invalid live catalog response");
+  });
+
+  it("requests the compact native inventory only when the dashboard opts in", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify(response), { status: 200 }));
+    await new CatalogApi(fetcher, 10_000, 30_000, "summary").read("account-1");
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/catalog/accounts/account-1?nativeDetail=summary");
+  });
   it("loads a live account catalog through a path parameter", async () => {
     const calls: string[] = [];
     const api = new CatalogApi(async (input) => {
@@ -58,22 +122,74 @@ describe("CatalogApi", () => {
     });
   });
 
-  it("does not replace a newer cached catalog with an older concurrent response", async () => {
-    const resolvers: Array<(response: Response) => void> = [];
-    const api = new CatalogApi(() => new Promise<Response>((resolve) => resolvers.push(resolve)));
-    const older = api.readRevision("account-1");
-    const newer = api.readRevision("account-1");
-    resolvers[1]!(new Response(JSON.stringify({ ...response, observedAtMs: 200 }), {
-      status: 200, headers: { etag: '"catalog-200"', "x-catalog-revision": "catalog-200" }
-    }));
-    await expect(newer).resolves.toMatchObject({ revision: "catalog-200",
-      catalog: { observedAtMs: 200 } });
-    resolvers[0]!(new Response(JSON.stringify(response), {
-      status: 200, headers: { etag: '"catalog-100"', "x-catalog-revision": "catalog-100" }
-    }));
+  it("shares one transfer through body parsing when initial and realtime reads overlap", async () => {
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    const fetcher = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { body = controller; }
+    }), { status: 200, headers: { etag: '"catalog-100"' } }));
+    const api = new CatalogApi(fetcher);
+    const initial = api.readRevision("account-1");
+    // Headers have arrived, but the large body has not finished transferring.
+    await Promise.resolve();
+    const realtime = api.readRevision("account-1");
+    const legacy = api.read("account-1");
 
-    await expect(older).resolves.toMatchObject({ revision: "catalog-200",
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    body.enqueue(new TextEncoder().encode(JSON.stringify(response)));
+    body.close();
+    await expect(initial).resolves.toEqual({ catalog: response, revision: "catalog-100" });
+    await expect(realtime).resolves.toEqual({ catalog: response, revision: "catalog-100" });
+    await expect(legacy).resolves.toEqual(response);
+  });
+
+  it("lets a different account finish while another account is still transferring", async () => {
+    let releaseFirst!: (value: Response) => void;
+    const fetcher = vi.fn((input: RequestInfo | URL) => String(input).endsWith("account-1")
+      ? new Promise<Response>((resolve) => { releaseFirst = resolve; })
+      : Promise.resolve(new Response(JSON.stringify({ ...response, accountId: "account-2", provider: "SABA" }))));
+    const api = new CatalogApi(fetcher);
+    const first = api.read("account-1");
+    await expect(api.read("account-2")).resolves.toMatchObject({ accountId: "account-2", provider: "SABA" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    releaseFirst(new Response(JSON.stringify(response)));
+    await expect(first).resolves.toEqual(response);
+  });
+
+  it("releases a shared failed request so a later read can retry", async () => {
+    let calls = 0;
+    const api = new CatalogApi(async () => ++calls === 1
+      ? new Response(JSON.stringify({ error: "CATALOG_UNAVAILABLE" }), { status: 503 })
+      : new Response(JSON.stringify(response), { status: 200 }));
+    const results = await Promise.allSettled([api.readRevision("account-1"), api.readRevision("account-1")]);
+
+    expect(calls).toBe(1);
+    expect(results).toEqual([
+      { status: "rejected", reason: expect.objectContaining({ code: "CATALOG_UNAVAILABLE", status: 503 }) },
+      { status: "rejected", reason: expect.objectContaining({ code: "CATALOG_UNAVAILABLE", status: 503 }) }
+    ]);
+    await expect(api.read("account-1")).resolves.toEqual(response);
+    expect(calls).toBe(2);
+  });
+
+  it("does not replace a newer cached catalog when a later request returns older data", async () => {
+    const requestHeaders: Array<HeadersInit | undefined> = [];
+    let calls = 0;
+    const api = new CatalogApi(async (_input, init) => {
+      requestHeaders.push(init?.headers);
+      calls += 1;
+      if (calls === 3) return new Response(null, { status: 304 });
+      const observedAtMs = calls === 1 ? 200 : 100;
+      return new Response(JSON.stringify({ ...response, observedAtMs }), {
+        status: 200, headers: { etag: `"catalog-${observedAtMs}"`, "x-catalog-revision": `catalog-${observedAtMs}` }
+      });
+    });
+    await expect(api.readRevision("account-1")).resolves.toMatchObject({ revision: "catalog-200",
       catalog: { observedAtMs: 200 } });
+    await expect(api.readRevision("account-1")).resolves.toMatchObject({ revision: "catalog-200",
+      catalog: { observedAtMs: 200 } });
+    await expect(api.readRevision("account-1")).resolves.toMatchObject({ revision: "catalog-200",
+      catalog: { observedAtMs: 200 } });
+    expect(new Headers(requestHeaders[2]).get("if-none-match")).toBe('"catalog-200"');
   });
 
   it("rejects a fixture or malformed response at the UI boundary", async () => {
@@ -112,6 +228,30 @@ describe("CatalogApi", () => {
     await result;
   });
 
+  it("keeps the original deadline for a late joining reader and allows retry after their shared timeout", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const api = new CatalogApi((_input, init) => {
+      calls += 1;
+      if (calls > 1) return Promise.resolve(new Response(JSON.stringify(response)));
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    }, 10);
+    const first = api.readRevision("account-1");
+    await vi.advanceTimersByTimeAsync(9);
+    const results = Promise.allSettled([first, api.readRevision("account-1")]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await results).toEqual([
+      { status: "rejected", reason: expect.objectContaining({ code: "CATALOG_TIMEOUT", status: 0 }) },
+      { status: "rejected", reason: expect.objectContaining({ code: "CATALOG_TIMEOUT", status: 0 }) }
+    ]);
+    expect(calls).toBe(1);
+    await expect(api.read("account-1")).resolves.toEqual(response);
+    expect(calls).toBe(2);
+  });
+
   it("keeps the deadline active while the response body is still being read", async () => {
     vi.useFakeTimers();
     const api = new CatalogApi(async (_input, init) => ({
@@ -124,6 +264,64 @@ describe("CatalogApi", () => {
     const result = expect(api.read("account-1")).rejects.toThrow("Live catalog request timed out");
     await vi.advanceTimersByTimeAsync(10);
     await result;
+  });
+
+  it("still aborts missing response headers at ten seconds when a separate body budget is configured", async () => {
+    vi.useFakeTimers();
+    const api = new CatalogApi((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }), 10_000, 30_000);
+
+    const result = expect(api.read("account-1")).rejects.toMatchObject({ code: "CATALOG_TIMEOUT", status: 0 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await result;
+  });
+
+  it("accepts a complete body within its explicit budget after the header deadline has passed", async () => {
+    vi.useFakeTimers();
+    const api = new CatalogApi((_input, init) => new Promise((resolve) => {
+      window.setTimeout(() => resolve(new Response(new ReadableStream<Uint8Array>({
+        start(body) {
+          init?.signal?.addEventListener("abort", () => body.error(new DOMException("aborted", "AbortError")));
+          window.setTimeout(() => {
+            if (init?.signal?.aborted) return;
+            body.enqueue(new TextEncoder().encode(JSON.stringify(response)));
+            body.close();
+          }, 26_000);
+        }
+      }), { status: 200 })), 8_000);
+    }), 10_000, 30_000);
+    const result = Promise.allSettled([api.read("account-1")]);
+
+    // Eight seconds to headers, then twenty-six seconds for the complete body.
+    await vi.advanceTimersByTimeAsync(34_000);
+    expect(await result).toEqual([{ status: "fulfilled", value: response }]);
+  });
+
+  it("aborts a hung body thirty seconds after headers without extending the deadline for another reader", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | null | undefined;
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve) => {
+      signal = init?.signal;
+      window.setTimeout(() => resolve(new Response(new ReadableStream<Uint8Array>({
+        start(body) {
+          signal?.addEventListener("abort", () => body.error(new DOMException("aborted", "AbortError")));
+        }
+      }), { status: 200 })), 8_000);
+    }));
+    const api = new CatalogApi(fetcher, 10_000, 30_000);
+    const first = api.readRevision("account-1");
+    await vi.advanceTimersByTimeAsync(9_000);
+    const results = Promise.allSettled([first, api.readRevision("account-1")]);
+    await vi.advanceTimersByTimeAsync(28_999);
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await results).toEqual([
+      { status: "rejected", reason: expect.objectContaining({ code: "CATALOG_TIMEOUT", status: 0 }) },
+      { status: "rejected", reason: expect.objectContaining({ code: "CATALOG_TIMEOUT", status: 0 }) }
+    ]);
   });
 
   it("preserves the server catalog failure code for stale-source diagnostics", async () => {

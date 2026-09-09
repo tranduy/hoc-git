@@ -118,7 +118,7 @@ describe("KsportWsCatalogAdapter", () => {
     const goalSecond = { ...identity, "7": {
       "3": ["2.5 0.91*7788990301h -0.97*7788990302a 778899030001"],
       "4": ["1.5 0.91*7788990401h -0.97*7788990402a 778899040001"],
-      "777": ["opaque native row"], "1": ["unsupported three-way row"]
+      "777": ["opaque native row"], "17": ["unsupported corner three-way row"]
     } };
 
     expect(adapter.decode(httpEnvelope([], "live", 1, 10))).toEqual([]);
@@ -138,7 +138,7 @@ describe("KsportWsCatalogAdapter", () => {
       expect.objectContaining({ providerMarketId: "778899030001", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" }),
       expect.objectContaining({ providerMarketId: "778899040001", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" }),
       expect.objectContaining({ nativeType: "777", disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED" }),
-      expect.objectContaining({ nativeType: "1", disposition: "EXCLUDED", reason: "THREE_WAY_OUTCOME_DOMAIN" })
+      expect.objectContaining({ nativeType: "17", disposition: "EXCLUDED", reason: "THREE_WAY_OUTCOME_DOMAIN" })
     ]));
 
     const delta = adapter.decode(receiptEnvelope({ ...identity, "7": { "3": goalSecond["7"]["3"] } },

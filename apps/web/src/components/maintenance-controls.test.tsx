@@ -19,6 +19,20 @@ const profit: ProfitAlert = { id: "profit-1", identity: "event::ticket::BTI|SABA
 afterEach(cleanup);
 
 describe("MaintenanceControls", () => {
+  it("labels the count as history and excludes nonpositive legacy entries", async () => {
+    render(<MaintenanceControls api={{ status: async () => status, refreshAll: async () => status }}
+      profitAlerts={[profit, { ...profit, id: "zero", worstCaseProfit: "0" }]} />);
+    const bell = await screen.findByRole("button", { name: "Lịch sử kèo profit (1)" });
+    fireEvent.click(bell);
+    expect(screen.getByText("Lịch sử kèo profit trên 5%")).toBeTruthy();
+    expect(screen.getByText("Các lần ghi nhận trước đây, cần kiểm tra lại giá hiện tại.")).toBeTruthy();
+  });
+  it("preserves a positive fractional profit in the historical notification", async () => {
+    render(<MaintenanceControls api={{ status: async () => status, refreshAll: async () => status }}
+      profitAlerts={[{ ...profit, worstCaseProfit: "0.000001" }]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Lịch sử kèo profit (1)" }));
+    expect(screen.getByText(/<0\.01 VND/u)).toBeTruthy();
+  });
   it("keeps restart and notification controls in an inline toolbar group", async () => {
     render(<MaintenanceControls api={{ status: async () => status, refreshAll: async () => status }} profitAlerts={[profit]} />);
     const bell = await screen.findByRole("button", { name: /kèo profit/i });

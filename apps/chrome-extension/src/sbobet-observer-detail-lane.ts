@@ -2,9 +2,11 @@ import { SbobetCatalogRefresh, type SbobetDetailBatch, type SbobetDetailRequest,
   type SbobetDetailResponse, type SbobetPrematchEvent, type SbobetRefreshOptions } from "./sbobet-catalog-refresh.js";
 import { buildSbobetDetailFetchExpression, parseSbobetDetailEvent, sbobetDetailTemplateFromObserved,
   type SbobetDetailBinding, type SbobetDetailTemplate } from "./sbobet-detail-protocol.js";
+import type { SbobetRequestBackoff } from "./sbobet-request-backoff.js";
 
 export interface SbobetDetailReceipt { readonly receivedMonotonicMs: number }
 export interface SbobetObserverDetailLaneOptions {
+  readonly requestBackoff?: SbobetRequestBackoff;
   readonly tabId: number;
   readonly currentGeneration: () => string | null;
   readonly allocateRequestStartSequence: () => number;
@@ -40,6 +42,7 @@ interface RememberedTemplate {
   verified: boolean;
 }
 interface Receipt {
+  readonly startedAtMs: number;
   readonly template: RememberedTemplate;
   readonly contextId: number;
   readonly observedAtMs: number;
@@ -72,9 +75,14 @@ export class SbobetObserverDetailLane {
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#fetchTimeoutMs = Math.min(options.refresh?.timeoutMs ?? 8_000, 30_000);
     this.#refresh = new SbobetCatalogRefresh({ ...options.refresh, now: this.#now,
+      canRequest: () => !options.requestBackoff?.paused() && options.refresh?.canRequest?.() !== false,
       allocateRequestStartSequence: options.allocateRequestStartSequence,
       request: (input) => this.#request(input), onBatch: (batch, signal) => this.#emit(batch, signal),
-      onFailure: () => { this.#failures = increment(this.#failures); } });
+      onFailure: () => {
+        this.#failures = increment(this.#failures);
+        // Per-event retry and physical capacity stay with the detail scheduler.
+        // Missing/invalid detail evidence is not a provider-wide HTTP refusal.
+      } });
   }
 
   /** Supply only a request observed and bound by the existing observer. Structural validity is not completeness proof. */
@@ -178,6 +186,8 @@ export class SbobetObserverDetailLane {
   }
 
   async #request(input: SbobetDetailRequest): Promise<SbobetDetailResponse> {
+    if (this.#options.requestBackoff?.paused()) return failure();
+    const startedAtMs = this.#now();
     const template = this.#template;
     if (template === null || template.generation !== input.generation || !this.#eligible(template, input.signal)) return failure();
     this.#inFlight += 1;
@@ -186,17 +196,23 @@ export class SbobetObserverDetailLane {
       if (contextId === null) return failure();
       const expression = buildSbobetDetailFetchExpression(template.snapshot, input.eventId, {
         timeoutMs: this.#fetchTimeoutMs, marketContainerCompletenessVerified: template.verified });
-      if (expression === null || !this.#eligible(template, input.signal)) return failure();
+      if (expression === null || !this.#eligible(template, input.signal) ||
+        this.#options.requestBackoff?.paused()) return failure();
       this.#requestsStarted = increment(this.#requestsStarted);
       const response = await this.#options.sendCommand(this.#options.tabId, "Runtime.evaluate", {
         expression, contextId, awaitPromise: true, returnByValue: true
       }, template.snapshot.binding.sessionId);
+      const wire = record(response) && record(response.result) && record(response.result.value)
+        ? response.result.value : null;
       // Stamp before any asynchronous document/context verification.
       const observedAtMs = this.#now();
       const receivedMonotonicMs = this.#monotonicNow();
       if (!this.#eligible(template, input.signal) || !Number.isSafeInteger(observedAtMs) || observedAtMs < 0 ||
         !Number.isFinite(receivedMonotonicMs) || receivedMonotonicMs < 0 ||
         await this.#boundContext(template, input.signal) !== contextId || !this.#eligible(template, input.signal)) return failure();
+      if (typeof wire?.status === "number" && wire.status >= 400 && wire.status <= 599) {
+        this.#options.requestBackoff?.fail(wire.status, typeof wire.retryAfterMs === "number" ? wire.retryAfterMs : 0);
+      }
       if (!record(response) || response.exceptionDetails !== undefined || !record(response.result) ||
         !record(response.result.value)) return failure();
       const result = response.result.value;
@@ -208,11 +224,13 @@ export class SbobetObserverDetailLane {
           ? { retryAfterMs: result.retryAfterMs } : {}) };
       const event = result.marketContainerComplete === true ? parseSbobetDetailEvent(result.event, input.eventId) : null;
       if (event === null) return failure();
-      const receipt = { template, contextId, observedAtMs, receivedMonotonicMs };
+      const receipt = { template, contextId, observedAtMs, receivedMonotonicMs, startedAtMs };
       this.#receipts.set(input.signal, receipt);
       input.signal.addEventListener("abort", () => this.#receipts.delete(input.signal), { once: true });
       return { status: 200, marketContainerComplete: true, event };
-    } catch { return failure(); }
+    } catch {
+      return failure();
+    }
     finally { this.#inFlight -= 1; }
   }
 
@@ -225,6 +243,7 @@ export class SbobetObserverDetailLane {
         !this.#eligible(receipt.template, signal)) throw new Error("SBOBET_DETAIL_STALE");
       await this.#options.emit({ ...batch, observedAtMs: receipt.observedAtMs }, signal, receipt.template.snapshot,
         { receivedMonotonicMs: receipt.receivedMonotonicMs });
+      if (this.#eligible(receipt.template, signal)) this.#options.requestBackoff?.succeeded(receipt.startedAtMs);
       if (this.#eligible(receipt.template, signal)) this.#batchesEmitted = increment(this.#batchesEmitted);
     } finally { this.#receipts.delete(signal); }
   }

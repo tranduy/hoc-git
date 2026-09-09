@@ -301,7 +301,8 @@ const RejectMessageSchema = z.strictObject({
     "PAYLOAD_TOO_LARGE",
     "DUPLICATE",
     "OUT_OF_ORDER",
-    "SEQUENCE_GAP"
+    "SEQUENCE_GAP",
+    "NETWORK_BODY_UNAVAILABLE"
   ])
 });
 

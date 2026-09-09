@@ -5,11 +5,12 @@ describe("bootstrapCatalogSources", () => {
   it("asks only the books whose full list arrives once, at page bootstrap", () => {
     expect(bootstrapCatalogSources([
       { lobby: "SABA", tabId: 4 }, { lobby: "CMD", tabId: 5 },
-      { lobby: "IM", tabId: 6 }, { lobby: "BTI", tabId: 7 }, { lobby: "TSPORT", tabId: 8 }
+      { lobby: "IM", tabId: 6 }, { lobby: "BTI", tabId: 7 }, { lobby: "TSPORT", tabId: 8 }, { lobby: "KSPORT", tabId: 9 }
     ])).toEqual([
       { lobby: "SABA", tabId: 4, sourceId: "chrome:SABA:4" },
       { lobby: "IM", tabId: 6, sourceId: "chrome:IM:6" },
-      { lobby: "TSPORT", tabId: 8, sourceId: "chrome:TSPORT:8" }
+      { lobby: "TSPORT", tabId: 8, sourceId: "chrome:TSPORT:8" },
+      { lobby: "KSPORT", tabId: 9, sourceId: "chrome:KSPORT:9" }
     ]);
   });
 

@@ -6,10 +6,24 @@ import type { LiveCatalogResponse } from "../api/catalog.js";
 import { buildComparisonEvents } from "../catalog/comparison.js";
 import type { FixedBaseStakePolicy } from "./fixed-base-stake.js";
 import { TicketPreflightCoordinator } from "./ticket-preflight-coordinator.js";
+import { resultCatalog } from "../catalog/result-opposition.fixture.js";
 
 const nowMs = 10_000;
 const policy: FixedBaseStakePolicy = { currency: "VND", baseStake: "100000", minStake: "30000",
   maxStake: "500000", stakeStep: "1000", balance: "500000" };
+
+it("does not send mixed 1X2/DC partitions through the single-market preflight protocol", async () => {
+  const catalogs = [resultCatalog("SABA", false), resultCatalog("SBOBET", true)].map(catalog => ({ ...catalog,
+    quotes: catalog.quotes.map(quote => ({ ...quote, rawOdds: "3" })) }));
+  const events = buildComparisonEvents(catalogs);
+  expect(events.flatMap(event => event.rows)).toHaveLength(3);
+  const api = new FakeApi();
+  const result = await new TicketPreflightCoordinator(api, () => nowMs).refresh({ events,
+    selectedAccounts: [account("saba-account", "SABA"), account("sbobet-account", "SBOBET")],
+    selectedProviders: new Set(["SABA", "SBOBET"]), policy });
+  expect(api.requests).toHaveLength(0);
+  expect(result.size).toBe(0);
+});
 
 function catalog(provider: "SABA" | "SBOBET", accountId: string,
   odds: readonly [string, string]): LiveCatalogResponse {
@@ -57,6 +71,21 @@ function response(request: ProviderTicketPreflightRequest, provider: ProviderId,
     receivedMonotonicMs: 1, sequence: 1, limitEvidence: constraint, constraint,
     eligible: true, reasons: [], ...overrides };
 }
+
+it.each([0, 1])("does not enumerate market rows with only %i eligible preflight providers", async (count) => {
+  let rowReads = 0;
+  const [event] = buildComparisonEvents([catalog("SABA", "saba-account", ["2.2", "1.7"]),
+    catalog("SBOBET", "sbo-account", ["1.7", "2.2"])]);
+  const monitoredEvent = { ...event!, get rows() { rowReads += 1; return event!.rows; } };
+  const api = new FakeApi();
+  const coordinator = new TicketPreflightCoordinator(api, () => nowMs);
+  const result = await coordinator.refresh({ events: [monitoredEvent],
+    selectedAccounts: count === 0 ? [] : [account("saba-account", "SABA")],
+    selectedProviders: new Set(["SABA", "SBOBET"]), policy });
+  expect(result.size).toBe(0);
+  expect(api.requests).toHaveLength(0);
+  expect(rowReads).toBe(0);
+});
 
 class FakeApi implements ProviderPreflightApiLike {
   readonly requests: ProviderTicketPreflightRequest[] = [];

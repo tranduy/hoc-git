@@ -1,19 +1,23 @@
 import { runInNewContext } from "node:vm";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
-import { afterEach, describe, expect, it } from "vitest";
-import { NetworkObserver } from "./network-observer.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { KSPORT_FOOTBALL_DISCOVERY_EXPRESSION, NetworkObserver } from "./network-observer.js";
+import { SbobetRequestBackoff } from "./sbobet-request-backoff.js";
 
 const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
 const documentBinding = { frameId: "provider", loaderId: "document" };
 const currentLive = "https://be.sb21.net/api/v2/getEvent?agentId=4&timeRange=live&sportType=1_1&sportId=1&oddsStyle=ma";
 const currentToday = "https://be.sb21.net/api/v2/getEvent?agentId=4&timeRange=today&sportType=1_1&sportId=1&oddsStyle=ma";
 const observers: NetworkObserver[] = [];
-afterEach(() => { for (const observer of observers.splice(0)) observer.releaseTab(source.tabId); });
+afterEach(() => { for (const observer of observers.splice(0)) observer.releaseTab(source.tabId); vi.useRealTimers(); });
 
-async function harness(resources: Array<{ name: string; responseStatus?: number }> = []) {
+async function harness(resources: Array<{ name: string; responseStatus?: number }> = [],
+  options: { backoff?: SbobetRequestBackoff; onFetch?: () => void } = {}) {
   const requests: Array<{ url: string; headers: Record<string, string>; method: string }> = [];
   const forwarded: ChromeBridgeEnvelope[] = [];
+  let lastExpression = "";
   const observer = new NetworkObserver({
+    ...(options.backoff === undefined ? {} : { sbobetRequestBackoff: options.backoff }),
     now: () => 10_000, monotonicNow: () => 100,
     forward: async envelope => { forwarded.push(envelope); },
     sendCommand: async (_tab, method, params) => {
@@ -23,12 +27,15 @@ async function harness(resources: Array<{ name: string; responseStatus?: number 
       if (method === "Network.getResponseBody") return { body: "[]", base64Encoded: false };
       if (method === "Target.getTargets") return { targetInfos: [] };
       if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh")) {
+        lastExpression = String(params?.expression);
         const value = await runInNewContext(String(params?.expression), {
-          URL, location: { href: "https://zenandfe.com/sport", origin: "https://zenandfe.com" },
+          URL, AbortController, setTimeout, clearTimeout,
+          location: { href: "https://zenandfe.com/sport", origin: "https://zenandfe.com" },
           document: { querySelectorAll: () => [] },
           performance: { getEntriesByType: () => resources },
           fetch: async (url: string, init: { method: string; headers: Record<string, string> }) => {
             requests.push({ url, method: init.method, headers: { ...init.headers } });
+            options.onFetch?.();
             return { ok: true, status: 200, text: async () => "[]" };
           }
         });
@@ -55,10 +62,58 @@ async function harness(resources: Array<{ name: string; responseStatus?: number 
     await observer.handleEvent(source, "Network.loadingFinished", { requestId: request.requestId });
   };
   return { observer, requests, forwarded, begin, finish,
+    expression: () => lastExpression,
     refresh: () => observer.refreshCatalog(source) };
 }
 
 describe("SBOBET main refresh uses the observed request and its headers together", () => {
+  it("selects regular football after an already active GS football group", () => {
+    const gsClick = vi.fn(), footballClick = vi.fn();
+    const group = (textContent: string, active: boolean, click: () => void) => ({ textContent, click,
+      querySelector: () => null, closest: () => null,
+      classList: { contains: (name: string) => name === "active-type" && active } });
+    const groups = [group("Bóng đá GS LIVE 12", true, gsClick), group("Bóng đá LIVE 42", false, footballClick)];
+    const result = runInNewContext(KSPORT_FOOTBALL_DISCOVERY_EXPRESSION, {
+      document: { querySelectorAll: () => groups } });
+    expect(result.status).toBe("football-selected");
+    expect(gsClick).not.toHaveBeenCalled();
+    expect(footballClick).toHaveBeenCalledOnce();
+  });
+  it.each([{ resources: [] }, { resources: [{ name: "https://zenandfe.com/api/v2/getEvent?timeRange=live", responseStatus: 404 }] }])(
+    "does not invent or reuse a failed catalog endpoint on an auxiliary worker origin: %j", async ({ resources }) => {
+    const h = await harness(); await h.refresh();
+    const fetch = vi.fn(async () => ({ ok: false, status: 404 }));
+    const result = await runInNewContext(h.expression(), { URL, AbortController, setTimeout, clearTimeout,
+      location: { href: "https://zenandfe.com/helper-worker.js" },
+      performance: { getEntriesByType: () => resources }, fetch });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(result.status).toBe("fieldline-ksport-catalog-refresh-template-missing");
+  });
+  it("does not start Today when another lane pauses during Live", async () => {
+    const backoff = new SbobetRequestBackoff({ now: () => 10_000 });
+    const h = await harness([{ name: currentLive }], { backoff, onFetch: () => backoff.fail(429) });
+    await h.refresh();
+    expect(h.requests.map(request => request.url)).toEqual([currentLive]);
+    expect(h.forwarded.filter(item => item.transport === "HTTP_RESPONSE")).toHaveLength(0);
+  });
+  it("aborts a stalled native list before CDP timeout can launch another request", async () => {
+    const h = await harness([{ name: currentLive }]); await h.refresh();
+    vi.useFakeTimers();
+    let aborted = false;
+    const pending = runInNewContext(h.expression(), { URL, AbortController, setTimeout, clearTimeout,
+      location: { href: "https://zenandfe.com/sport", origin: "https://zenandfe.com" },
+      document: { querySelectorAll: () => [] }, performance: { getEntriesByType: () => [{ name: currentLive }] },
+      fetch: (_url: string, init: RequestInit) => {
+        if (!init.signal) return Promise.resolve({ ok: false, status: 503 });
+        return new Promise((_resolve, reject) => init.signal!.addEventListener("abort", () => {
+          aborted = true; reject(new Error("ABORTED"));
+        }, { once: true }));
+      } });
+    await vi.advanceTimersByTimeAsync(12_001);
+    expect(aborted).toBe(true);
+    expect(await pending).toMatchObject({ code: 0 });
+  });
+
   it("keeps a successful observed GET ahead of failed or stale performance resources", async () => {
     const h = await harness([
       { name: "https://be.sb21.net/api/v2/getEvent?timeRange=live&sportId=1", responseStatus: 400 },

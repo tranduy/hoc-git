@@ -1,6 +1,6 @@
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { buildComparisonEvents, createCompetitionLinkMemory, exactTwoWayOutcomeDomain,
-  isFocusedTwoWayTicket, type ComparisonEvent } from "./comparison.js";
+  isFocusedTwoWayTicket, isAvailableTwoWayTicket, type ComparisonEvent } from "./comparison.js";
 import type { ComparisonProjection, ComparisonWorkerCommand, ComparisonWorkerOutput } from "./comparison-worker-protocol.js";
 
 function project(event: ComparisonEvent): ComparisonProjection {
@@ -30,19 +30,23 @@ export class ComparisonWorkerEngine {
         this.#displayCatalogs.set(catalog.accountId, completeDisplayCatalog(catalog));
       }
       for (const accountId of command.staleAccountIds) this.#stale.add(accountId);
-    } else if (command.type === "UPSERT") {
-      this.#catalogs.set(command.catalog.accountId, command.catalog);
-      this.#displayCatalogs.set(command.catalog.accountId,
-        completeDisplayCatalog(command.catalog, this.#displayCatalogs.get(command.catalog.accountId)));
-      if (command.stale) this.#stale.add(command.catalog.accountId);
-      else this.#stale.delete(command.catalog.accountId);
-    } else if (command.type === "SET_STALE") {
-      if (command.stale) this.#stale.add(command.accountId);
-      else this.#stale.delete(command.accountId);
     } else {
-      this.#catalogs.delete(command.accountId);
-      this.#displayCatalogs.delete(command.accountId);
-      this.#stale.delete(command.accountId);
+      for (const change of command.type === "BATCH_DELTA" ? command.changes : [command]) {
+        if (change.type === "UPSERT") {
+          this.#catalogs.set(change.catalog.accountId, change.catalog);
+          this.#displayCatalogs.set(change.catalog.accountId,
+            completeDisplayCatalog(change.catalog, this.#displayCatalogs.get(change.catalog.accountId)));
+          if (change.stale) this.#stale.add(change.catalog.accountId);
+          else this.#stale.delete(change.catalog.accountId);
+        } else if (change.type === "SET_STALE") {
+          if (change.stale) this.#stale.add(change.accountId);
+          else this.#stale.delete(change.accountId);
+        } else {
+          this.#catalogs.delete(change.accountId);
+          this.#displayCatalogs.delete(change.accountId);
+          this.#stale.delete(change.accountId);
+        }
+      }
     }
     const catalogs = [...this.#catalogs.values()];
     const displayCatalogs = [...this.#displayCatalogs.values()];
@@ -102,7 +106,7 @@ function completeDisplayCatalog(catalog: LiveCatalogResponse,
     const currentQuotes = quotesByMarket.get(key) ?? [];
     const expected = exactTwoWayOutcomeDomain(market.marketType, market.scope, market.line);
     if (market.status !== "OPEN" || expected === null ||
-      isFocusedTwoWayTicket({ provider: catalog.provider, market, quotes: currentQuotes })) {
+      isAvailableTwoWayTicket({ provider: catalog.provider, market, quotes: currentQuotes })) {
       markets.push(market);
       quotes.push(...currentQuotes);
       continue;

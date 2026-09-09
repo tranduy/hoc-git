@@ -56,6 +56,7 @@ export interface SbobetRefreshOptions {
   readonly maxEvents?: number;
   readonly onFailure?: (failure: { readonly generation: string; readonly eventId: string;
     readonly reason: string; readonly retryAtMs: number }) => void;
+  readonly canRequest?: () => boolean;
 }
 
 export interface SbobetMoreRefreshResponse {
@@ -192,7 +193,8 @@ export class SbobetCatalogRefresh {
     const generation = this.#generation;
     const lifecycle = this.#lifecycle;
     const now = this.#now();
-    if (generation === null || now < this.#providerRetryAtMs || now < this.#nextRequestAtMs) return;
+    if (generation === null || this.#options.canRequest?.() === false ||
+      now < this.#providerRetryAtMs || now < this.#nextRequestAtMs) return;
     const selected = [...this.#events.values()].filter((state) => this.#dueAt(state, now) <= now &&
       ![...this.#active].some((active) => active.state === state))
       .sort((a, b) => this.#dueAt(a, now) - this.#dueAt(b, now) || a.event.startAtUtcMs - b.event.startAtUtcMs)
@@ -204,6 +206,7 @@ export class SbobetCatalogRefresh {
     let next = 0;
     try {
       while (next < selected.length && !controller.signal.aborted &&
+        this.#options.canRequest?.() !== false &&
         this.#now() >= this.#providerRetryAtMs && lifecycle === this.#lifecycle && !this.#disposed) {
         if (this.#active.size >= this.#maxConcurrent) {
           // A timed-out callback can retain a physical slot after its logical request ends.

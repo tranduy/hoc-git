@@ -27,6 +27,7 @@ export interface SabaCollectorRecord {
   readonly leagueName: string;
   readonly matchId: string;
   readonly timeText: string;
+  readonly providerTimezoneOffsetMinutes?: number | null;
   readonly teamNames: readonly string[];
   readonly groups: readonly SabaCollectorGroup[];
 }
@@ -132,6 +133,17 @@ export interface SabaCollectorTerminalItem {
 export type SabaCollectorDomItem = SabaCollectorCaptureItem | SabaCollectorOwnerCompleteItem |
   SabaCollectorPeriodCompleteItem | SabaCollectorTerminalItem;
 
+export interface SabaMainRosterTerminalItem {
+  readonly kind: "MAIN_ROSTER_TERMINAL";
+  readonly collectorGeneration: string;
+  readonly periods: SabaCollectorTerminalItem["periods"];
+  readonly owners: SabaCollectorTerminalItem["owners"];
+  readonly todayRestoration: SabaCollectorTerminalItem["todayRestoration"];
+  readonly hiddenMarketsComplete: false;
+}
+
+export type SabaMainRosterItem = SabaCollectorCaptureItem | SabaMainRosterTerminalItem;
+
 export type SabaCollectorAdvanceError = "BINDING_CHANGED" | "ADAPTER_ERROR" |
   "ROSTER_UNCONFIRMED" | "OWNER_CAPTURE_UNSAFE" | "TODAY_RESTORE_UNCONFIRMED";
 
@@ -139,6 +151,7 @@ export interface SabaCollectorAdvanceResult {
   readonly status: "INCOMPLETE" | "COMPLETE" | "SAFE_ERROR" | "STALE_BINDING";
   readonly items: readonly SabaCollectorDomItem[];
   readonly candidateItems: readonly SabaCollectorDomItem[];
+  readonly mainRosterItems?: readonly SabaMainRosterItem[];
   readonly error?: SabaCollectorAdvanceError;
 }
 
@@ -146,6 +159,7 @@ export interface SabaHiddenMarketCollectorOptions {
   readonly collectorGeneration: string;
   readonly binding: SabaCollectorBinding;
   readonly adapter: SabaCollectorPageAdapter;
+  readonly publishMainRosterFirst?: boolean;
 }
 
 interface PeriodState {
@@ -231,7 +245,8 @@ function validKickoffDate(value: SabaCollectorKickoffDate): boolean {
 function stableOwnerIdentity(owner: SabaCollectorRosterOwner): string {
   const { record, kickoffDate } = owner;
   return JSON.stringify([owner.ownerMatchId, record.sportId, record.matchId, record.leagueId,
-    record.leagueName, record.timeText, [...record.teamNames], owner.control,
+    record.leagueName, record.timeText, record.providerTimezoneOffsetMinutes === undefined
+      ? 480 : record.providerTimezoneOffsetMinutes, [...record.teamNames], owner.control,
     kickoffDate.kind, kickoffDate.kind === "EXPLICIT" ? kickoffDate.isoDate : null]);
 }
 
@@ -244,6 +259,9 @@ export class SabaHiddenMarketCollector {
   readonly #generation: string;
   readonly #binding: SabaCollectorBinding;
   readonly #adapter: SabaCollectorPageAdapter;
+  readonly #publishMainRosterFirst: boolean;
+  #mainPeriodIndex = 0;
+  #mainRosterItems: readonly SabaMainRosterItem[] | undefined;
   readonly #periods: Record<SabaCollectorPeriod, PeriodState> = {
     TODAY: { roster: null, cursor: 0, complete: false, validatedNoGrowthPending: false },
     EARLY: { roster: null, cursor: 0, complete: false, validatedNoGrowthPending: false }
@@ -262,18 +280,31 @@ export class SabaHiddenMarketCollector {
     this.#generation = options.collectorGeneration;
     this.#binding = { ...options.binding };
     this.#adapter = options.adapter;
+    this.#publishMainRosterFirst = options.publishMainRosterFirst === true;
   }
 
   get currentPeriod(): SabaCollectorPeriod | null {
+    if (this.#publishMainRosterFirst && this.#mainRosterItems === undefined) {
+      return PERIODS[this.#mainPeriodIndex] ?? "TODAY";
+    }
     return this.#terminalEmitted || this.#periodIndex >= PERIODS.length ? null : PERIODS[this.#periodIndex]!;
   }
 
+  get mainRosterComplete(): boolean { return this.#mainRosterItems !== undefined; }
+  get hiddenMarketsComplete(): boolean { return this.#terminalEmitted; }
+  get terminalError(): SabaCollectorAdvanceError | null { return this.#frozen?.error ?? null; }
+
   advance(maxOwnersPerSlice: number,
-    shouldContinue?: () => boolean): Promise<SabaCollectorAdvanceResult> {
+    shouldContinue?: () => boolean,
+    options: { readonly maxPassiveOwnersPerSlice?: number } = {}): Promise<SabaCollectorAdvanceResult> {
     if (!Number.isSafeInteger(maxOwnersPerSlice) || maxOwnersPerSlice <= 0) {
       return Promise.reject(new RangeError("maxOwnersPerSlice must be a positive safe integer"));
     }
-    const operation = this.#tail.then(() => this.#advance(maxOwnersPerSlice, shouldContinue));
+    const passiveLimit = options.maxPassiveOwnersPerSlice;
+    if (passiveLimit !== undefined && (!Number.isSafeInteger(passiveLimit) || passiveLimit < 1 || passiveLimit > 512)) {
+      return Promise.reject(new RangeError("maxPassiveOwnersPerSlice must be an integer between 1 and 512"));
+    }
+    const operation = this.#tail.then(() => this.#advance(maxOwnersPerSlice, shouldContinue, passiveLimit));
     this.#tail = operation.then(() => undefined, () => undefined);
     return operation;
   }
@@ -299,7 +330,8 @@ export class SabaHiddenMarketCollector {
       if (!todayRestored) return false;
     }
 
-    const period = PERIODS[this.#periodIndex];
+    const mainPending = this.#publishMainRosterFirst && this.#mainRosterItems === undefined;
+    const period = PERIODS[mainPending ? this.#mainPeriodIndex : this.#periodIndex];
     if (period !== resumable.period) return false;
     const state = this.#periods[period];
     let retryKey: string;
@@ -309,7 +341,7 @@ export class SabaHiddenMarketCollector {
       retryKey = `${period}\u0000OWNER\u0000${resumable.ownerMatchId}`;
     } else {
       const expectedStage = state.roster === null ? "INITIAL" :
-        state.cursor >= state.roster.length && !state.complete ? "RECONCILIATION" : null;
+        (mainPending || state.cursor >= state.roster.length) && !state.complete ? "RECONCILIATION" : null;
       if (expectedStage !== resumable.stage) return false;
       retryKey = `${period}\u0000ROSTER\u0000${resumable.stage}`;
     }
@@ -323,11 +355,15 @@ export class SabaHiddenMarketCollector {
   }
 
   async #advance(maxOwnersPerSlice: number,
-    shouldContinue?: () => boolean): Promise<SabaCollectorAdvanceResult> {
+    shouldContinue?: () => boolean, maxPassiveOwnersPerSlice?: number): Promise<SabaCollectorAdvanceResult> {
     const emitted: SabaCollectorDomItem[] = [];
     if (this.#terminalEmitted) return this.#result("COMPLETE", emitted);
     if (this.#frozen) return this.#result(this.#frozen.status, emitted, this.#frozen.error);
+    if (this.#publishMainRosterFirst && this.#mainRosterItems === undefined) {
+      return this.#advanceMainRoster(emitted, shouldContinue);
+    }
     let processedOwners = 0;
+    let passiveOwners = 0;
 
     while (this.#periodIndex < PERIODS.length) {
       if (!continuationAllowed(shouldContinue)) return this.#result("INCOMPLETE", emitted);
@@ -406,9 +442,11 @@ export class SabaHiddenMarketCollector {
         continue;
       }
 
-      if (processedOwners >= maxOwnersPerSlice) return this.#result("INCOMPLETE", emitted);
-
       const rosterOwner = state.roster[state.cursor]!;
+      const passive = maxPassiveOwnersPerSlice !== undefined && rosterOwner.control === "NO_ELIGIBLE_CONTROL";
+      if (passive ? passiveOwners >= maxPassiveOwnersPerSlice! : processedOwners >= maxOwnersPerSlice) {
+        return this.#result("INCOMPLETE", emitted);
+      }
       if (rosterOwner.control === "NO_ELIGIBLE_CONTROL") {
         this.#emit({ kind: "OWNER_COMPLETE", collectorGeneration: this.#generation, period,
           ownerMatchId: rosterOwner.ownerMatchId, safeControlOutcome: "NO_ELIGIBLE_CONTROL",
@@ -446,11 +484,84 @@ export class SabaHiddenMarketCollector {
           restored: true }, emitted);
       }
       state.cursor += 1;
-      processedOwners += 1;
+      if (passive) passiveOwners += 1;
+      else processedOwners += 1;
     }
 
     if (!continuationAllowed(shouldContinue)) return this.#result("INCOMPLETE", emitted);
     return this.#finish(emitted);
+  }
+
+  async #advanceMainRoster(emitted: SabaCollectorDomItem[],
+    shouldContinue?: () => boolean): Promise<SabaCollectorAdvanceResult> {
+    // Roster proof is independent of More expansion. Bound public reads per slice,
+    // retain their acquisition clocks, and require a no-growth reconciliation.
+    let reads = 0;
+    while (this.#mainPeriodIndex < PERIODS.length) {
+      if (!continuationAllowed(shouldContinue) || reads >= 4) return this.#result("INCOMPLETE", emitted);
+      const period = PERIODS[this.#mainPeriodIndex]!;
+      const state = this.#periods[period];
+      const initial = state.roster === null;
+      let result: SabaCollectorRosterResult;
+      try {
+        result = await this.#adapter.readRoster(period);
+        reads += 1;
+      } catch (error) {
+        return this.#freeze("SAFE_ERROR", "ADAPTER_ERROR", emitted, resumableRosterReadError(error)
+          ? { kind: "ROSTER_READ", period, stage: initial ? "INITIAL" : "RECONCILIATION" } : null);
+      }
+      if (!sameBinding(result.binding, this.#binding)) {
+        return this.#freeze("STALE_BINDING", "BINDING_CHANGED", emitted);
+      }
+      const ids = result.owners.map(({ ownerMatchId }) => ownerMatchId);
+      if (result.period !== period || result.selectedPrematch !== true ||
+        new Set(ids).size !== ids.length || !result.owners.every(validRosterOwner) ||
+        !validMonotonicSequence(result.owners, this.#lastCapturedMonotonicMs) ||
+        !result.owners.every(({ kickoffDate, record }) => validKickoffDate(kickoffDate) &&
+          typeof record.providerTimezoneOffsetMinutes === "number" &&
+          Number.isInteger(record.providerTimezoneOffsetMinutes) &&
+          Math.abs(record.providerTimezoneOffsetMinutes) <= 840)) {
+        return this.#freeze("SAFE_ERROR", "ROSTER_UNCONFIRMED", emitted);
+      }
+      const currentOwners = new Map(result.owners.map((owner) => [owner.ownerMatchId, owner]));
+      if (state.roster?.some((owner) => {
+        const current = currentOwners.get(owner.ownerMatchId);
+        return current === undefined || stableOwnerIdentity(current) !== stableOwnerIdentity(owner);
+      })) return this.#freeze("SAFE_ERROR", "ROSTER_UNCONFIRMED", emitted);
+      const knownIds = new Set(state.roster?.map(({ ownerMatchId }) => ownerMatchId) ?? []);
+      const additions = result.owners.filter(({ ownerMatchId }) => !knownIds.has(ownerMatchId));
+      state.roster = [...(state.roster ?? []), ...additions];
+      for (const addition of additions) {
+        this.#emit(this.#capture(period, addition.ownerMatchId, "ROSTER", addition), emitted);
+      }
+      if (!initial && additions.length === 0) this.#mainPeriodIndex += 1;
+    }
+    if (!continuationAllowed(shouldContinue)) return this.#result("INCOMPLETE", emitted);
+    let restoration: SabaCollectorTodayRestoreResult;
+    try { restoration = await this.#adapter.restoreToday(); }
+    catch { return this.#freeze("SAFE_ERROR", "ADAPTER_ERROR", emitted); }
+    if (!sameBinding(restoration.binding, this.#binding)) {
+      return this.#freeze("STALE_BINDING", "BINDING_CHANGED", emitted);
+    }
+    const todayIds = this.#periods.TODAY.roster!.map(({ ownerMatchId }) => ownerMatchId);
+    const earlyIds = this.#periods.EARLY.roster!.map(({ ownerMatchId }) => ownerMatchId);
+    if (restoration.selectedPrematch !== true || !sameRosterMembership(restoration.rosterMatchIds, todayIds)) {
+      return this.#freeze("SAFE_ERROR", "TODAY_RESTORE_UNCONFIRMED", emitted);
+    }
+    const collectorGeneration = `${this.#generation}:main`;
+    this.#mainRosterItems = [
+      ...this.#candidateItems.filter((item): item is SabaCollectorCaptureItem =>
+        item.kind === "CAPTURE" && item.captureKind === "ROSTER")
+        .map((item) => ({ ...item, collectorGeneration })),
+      { kind: "MAIN_ROSTER_TERMINAL", collectorGeneration,
+        periods: [{ period: "TODAY", rosterMatchIds: todayIds, rosterCount: todayIds.length },
+          { period: "EARLY", rosterMatchIds: earlyIds, rosterCount: earlyIds.length }],
+        owners: [...todayIds.map((ownerMatchId) => ({ period: "TODAY" as const, ownerMatchId })),
+          ...earlyIds.map((ownerMatchId) => ({ period: "EARLY" as const, ownerMatchId }))],
+        todayRestoration: { selected: true, rosterMatchIds: todayIds, rosterCount: todayIds.length },
+        hiddenMarketsComplete: false }
+    ];
+    return this.#result("INCOMPLETE", emitted);
   }
 
   #capture(period: SabaCollectorPeriod, ownerMatchId: string,
@@ -522,6 +633,7 @@ export class SabaHiddenMarketCollector {
   #result(status: SabaCollectorAdvanceResult["status"], items: readonly SabaCollectorDomItem[],
     error?: SabaCollectorAdvanceError): SabaCollectorAdvanceResult {
     return { status, items: [...items], candidateItems: [...this.#candidateItems],
+      ...(this.#mainRosterItems === undefined ? {} : { mainRosterItems: [...this.#mainRosterItems] }),
       ...(error === undefined ? {} : { error }) };
   }
 }

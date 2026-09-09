@@ -1,7 +1,7 @@
 import { isSupportedFootballTwoWayLine,
   type SbobetCatalogInputRecord, type SbobetCatalogMarket,
   type SbobetCatalogSelection } from "@tool-chenh/adapters";
-import { footballBinaryMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, footballResultMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
 
 type Row = readonly unknown[];
 
@@ -37,6 +37,7 @@ interface BtiSelection {
   readonly name: string;
   readonly side: number;
   readonly line: number;
+  readonly lineWasMissing: boolean;
   readonly malay: string;
   readonly locked: boolean;
 }
@@ -47,13 +48,14 @@ function selection(value: unknown, allowMissingLine = false): BtiSelection | nul
   const id = identity(item?.[0]);
   const side = item?.[7];
   const rawLine = item?.[13];
-  const line = allowMissingLine && (rawLine === null || rawLine === undefined || rawLine === "") ? 0 : rawLine;
+  const lineWasMissing = rawLine === null || rawLine === undefined || rawLine === "";
+  const line = allowMissingLine && lineWasMissing ? 0 : rawLine;
   const malay = text(formats?.[5]);
   if (id === "" || typeof side !== "number" || !Number.isFinite(side) ||
     (!allowMissingLine && side !== 1 && side !== 3) || !halfLine(line) ||
     !/^-?(?:0|1)(?:\.\d+)?$/u.test(malay) || Number(malay) === 0) return null;
   return { id, name: localized(item?.[1]) || localized(item?.[2]) || text(item?.[2]),
-    side, line, malay, locked: item?.[3] === true };
+    side, line, lineWasMissing, malay, locked: item?.[3] === true };
 }
 
 function detailSelection(value: unknown, allowMissingLine = false): BtiSelection | null {
@@ -63,15 +65,27 @@ function detailSelection(value: unknown, allowMissingLine = false): BtiSelection
   const name = localized(item?.[2]) || text(item?.[2]);
   const side = item?.[9];
   const rawLine = item?.[16];
+  const lineWasMissing = rawLine === null || rawLine === undefined || rawLine === "";
   const line = typeof rawLine === "number" && Number.isFinite(rawLine) ? rawLine
-    : allowMissingLine && (rawLine === null || rawLine === undefined || rawLine === "") ? 0 : Number.NaN;
+    : allowMissingLine && lineWasMissing ? 0 : Number.NaN;
   const malay = text(formats?.[5]);
   if (id === "" || name === "" || typeof side !== "number" || !Number.isFinite(side) ||
     typeof line !== "number" || !Number.isFinite(line) || Math.abs(line) > 100 ||
     !/^-?(?:0|1)(?:\.\d+)?$/u.test(malay) || Number(malay) === 0 ||
     item?.[13] === true) return null;
-  return { id, name, side, line, malay, locked: item?.[5] === true };
+  return { id, name, side, lineWasMissing, line, malay, locked: item?.[5] === true };
 }
+
+// Captured BTI QA markets encode the threshold in the native code and label;
+// their YES/NO selections have no numeric line. Keep that threshold distinct.
+const bothHalvesTotals: Readonly<Record<string, {
+  readonly marketType: "FT_BOTH_HALVES_OVER_TOTAL" | "FT_BOTH_HALVES_UNDER_TOTAL";
+  readonly line: string;
+}>> = {
+  QA5373: { marketType: "FT_BOTH_HALVES_OVER_TOTAL", line: "0.5" },
+  QA5374: { marketType: "FT_BOTH_HALVES_OVER_TOTAL", line: "1.5" },
+  QA6024: { marketType: "FT_BOTH_HALVES_UNDER_TOTAL", line: "1.5" }
+};
 
 function normalizedLabel(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/gu, "").replace(/[đð]/giu, "d").toLocaleLowerCase("en")
@@ -96,6 +110,20 @@ function namedTeam(label: string, expectedTeams?: readonly [string, string]): "H
 
 function marketType(code: string, label = "", expectedTeams?: readonly [string, string]): SbobetCatalogMarket["marketType"] | null {
   const evidence = normalizedLabel(label);
+  if (code === "ML0") return "FT_1X2";
+  if (code === "ML1") return "FH_1X2";
+  if (code === "ML2") return "SH_1X2";
+  if (code === "QA61") return "FT_DOUBLE_CHANCE";
+  if (code === "QA145") return "FH_DOUBLE_CHANCE";
+  if (code === "QA4261") return "SH_DOUBLE_CHANCE";
+  if (code === "QA4273" && expectedTeams !== undefined) {
+    const subject = normalizedLabel(label.split(":")[0] ?? "");
+    const home = subject === normalizedLabel(expectedTeams[0]);
+    const away = subject === normalizedLabel(expectedTeams[1]);
+    return home === away ? null : home ? "AWAY_FH_TOTAL" : "HOME_FH_TOTAL";
+  }
+  const bothHalves = bothHalvesTotals[code];
+  if (bothHalves !== undefined) return bothHalves.marketType;
   const exactBinary: Readonly<Record<string, SbobetCatalogMarket["marketType"]>> = {
     QA38: "FT_ODD_EVEN",
     QA262: "FH_ODD_EVEN",
@@ -103,6 +131,7 @@ function marketType(code: string, label = "", expectedTeams?: readonly [string, 
     QA158: "FT_BTTS",
     QA2934: "FH_BTTS",
     QA2936: "SH_BTTS",
+    QA1334: "FT_BOTH_TEAMS_SCORE_BOTH_HALVES",
     QA616: "CORNER_FT_ODD_EVEN",
     QA4409: "SENDING_OFF"
   };
@@ -125,12 +154,11 @@ function marketType(code: string, label = "", expectedTeams?: readonly [string, 
   const exactLine = exactLines[code];
   if (exactLine !== undefined) return exactLine;
 
-  // BTI uses a distinct code for each participant's full-time team total.
-  // The participant in the native label is part of the canonical identity;
-  // an unresolvable or first/second-half team total must stay unmapped.
-  if (code === "OU7") {
+  // OU7/OU6305/OU6306 are full-time goals; OU257 explicitly names first-half
+  // team goals. The native participant label proves HOME/AWAY orientation.
+  if (code === "OU7" || code === "OU6305" || code === "OU6306" || code === "OU257") {
     const team = namedTeam(label, expectedTeams);
-    return team === null ? null : `${team}_FT_TOTAL`;
+    return team === null ? null : code === "OU257" ? `${team}_FH_TOTAL` : `${team}_FT_TOTAL`;
   }
   const exactTeamBinary: Readonly<Record<string, "FT_CLEAN_SHEET" | "FT_WIN_BOTH_HALVES" |
     "FT_WIN_TO_NIL" | "FT_TO_WIN">> = {
@@ -158,6 +186,7 @@ interface BtiNativeMarket {
   readonly values: readonly unknown[];
   readonly detail: boolean;
   readonly closed: boolean;
+  readonly status?: NativeMarketObservation["status"];
   readonly eventClosed?: boolean;
   readonly teamNames?: readonly [string, string];
 }
@@ -193,6 +222,8 @@ function rawNativeMarkets(payload: unknown): readonly BtiNativeMarket[] {
         return [{ eventId, marketId, code, label,
           observationMarketId: marketId || `${eventId}:native:detail:${partition}:${position}`,
           values: row(market[13]) ?? [], detail: true, closed: market[15] === true || market[23] === true,
+          status: market[15] === true || market[23] === true || event[32] === true ? "CLOSED"
+            : market[15] === false && market[23] === false && event[32] === false ? "OPEN" : undefined,
           eventClosed: event[32] === true,
           ...(teamNames === undefined ? {} : { teamNames }) }];
       });
@@ -247,6 +278,23 @@ export function extractBtiNativeMarketIdentities(
   return rawNativeMarkets(payload).map(({ eventId, observationMarketId }) => ({ eventId, marketId: observationMarketId }));
 }
 
+function nativeScalar(value: unknown): string | null {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : text(value) || null;
+}
+
+function nativeSelection(value: unknown, detail: boolean): NonNullable<NativeMarketObservation["nativeSelections"]>[number] {
+  const item = row(value);
+  const formats = row(item?.[detail ? 8 : 6]);
+  const price = nativeScalar(formats?.[5]);
+  const locked = item?.[detail ? 5 : 3];
+  const removed = detail ? item?.[13] : false;
+  const status = removed === true ? "CLOSED" : locked === true ? "SUSPENDED"
+    : locked === false && removed === false ? "OPEN" : undefined;
+  return { selectionId: identity(item?.[0]) || null, outcomeId: nativeScalar(item?.[detail ? 9 : 7]),
+    line: nativeScalar(item?.[detail ? 16 : 13]), price, ...(price === null ? {} : { rawFormat: "MALAY" }),
+    ...(status === undefined ? {} : { status }) };
+}
+
 export function extractBtiNativeMarketObservations(
   payload: unknown,
   observedAtMs: number
@@ -264,59 +312,68 @@ export function extractBtiNativeMarketObservations(
         : localized(item?.[1]) || localized(item?.[2]) || text(item?.[2]);
       return label;
     });
-    const outcomeLabels = labels.filter(Boolean).slice(0, 32);
+    const nativeSelections = native.values.map((value) => nativeSelection(value, native.detail));
+    const outcomeLabels = labels.map((label) => label || "UNNAMED_SELECTION");
     if (native.closed || native.eventClosed) {
-      observations.push({ provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
+      observations.push({ status: native.status, provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
         providerMarketId: native.observationMarketId,
         nativeType: native.code || "UNKNOWN", nativeLabel: native.label || null, nativeScope: null,
-        outcomeLabels, observedAtMs, disposition: "EXCLUDED", reason: native.eventClosed ? "EVENT_CLOSED" : "MARKET_CLOSED" });
+        outcomeLabels, nativeSelections, observedAtMs, disposition: "EXCLUDED", reason: native.eventClosed ? "EVENT_CLOSED" : "MARKET_CLOSED" });
       continue;
     }
     if (normalized.length > 0) {
       if (!resolvedEvents.has(native.eventId)) {
-        observations.push({ provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
+        observations.push({ status: native.status, provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
           providerMarketId: native.observationMarketId, nativeType: native.code || "UNKNOWN",
-          nativeLabel: native.label || null, nativeScope: null, outcomeLabels, observedAtMs,
+          nativeLabel: native.label || null, nativeScope: null, outcomeLabels, nativeSelections, observedAtMs,
           disposition: "EXCLUDED", reason: "EVENT_IDENTITY_UNRESOLVED" });
         continue;
       }
       const accounted = new Set<number>();
       for (const market of normalized) {
         const spec = footballBinaryMarketSpec(market.marketType);
+        const fixedLine = native.code === "QA4273" ? "0.5" : bothHalvesTotals[native.code]?.line;
+        const resultMarket = footballResultMarketSpec(market.marketType) !== null;
         const positions = market.selections.flatMap((selection) => {
           const index = native.values.findIndex((value, position) => {
             if (accounted.has(position)) return false;
-            const candidate = parseSelection(value, spec?.linePolicy === "NONE");
+            const candidate = parseSelection(value, spec?.linePolicy === "NONE" || fixedLine !== undefined || resultMarket);
             if (candidate?.id !== selection.selectionId) return false;
-            const line = market.marketType.endsWith("_AH") && candidate.side === 3 ? -candidate.line : candidate.line;
+            const line = fixedLine ?? (market.marketType.endsWith("_AH") && candidate.side === 3 ? -candidate.line : candidate.line);
             return market.lineText === null || String(line) === market.lineText;
           });
           if (index < 0) return [];
           accounted.add(index);
           return [index];
         });
-        observations.push({ provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
+        observations.push({ status: native.status, provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
           providerMarketId: market.marketId, nativeType: native.code || "UNKNOWN", nativeLabel: native.label || null,
-          nativeScope: spec?.scope ?? null, outcomeLabels: positions.map((position) => labels[position]!).filter(Boolean),
+          nativeScope: spec?.scope ?? footballResultMarketSpec(market.marketType)?.scope ?? null,
+          outcomeLabels: positions.map((position) => labels[position] || "UNNAMED_SELECTION"),
+          nativeSelections: positions.map((position) => nativeSelections[position]!),
           observedAtMs, disposition: "NORMALIZED",
           reason: "CANONICAL_MARKET_MAPPED" });
       }
       if (accounted.size < native.values.length) {
-        observations.push({ provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId,
+        observations.push({ status: native.status, provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId,
           providerMarketId: native.observationMarketId, nativeType: native.code || "UNKNOWN", nativeLabel: native.label || null,
           nativeScope: null, outcomeLabels: labels.filter((_label, index) => !accounted.has(index))
-            .map((label) => label || "UNNAMED_SELECTION").slice(0, 32), observedAtMs, disposition: "EXCLUDED",
+            .map((label) => label || "UNNAMED_SELECTION"),
+          nativeSelections: nativeSelections.filter((_selection, index) => !accounted.has(index)),
+          observedAtMs, disposition: "EXCLUDED",
           reason: "UNPAIRED_OR_INVALID_NATIVE_SELECTIONS" });
       }
       continue;
     }
-    const excluded = excludedNativeReason(native.code, native.label);
-    const mapped = marketType(native.code, native.label, native.teamNames) !== null;
-    observations.push({ provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
+    const type = marketType(native.code, native.label, native.teamNames);
+    const resultMarket = type !== null && footballResultMarketSpec(type) !== null;
+    const excluded = resultMarket ? null : excludedNativeReason(native.code, native.label);
+    const mapped = type !== null;
+    observations.push({ status: native.status, provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
       providerMarketId: native.observationMarketId,
       nativeType: native.code || "UNKNOWN", nativeLabel: native.label || null, nativeScope: null,
-      outcomeLabels, observedAtMs, disposition: excluded !== null || mapped ? "EXCLUDED" : "UNMAPPED",
-      reason: excluded ?? (mapped ? "INVALID_TWO_WAY_SHAPE" : "NATIVE_TYPE_UNMAPPED") });
+      outcomeLabels, nativeSelections, observedAtMs, disposition: excluded !== null || mapped ? "EXCLUDED" : "UNMAPPED",
+      reason: excluded ?? (resultMarket ? "INVALID_RESULT_SHAPE" : mapped ? "INVALID_TWO_WAY_SHAPE" : "NATIVE_TYPE_UNMAPPED") });
   }
   return observations;
 }
@@ -332,58 +389,89 @@ function normalizedMarket(
 ): readonly SbobetCatalogMarket[] {
   const type = marketType(code, label, expectedTeams);
   if (marketId === "" || type === null) return [];
-  const spec = footballBinaryMarketSpec(type);
-  if (spec?.linePolicy === "NONE") {
-    if (values.length !== 2) return [];
+  const resultSpec = footballResultMarketSpec(type);
+  if (resultSpec !== null) {
+    if (values.length === 0 || values.length > 3 || expectedTeams === undefined) return [];
     const candidates = values.map((value) => parseSelection(value, true))
       .filter((item): item is BtiSelection => item !== null);
-    if (candidates.length !== 2 || candidates[0]!.id === candidates[1]!.id) return [];
-    const outcomeFor = (name: string): "ODD" | "EVEN" | "YES" | "NO" | null => {
+    if (new Set(candidates.map(({ id }) => id)).size !== candidates.length ||
+      new Set(candidates.map(({ side }) => side)).size !== candidates.length) return [];
+    const home = normalizedLabel(expectedTeams[0]);
+    const away = normalizedLabel(expectedTeams[1]);
+    const isDoubleChance = resultSpec.family === "DOUBLE_CHANCE";
+    const selections = candidates.sort((a, b) => a.side - b.side).flatMap((item): SbobetCatalogSelection[] => {
+      if (item.line !== 0 || Math.abs(Number(item.malay)) > 1) return [];
+      const name = normalizedLabel(item.name);
+      let outcome: SbobetCatalogSelection["selection"] | undefined;
+      if (isDoubleChance) {
+        // Native Q6/Q7/Q8 identifiers and participant labels agree in the
+        // captured tuples. Their array order differs between responses.
+        if (item.side === 1 && item.id === `${marketId}Q6Q0` &&
+          ["tie", "draw", "hoa"].some(draw => name === `${home} or ${draw}`)) outcome = "HOME_DRAW";
+        if (item.side === 2 && item.id === `${marketId}Q8Q0` && name === `${home} or ${away}`) outcome = "HOME_AWAY";
+        if (item.side === 3 && item.id === `${marketId}Q7Q0` &&
+          ["tie", "draw", "hoa"].some(draw => name === `${draw} or ${away}`)) outcome = "DRAW_AWAY";
+      } else {
+        if (item.side === 1 && name === home) outcome = "HOME";
+        if (item.side === 2 && /^(?:draw|tie|hoa)$/u.test(name)) outcome = "DRAW";
+        if (item.side === 3 && name === away) outcome = "AWAY";
+      }
+      return outcome === undefined ? [] : [{ selectionId: item.id, selection: outcome,
+        priceText: item.malay, locked: item.locked }];
+    });
+    if (selections.length === 0) return [];
+    return [{ marketId, marketType: type, lineText: null,
+      selections }];
+  }
+  const spec = footballBinaryMarketSpec(type);
+  const cleanSheet = code === "QA4273";
+  const fixedLine = cleanSheet ? "0.5" : bothHalvesTotals[code]?.line;
+  if (spec?.linePolicy === "NONE" || fixedLine !== undefined) {
+    if (spec === null) return [];
+    if (values.length === 0 || values.length > 2) return [];
+    const candidates = values.map((value) => parseSelection(value, true))
+      .filter((item): item is BtiSelection => item !== null);
+    if (new Set(candidates.map(item => item.id)).size !== candidates.length) return [];
+    const outcomeFor = (name: string): "ODD" | "EVEN" | "YES" | "NO" | "UNDER" | "OVER" | null => {
       const normalized = normalizedLabel(name);
       if (/^(?:odd|le)$/u.test(normalized)) return "ODD";
       if (/^(?:even|chan)$/u.test(normalized)) return "EVEN";
-      if (/^(?:yes|co)$/u.test(normalized)) return "YES";
-      if (/^(?:no|khong)$/u.test(normalized)) return "NO";
+      if (/^(?:yes|co)$/u.test(normalized)) return cleanSheet ? "UNDER" : "YES";
+      if (/^(?:no|khong)$/u.test(normalized)) return cleanSheet ? "OVER" : "NO";
       return null;
     };
-    const selections = candidates.map((item) => ({
+    const selections = candidates.filter(item => Math.abs(Number(item.malay)) <= 1 &&
+      (fixedLine === undefined || item.lineWasMissing || String(item.line) === fixedLine)).map((item) => ({
       selectionId: item.id,
       selection: outcomeFor(item.name),
       priceText: item.malay,
       locked: item.locked
-    }));
-    if (selections.some(({ selection }) => selection === null) ||
-      new Set(selections.map(({ selection }) => selection)).size !== 2 ||
-      selections.some(({ selection }) => !spec.outcomes.includes(selection!))) return [];
-    return [{ marketId, marketType: type, lineText: null,
+    })).filter(item => item.selection !== null && spec.outcomes.includes(item.selection));
+    if (selections.length === 0 || new Set(selections.map(({ selection }) => selection)).size !== selections.length) return [];
+    return [{ marketId, marketType: type, lineText: fixedLine ?? null,
       selections: selections as SbobetCatalogSelection[] }];
   }
   const isHandicap = type.endsWith("_AH");
   const candidates = values.map((value) => parseSelection(value, false))
     .filter((item): item is BtiSelection => item !== null)
-    .filter((item) => halfLine(item.line) && (item.side === 1 || item.side === 3));
+    .filter((item) => halfLine(item.line) && Math.abs(Number(item.malay)) <= 1 && (item.side === 1 || item.side === 3))
+    .filter((item) => {
+      if (!validateSelectionNames || expectedTeams === undefined) return true;
+      const name = normalizedLabel(item.name);
+      return isHandicap ? sameName(name, normalizedLabel(expectedTeams[item.side === 1 ? 0 : 1]))
+        : item.side === 1 ? /^(?:over|tai|tren)(?:\b|\d)/u.test(name) : /^(?:under|xiu|duoi)(?:\b|\d)/u.test(name);
+    });
   const grouped = new Map<string, BtiSelection[]>();
   for (const item of candidates) {
     const key = isHandicap ? String(item.side === 1 ? item.line : -item.line) : String(item.line);
     grouped.set(key, [...(grouped.get(key) ?? []), item]);
   }
   return [...grouped.entries()].flatMap(([line, pair]) => {
-    const home = pair.find((item) => item.side === 1);
-    const away = pair.find((item) => item.side === 3);
-    if (home === undefined || away === undefined || pair.length !== 2 || home.id === away.id) return [];
-    if (validateSelectionNames && expectedTeams !== undefined) {
-      const homeName = normalizedLabel(home.name);
-      const awayName = normalizedLabel(away.name);
-      if (isHandicap) {
-        const expectedHome = normalizedLabel(expectedTeams[0]);
-        const expectedAway = normalizedLabel(expectedTeams[1]);
-        if (!sameName(homeName, expectedHome) || !sameName(awayName, expectedAway)) return [];
-      } else if (!/^(?:over|tai|tren)(?:\b|\d)/u.test(homeName) ||
-        !/^(?:under|xiu|duoi)(?:\b|\d)/u.test(awayName)) return [];
-    }
-    const selections: SbobetCatalogSelection[] = [home, away].map((item, index) => ({
+    if (pair.length > 2 || new Set(pair.map(item => item.side)).size !== pair.length ||
+      new Set(pair.map(item => item.id)).size !== pair.length) return [];
+    const selections: SbobetCatalogSelection[] = pair.sort((a, b) => a.side - b.side).map((item) => ({
       selectionId: item.id,
-      selection: isHandicap ? (index === 0 ? "HOME" : "AWAY") : (index === 0 ? "OVER" : "UNDER"),
+      selection: isHandicap ? (item.side === 1 ? "HOME" : "AWAY") : (item.side === 1 ? "OVER" : "UNDER"),
       priceText: item.malay,
       locked: item.locked,
       ...(isHandicap ? { lineText: `${item.line >= 0 ? "+" : ""}${item.line}` } : {})

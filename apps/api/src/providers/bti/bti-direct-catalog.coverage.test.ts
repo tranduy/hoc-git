@@ -38,6 +38,20 @@ function payload(markets: unknown[], detail = false, closed = false) {
 const pair = (detail = false) => [selection("o", "Over", 1, 4.5, detail), selection("u", "Under", 3, 4.5, detail)];
 
 describe("BTI native coverage consistency", () => {
+  it("keeps normalized roster evidence aligned when original selection labels are absent", () => {
+    const input = payload([market("unlabeled-total", "OU0", "Full-time total", [
+      selection("over", "", 1, 2.5), selection("under", "", 3, 2.5)
+    ])]);
+    expect(extractBtiCatalogRecords(input)[0]!.markets).toHaveLength(1);
+    expect(extractBtiNativeMarketObservations(input, 100)).toEqual([
+      expect.objectContaining({ disposition: "NORMALIZED", outcomeLabels: ["UNNAMED_SELECTION", "UNNAMED_SELECTION"],
+        nativeSelections: [
+          { selectionId: "over", outcomeId: "1", line: "2.5", price: "0.80", rawFormat: "MALAY" },
+          { selectionId: "under", outcomeId: "3", line: "2.5", price: "0.80", rawFormat: "MALAY" }
+        ] })
+    ]);
+  });
+
   it.each([false, true].flatMap((detail) => [
     ["HC0", "FT_AH"], ["HC39", "FT_AH"], ["HC1", "FH_AH"], ["HC2", "SH_AH"],
     ["HC619", "CORNER_FT_AH"], ["HC14", "CORNER_FH_AH"], ["HC10", "CARD_FT_AH"]]
@@ -104,10 +118,10 @@ describe("BTI native coverage consistency", () => {
       selection("over", "Over 2.75", 1, 2.75, isDetail), selection("under", "Under 2.75", 3, 2.75, isDetail),
       selection("orphan", "Over 3.5", 1, 3.5, isDetail)
     ], isDetail)], isDetail);
-    expect(extractBtiCatalogRecords(input)[0]!.markets.map((item) => item.marketId)).toEqual(["mixed:2.75"]);
+    expect(extractBtiCatalogRecords(input)[0]!.markets.map((item) => item.marketId)).toEqual(["mixed:2.75", "mixed:3.5"]);
     expect(extractBtiNativeMarketObservations(input, 100)).toEqual([
       expect.objectContaining({ providerMarketId: "mixed:2.75", disposition: "NORMALIZED", outcomeLabels: ["Over 2.75", "Under 2.75"] }),
-      expect.objectContaining({ providerMarketId: "mixed", disposition: "EXCLUDED", reason: "UNPAIRED_OR_INVALID_NATIVE_SELECTIONS",
+      expect.objectContaining({ providerMarketId: "mixed:3.5", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED",
         outcomeLabels: ["Over 3.5"] })
     ]);
   });
@@ -138,8 +152,13 @@ describe("BTI native coverage consistency", () => {
     if (field === "market") native[0] = Number.MAX_SAFE_INTEGER + 1;
     else values[0]![0] = Number.MAX_SAFE_INTEGER + 1;
     const input = payload([native], true);
-    expect(extractBtiCatalogRecords(input)[0]!.markets).toEqual([]);
-    expect(extractBtiNativeMarketObservations(input, 100).every((item) => item.disposition !== "NORMALIZED")).toBe(true);
+    if (field === "market") {
+      expect(extractBtiCatalogRecords(input)[0]!.markets).toEqual([]);
+      expect(extractBtiNativeMarketObservations(input, 100).every((item) => item.disposition !== "NORMALIZED")).toBe(true);
+    } else {
+      expect(extractBtiCatalogRecords(input)[0]!.markets[0]?.selections.map(item => item.selectionId)).toEqual([String(values[1]![0])]);
+      expect(extractBtiNativeMarketObservations(input, 100).map(item => item.disposition)).toEqual(["NORMALIZED", "EXCLUDED"]);
+    }
   });
 
   it("accounts for malformed unnamed leftovers without assigning them to the valid pair", () => {

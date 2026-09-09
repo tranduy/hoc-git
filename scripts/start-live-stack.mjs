@@ -10,7 +10,7 @@ import { createChildSupervisor } from "./child-respawn.mjs";
 import { resolveStackEntries } from "./stack-paths.mjs";
 import { cleanupStaleStack, createManagedStackState, removeStackState, writeStackState } from "./stack-state.mjs";
 import { ensureChromeBridgeKey } from "./chrome-bridge-key.mjs";
-import { resolveApiNodeArgs, resolveLiveStackEnvironment } from "./live-stack-config.mjs";
+import { resolveApiNodeArgs, resolveLiveStackEnvironment, resolveWebMode } from "./live-stack-config.mjs";
 import { enforceToolResourceRetention } from "./resource-retention.mjs";
 import { resolveLocalAppData } from "./local-app-data.mjs";
 import { computeBuildIdentity } from "./five-provider-coordinator.mjs";
@@ -102,6 +102,7 @@ export async function startLiveStack(options = {}) {
   purgeStackAuthority(environmentSource);
   if (environmentSource !== process.env) purgeStackAuthority(process.env);
   const { apiEntry, viteEntry, webRoot } = resolveStackEntries(repositoryRoot);
+  const webMode = resolveWebMode(environmentSource);
   const children = [];
   const supervisors = [];
   let respawnArmed = false;
@@ -192,7 +193,8 @@ export async function startLiveStack(options = {}) {
   }, 15 * 60 * 1_000);
   retentionTimer.unref?.();
 
-  for (const entry of [apiEntry, viteEntry]) {
+  for (const entry of [apiEntry, viteEntry,
+    ...(webMode === "preview" ? [resolve(webRoot, "dist", "index.html")] : [])]) {
     if (!dependencies.existsSync(entry)) throw new Error(`Missing built entrypoint: ${entry}`);
   }
   const buildIdentity = await dependencies.computeBuildIdentity(repositoryRoot);
@@ -215,9 +217,10 @@ export async function startLiveStack(options = {}) {
       windowsHide: true
     });
   const spawnWeb = () => dependencies.spawn(process.execPath,
-    [viteEntry, "--host", host, "--port", String(webPort), "--strictPort"], {
+    [viteEntry, ...(webMode === "preview" ? ["preview"] : []),
+      "--host", host, "--port", String(webPort), "--strictPort"], {
       cwd: webRoot,
-      env: childEnvironment,
+      env: webMode === "preview" ? { ...childEnvironment, NODE_ENV: "production" } : childEnvironment,
       stdio: "inherit",
       windowsHide: true
     });

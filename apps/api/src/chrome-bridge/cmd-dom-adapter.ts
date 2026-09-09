@@ -27,6 +27,7 @@ const recordSchema = z.strictObject({
   leagueName: text(160),
   matchId: text(128),
   timeText: text(80),
+  providerTimezoneOffsetMinutes: z.number().int().min(-840).max(840).nullable().optional(),
   teamNames: z.array(text(160)).min(2).max(4),
   groups: z.array(groupSchema).max(128)
 });

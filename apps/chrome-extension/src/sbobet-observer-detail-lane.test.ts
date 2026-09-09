@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { sbobetDetailTemplateFromObserved, type SbobetDetailBinding } from "./sbobet-detail-protocol.js";
 import type { SbobetDetailBatch } from "./sbobet-catalog-refresh.js";
 import { SbobetObserverDetailLane, type SbobetObserverDetailLaneOptions } from "./sbobet-observer-detail-lane.js";
+import { SbobetRequestBackoff } from "./sbobet-request-backoff.js";
 
 const binding: SbobetDetailBinding = { sourceGeneration: 4, tabGeneration: 8,
   executionOrigin: "https://be.sb21.net", frameId: "frame-1", loaderId: "loader-1", sessionId: "session-1" };
@@ -59,6 +60,55 @@ function setup(overrides: Partial<SbobetObserverDetailLaneOptions> = {}) {
 }
 
 describe("SBOBET observer detail lane", () => {
+  it.each(["generation", "document", "disposed"])("does not share a held refusal after %s retirement", async kind => {
+    const requestBackoff = new SbobetRequestBackoff({ now: () => 1_000 });
+    const held = deferred<unknown>();
+    let bindingCurrent = true;
+    const sendCommand = vi.fn(() => held.promise);
+    const h = setup({ requestBackoff, sendCommand, isBindingCurrent: () => bindingCurrent }); h.arm();
+    const work = h.lane.tick();
+    await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledTimes(1));
+    if (kind === "generation") h.setGeneration("epoch-5");
+    if (kind === "document") bindingCurrent = false;
+    if (kind === "disposed") h.lane.dispose();
+    held.resolve({ result: { value: { status: 403, retryAfterMs: 900_000 } } });
+    await work;
+    expect(requestBackoff.paused()).toBe(false);
+    expect(h.emit).not.toHaveBeenCalled();
+  });
+  it("shares provider refusal with other lanes and keeps admission paused after epoch changes", async () => {
+    const requestBackoff = new SbobetRequestBackoff({ now: () => 1_000 });
+    const h = setup({ requestBackoff }); h.arm(); h.setStatus(403);
+    await h.lane.tick();
+    expect(requestBackoff.retryInMs()).toBe(900_000);
+    h.setGeneration("epoch-5"); h.arm(); await h.lane.tick();
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks shared admission again after resolving the document binding", async () => {
+    const requestBackoff = new SbobetRequestBackoff({ now: () => 1_000 });
+    const h = setup({ requestBackoff, isBindingCurrent: async () => { requestBackoff.fail(429); return true; } });
+    h.arm(); await h.lane.tick();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["malformed", "transport", "cdp"])("keeps a local %s failure in the detail lane", async kind => {
+    const requestBackoff = new SbobetRequestBackoff({ now: () => 1_000 });
+    const h = setup({ requestBackoff, ...(kind === "cdp" ? {
+      sendCommand: async () => { throw new Error("CONTEXT_RETIRED"); }
+    } : {}) });
+    h.arm();
+    if (kind === "malformed") h.setBody({ "8": "202", "7": { "31": null } });
+    if (kind === "transport") h.setStatus(0);
+    await h.lane.tick();
+    expect(requestBackoff.paused()).toBe(false);
+    expect(h.emit).not.toHaveBeenCalled();
+    expect(h.lane.diagnostics().failures).toBe(1);
+    h.setClock(1_099); await h.lane.tick();
+    expect(h.lane.diagnostics().requestsStarted).toBe(1);
+    h.setClock(1_100); await h.lane.tick();
+    expect(h.lane.diagnostics().requestsStarted).toBe(2);
+  });
   it("performs zero CDP calls without both an observed template and its explicit completeness proof", async () => {
     const h = setup();
     h.lane.setRoster({ generation: "epoch-4", events: roster() });
@@ -171,6 +221,22 @@ describe("SBOBET observer detail lane", () => {
     pending.resolve({ result: { value: { status: 200, marketContainerComplete: true, event: native() } } });
     await vi.advanceTimersByTimeAsync(0); expect(h.emit).not.toHaveBeenCalled();
     await h.lane.tick(); expect(sendCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains the timed-out physical slot without pausing the main feed", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<unknown>();
+    const requestBackoff = new SbobetRequestBackoff();
+    const h = setup({ requestBackoff, sendCommand: () => pending.promise }); h.arm();
+    const tick = h.lane.tick(); await vi.advanceTimersByTimeAsync(201); await tick;
+    expect(h.lane.diagnostics().inFlight).toBe(1);
+    expect(requestBackoff.paused()).toBe(false);
+    h.setClock(2_000); await h.lane.tick();
+    expect(h.lane.diagnostics().requestsStarted).toBe(1);
+    pending.resolve({ result: { value: { status: 200, marketContainerComplete: true, event: native() } } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.emit).not.toHaveBeenCalled();
+    expect(requestBackoff.paused()).toBe(false);
   });
 
   it.each(["rotate", "revoke", "dispose"])("prevents late emission after %s while CDP is in flight", async (action) => {

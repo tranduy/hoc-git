@@ -12,14 +12,92 @@ const record: SbobetCatalogInputRecord = {
   }, {
     marketId: "5388803:FT_1X2", marketType: "FT_1X2", lineText: null,
     selections: [
-      { selectionId: "53888030010000000h", selection: "HOME", priceText: "1.03", locked: false },
-      { selectionId: "53888030010000000d", selection: "DRAW", priceText: "10.25", locked: false },
-      { selectionId: "53888030010000000a", selection: "AWAY", priceText: "60.00", locked: false }
+      { selectionId: "53888030010000000h", selection: "HOME", priceText: "1.03", priceFormat: "DECIMAL", locked: false },
+      { selectionId: "53888030010000000d", selection: "DRAW", priceText: "10.25", priceFormat: "DECIMAL", locked: false },
+      { selectionId: "53888030010000000a", selection: "AWAY", priceText: "60.00", priceFormat: "DECIMAL", locked: false }
     ]
   }]
 };
 
+describe("individually proven football result selections", () => {
+  it("retains independently proven binary prices, requiring signed orientation for a lone handicap", () => {
+    const single = (marketType: "FT_TOTAL" | "FT_BTTS" | "FT_AH", selection: "OVER" | "YES" | "AWAY", signed = false) =>
+      normalizeSbobetCatalog([{ ...record, markets: [{ marketId: "partial-binary", marketType, lineText: "2.5",
+        ...(signed ? { handicapLineFormat: "SIGNED" as const } : {}), selections: [{ selectionId: "native", selection,
+          lineText: "-0.5", priceText: "0.9", locked: false }] }] }], { observedAtMs: 1, receivedMonotonicMs: 2, sequence: 3 });
+    expect(single("FT_TOTAL", "OVER").quotes).toEqual([expect.objectContaining({ selection: "OVER", line: "2.5", rawOdds: "0.9" })]);
+    expect(single("FT_BTTS", "YES").quotes).toEqual([expect.objectContaining({ selection: "YES", line: null })]);
+    expect(single("FT_AH", "AWAY", true).quotes).toEqual([expect.objectContaining({ selection: "AWAY", line: "0.5" })]);
+    expect(single("FT_AH", "AWAY").markets).toEqual([]);
+  });
+  it.each([
+    ["FT_DOUBLE_CHANCE", "FULL_TIME", "HOME_DRAW"],
+    ["FH_DOUBLE_CHANCE", "FIRST_HALF", "DRAW_AWAY"],
+    ["SH_DOUBLE_CHANCE", "SECOND_HALF", "HOME_AWAY"],
+    ["SH_1X2", "SECOND_HALF", "DRAW"],
+    ["FT_1X2", "FULL_TIME", "AWAY"]
+  ] as const)("retains a single native %s leg with exact scope and odds", (marketType, scope, selection) => {
+    const result = normalizeSbobetCatalog([{ ...record, markets: [{ marketId: "native-result", marketType,
+      lineText: null, selections: [{ selectionId: "native-leg", selection, priceText: "2.37",
+        priceFormat: "DECIMAL", locked: false }] }] }], { observedAtMs: 1, receivedMonotonicMs: 2, sequence: 3 });
+    expect(result.diagnostics).toEqual([]);
+    expect(result.markets).toEqual([expect.objectContaining({ providerMarketId: "native-result", marketType, scope, line: null })]);
+    expect(result.quotes).toEqual([expect.objectContaining({ providerSelectionId: "native-leg", selection,
+      rawOdds: "2.37", rawFormat: "DECIMAL", scope, line: null, status: "OPEN" })]);
+  });
+
+  it("rejects duplicate or foreign result selections and empty offers", () => {
+    const leg = { selectionId: "one", selection: "HOME_DRAW", priceText: "1.5", priceFormat: "DECIMAL", locked: false } as const;
+    for (const selections of [[], [leg, { ...leg, selectionId: "two" }], [{ ...leg, selection: "HOME" as const }]]) {
+      const result = normalizeSbobetCatalog([{ ...record, markets: [{ marketId: "dc", marketType: "FT_DOUBLE_CHANCE", lineText: null,
+        selections }] }], { observedAtMs: 1, receivedMonotonicMs: 2, sequence: 3 });
+      expect(result.markets).toEqual([]);
+      expect(result.quotes).toEqual([]);
+    }
+  });
+
+  it("keeps each result leg's suspension without closing its independent neighbor", () => {
+    const result = normalizeSbobetCatalog([{ ...record, markets: [{ marketId: "partial-dc", marketType: "FT_DOUBLE_CHANCE",
+      lineText: null, selections: [
+        { selectionId: "hd", selection: "HOME_DRAW", priceText: "1.5", priceFormat: "DECIMAL", locked: true },
+        { selectionId: "ha", selection: "HOME_AWAY", priceText: "1.7", priceFormat: "DECIMAL", locked: false }
+      ] }] }], { observedAtMs: 1, receivedMonotonicMs: 2, sequence: 3 });
+    expect(result.markets[0]?.status).toBe("OPEN");
+    expect(result.quotes.map((quote) => [quote.selection, quote.status])).toEqual([["HOME_DRAW", "SUSPENDED"], ["HOME_AWAY", "OPEN"]]);
+  });
+});
+
 describe("normalizeSbobetCatalog", () => {
+  it.each(["SBOBET", "APSPORT", "BTI", "IM"] as const)(
+    "does not invent equivalent half-unit lines from ambiguous %s split totals or handicaps", (provider) => {
+      const input: SbobetCatalogInputRecord = { ...record, markets: [record.markets[0]!, {
+        ...record.markets[0]!, marketId: "wide-split-total", lineText: "2/3"
+      }, {
+        marketId: "wide-split-handicap", marketType: "FT_AH", lineText: null, selections: [
+          { selectionId: "split-home", selection: "HOME", priceText: "0.80", locked: false, lineText: "0/1" },
+          { selectionId: "split-away", selection: "AWAY", priceText: "-0.90", locked: false, lineText: null }
+        ]
+      }] };
+
+      const result = normalizeSbobetCatalog([input], { provider, observedAtMs: 1,
+        receivedMonotonicMs: 1, sequence: 1 });
+
+      expect(result.markets.map((market) => [market.providerMarketId, market.line]))
+        .toEqual([["5388803:FT_TOTAL:2.5", "2.5"]]);
+      expect(result.events).toHaveLength(1);
+      expect(result.quotes).toHaveLength(2);
+    });
+
+  it.each(["-1", "/1", "1/", "2-3", "0.25/0.75"])(
+    "rejects malformed or non-equivalent total line %s", (lineText) => {
+      const result = normalizeSbobetCatalog([{ ...record,
+        markets: [{ ...record.markets[0]!, lineText }] }],
+      { observedAtMs: 1, receivedMonotonicMs: 1, sequence: 1 });
+
+      expect(result.markets).toEqual([]);
+      expect(result.quotes).toEqual([]);
+    });
+
   it("retains the real BTI Faroe Islands fixture whose competition contains đảo", () => {
     const result = normalizeSbobetCatalog([{ ...record, eventId: "884501820779810816",
       leagueName: "Giải ngoại hạng - Quần đảo Faroe", teamNames: ["AB Argir", "B68 Toftir"],
@@ -54,20 +132,43 @@ describe("normalizeSbobetCatalog", () => {
     expect(result.diagnostics).toEqual(["SBOBET_CATALOG_EVENT_UNSUPPORTED"]);
   });
 
-  it("normalizes exact live two-way totals and excludes 1X2", () => {
+  it("normalizes exact live totals and retains all three 1X2 outcomes", () => {
     const result = normalizeSbobetCatalog([record], { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 20, sequence: 3 });
     expect(result.diagnostics).toEqual([]);
     expect(result.events[0]).toMatchObject({
       provider: "SBOBET", participantA: "Kristiansund BK", participantB: "Molde", isLive: true,
       liveState: { period: "2H", scoreHome: 2, scoreAway: 0, clockMs: 2_220_000 }
     });
-    expect(result.markets.map((market) => [market.marketType, market.line])).toEqual([["FT_TOTAL", "2.5"]]);
+    expect(result.markets.map((market) => [market.marketType, market.line])).toEqual([["FT_TOTAL", "2.5"], ["FT_1X2", null]]);
     expect(result.quotes.map((quote) => [quote.selection, quote.rawOdds, quote.rawFormat])).toEqual([
-      ["OVER", "-0.85", "MALAY"], ["UNDER", "0.69", "MALAY"]
+      ["OVER", "-0.85", "MALAY"], ["UNDER", "0.69", "MALAY"],
+      ["HOME", "1.03", "DECIMAL"], ["DRAW", "10.25", "DECIMAL"], ["AWAY", "60.00", "DECIMAL"]
     ]);
   });
 
-  it("normalizes SBOBET split total syntax and fails closed on incomplete outcomes", () => {
+  it.each(["FT_1X2", "FH_1X2"] as const)("retains independently suspended %s outcomes and exact settlement scope", (marketType) => {
+    const threeWay = record.markets[1]!;
+    const result = normalizeSbobetCatalog([{ ...record, markets: [{ ...threeWay, marketType,
+      selections: threeWay.selections.map((selection) => ({ ...selection, locked: selection.selection === "DRAW" })) }] }],
+    { observedAtMs: 1, receivedMonotonicMs: 1, sequence: 1 });
+    expect(result.markets).toEqual([expect.objectContaining({ marketType, line: null, status: "OPEN",
+      scope: marketType === "FT_1X2" ? "FULL_TIME" : "FIRST_HALF",
+      settlementProfile: marketType === "FT_1X2" ? "football-regulation-including-added-time" : "football-first-half-including-added-time" })]);
+    expect(result.quotes).toHaveLength(3);
+    expect(result.quotes.map((quote) => [quote.selection, quote.status])).toEqual([["HOME", "OPEN"], ["DRAW", "SUSPENDED"], ["AWAY", "OPEN"]]);
+  });
+
+  it.each(["duplicate-outcome", "duplicate-id", "invalid-price"])("rejects malformed 1X2: %s", (variant) => {
+    const threeWay = record.markets[1]!;
+    const selections = threeWay.selections.map((selection) => ({ ...selection }));
+    if (variant === "duplicate-outcome") selections[2]!.selection = "HOME";
+    if (variant === "duplicate-id") selections[2]!.selectionId = selections[0]!.selectionId;
+    if (variant === "invalid-price") selections[2]!.priceText = "0";
+    expect(normalizeSbobetCatalog([{ ...record, markets: [{ ...threeWay, selections }] }],
+      { observedAtMs: 1, receivedMonotonicMs: 1, sequence: 1 }).markets).toEqual([]);
+  });
+
+  it("normalizes SBOBET split total syntax and retains a proven incomplete outcome", () => {
     const split: SbobetCatalogInputRecord = {
       ...record,
       markets: [{ ...record.markets[0]!, lineText: "2.5-3", marketId: "split" }]
@@ -78,7 +179,7 @@ describe("normalizeSbobetCatalog", () => {
       markets: [{ ...split.markets[0]!, selections: [split.markets[0]!.selections[0]!] }]
     };
     expect(normalizeSbobetCatalog([incomplete], { observedAtMs: 1, receivedMonotonicMs: 1, sequence: 1 }))
-      .toEqual({ events: [], markets: [], quotes: [], diagnostics: ["SBOBET_CATALOG_RECORD_REJECTED"] });
+      .toMatchObject({ quotes: [expect.objectContaining({ selection: "OVER", line: "2.75" })], diagnostics: [] });
   });
 
   it("excludes explicit E Soccer competitions", () => {
@@ -220,7 +321,7 @@ describe("normalizeSbobetCatalog", () => {
     expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_TOTAL", line: "3" })]);
   });
 
-  it("publishes only non-virtual full-time two-way quarter-unit lines", () => {
+  it("retains non-virtual canonical 1X2 and quarter-unit line inventory", () => {
     const mixed = { ...record, markets: [
       record.markets[0]!,
       record.markets[1]!,
@@ -240,7 +341,7 @@ describe("normalizeSbobetCatalog", () => {
     const result = normalizeSbobetCatalog([mixed], { observedAtMs: 1_788_000_000_000,
       receivedMonotonicMs: 20, sequence: 3 });
     expect(result.markets.map(({ marketType, line }) => [marketType, line])).toEqual([
-      ["FT_TOTAL", "2.5"], ["FT_TOTAL", "3"], ["FT_AH", "-0.25"], ["FH_TOTAL", "1.5"]
+      ["FT_TOTAL", "2.5"], ["FT_1X2", null], ["FT_TOTAL", "3"], ["FT_AH", "-0.25"], ["FH_TOTAL", "1.5"]
     ]);
 
     const virtual = normalizeSbobetCatalog([{ ...mixed, leagueName: "Virtual Football", teamNames: ["A (V)", "B (V)"] }],

@@ -1,11 +1,15 @@
-import { buildImCatalogRefreshExpression } from "./im-catalog-refresh.js";
+import { buildImSafeCatalogRefreshExpression } from "./im-safe-catalog-refresh.js";
+import { imRefreshDiagnostic, type ImRefreshEvaluationDiagnostic } from "./im-refresh-diagnostic.js";
 import { cmdNativeRequestMetadata, CMD_MORE_PATH } from "./cmd-native-request.js";
-import { buildCmdNativeCatalogRefreshExpression } from "./cmd-native-catalog-refresh.js";
+import { buildCmdNativeCatalogRefreshExpression, formatCmdNativeCatalogDiagnostic } from "./cmd-native-catalog-refresh.js";
+import { SbobetRequestBackoff, SBOBET_RETRY_AFTER_EXPRESSION, sbobetRetryAfterMs } from "./sbobet-request-backoff.js";
 import type { ChromeBridgeEnvelope, ChromeBridgeHttpMethod, ChromeLobbyId } from "@tool-chenh/contracts";
 import { splitUtf8Text, utf8ByteLength } from "./utf8-length.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
 import { SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION } from "./saba-catalog-discovery.js";
+import { SabaRecoveryBudget } from "./saba-recovery-budget.js";
+import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
 import { runSabaNavigationProbe, SABA_NAVIGATION_PROBE_READ_EXPRESSION,
   type SabaProbeEvaluationFailure } from "./saba-navigation-probe.js";
 import { SabaHiddenMarketCollector, type SabaCollectorBinding,
@@ -28,6 +32,7 @@ import { buildCmdHiddenMarketProbeExpression, summarizeCmdHiddenProtocolFrame,
   type CmdHiddenDomProbeResult, type CmdHiddenProtocolEvidence } from "./cmd-hidden-market-probe.js";
 import { CmdRecoveryState, type CmdRecoveryDocument, type CmdRecoverySession } from "./cmd-recovery-state.js";
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
+import { PendingSourceWork, retainedPayloadBytes } from "./pending-source-work.js";
 import { isFullKsportPartitionSnapshot,
   KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
 import { summarizeSbobetDiscovery, formatSbobetDiscovery,
@@ -53,6 +58,8 @@ import { BTI_PAGE_HEALTH_EXPRESSION, parseBtiPageHealthProbe,
   type BtiPageHealth } from "./bti-page-health.js";
 
 const NETWORK_CHUNK_BODY_BYTES = 110_000;
+const PENDING_FORWARD_BYTES_PER_SOURCE = 32 * 1024 * 1024;
+const PENDING_FORWARD_ENTRIES_PER_SOURCE = 1_024;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
 const KSPORT_BASELINE_FALLBACK_DELAY_MS = 2_000;
 const PREEXISTING_SOCKET_GRACE_MS = 8_000;
@@ -81,6 +88,7 @@ const SBO_ORPHAN_FRAME_RETRY_MS = 60_000;
 // partition is retried well inside the feed's baseline lease.
 const KSPORT_BASELINE_REQUEST_RETRY_MS = 45_000;
 const KSPORT_NATIVE_HTTP_RECOVERY_RETRY_MS = 8_000;
+const KSPORT_HTTP_REPLAY_RETRY_MS = 30_000;
 const KSPORT_BASELINE_LEASE_RENEW_MS = 75_000;
 // Re-selecting a period tab drives the provider's own SPA. Measured 35 toggles
 // in eight minutes before this cap, which is churn on a page the operator is
@@ -100,6 +108,7 @@ const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
 // Start the lightweight DOM renewal and socket recovery with enough margin for
 // CDP evaluation and bridge delivery instead of waiting until the book is stale.
 const SABA_SOCKET_SILENCE_RECOVERY_MS = 20_000;
+const SABA_SOCKET_DOCUMENT_LEASE_MS = 30_000;
 const SABA_HEALTHY_BASELINE_RECOVERY_DELAYS_MS = [40_000, 80_000, 160_000, 300_000] as const;
 const SABA_HARD_SOCKET_RECOVERY_AFTER_MS = 45_000;
 const SABA_HARD_SOCKET_RECOVERY_COOLDOWN_MS = 5 * 60_000;
@@ -264,9 +273,13 @@ function isSabaChildTargetUrl(rawUrl: string, targetType: string): boolean {
 }
 
 export interface NetworkObserverDependencies {
+  readonly sabaRecoveryBudget?: SabaRecoveryBudget;
+  readonly sbobetRequestBackoff?: SbobetRequestBackoff;
   readonly sendCommand: (tabId: number, method: string, params?: Record<string, unknown>,
     sessionId?: string) => Promise<unknown>;
   readonly forward: (envelope: ChromeBridgeEnvelope) => Promise<void>;
+  readonly maxPendingForwardBytes?: number;
+  readonly onForwardOverflow?: (source: ObservedSource) => void | Promise<void>;
   readonly now?: () => number;
   readonly monotonicNow?: () => number;
   readonly recoverImBaseline?: (source: ObservedSource) => Promise<void>;
@@ -370,6 +383,8 @@ interface SbobetEventRequestTemplate {
 }
 
 interface SbobetEventRequestCapture extends SbobetEventRequestTemplate {
+  readonly nativeRecovery?: true;
+  readonly nativeRecoveryTargetId?: string;
   readonly sourceGeneration: number;
   readonly bridgeGeneration: number;
 }
@@ -383,6 +398,7 @@ interface SbobetMoreTemplate {
 }
 
 interface SbobetActiveMore {
+  readonly startedAtMs: number;
   readonly owner: SbobetMoreOwner;
   readonly template: SbobetMoreTemplate;
   readonly request: SbobetMoreRequest;
@@ -719,7 +735,7 @@ export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
     '[data-sport-id], [data-sport], button, [role="button"], [class*="sport-type"], [class*="sport-menu"]'
   )].filter((candidate) => {
     const text = normalize(candidate.textContent);
-    return text.length > 0 && text.length < 80 && /^(?:bong da|football)(?:\\s|live|\\d|$)/u.test(text);
+    return text.length > 0 && text.length < 80 && /^(?:bong da|football)(?:\\s*(?:live|truc tiep))?\\s*\\d*$/u.test(text);
   });
   const controls = [...new Set([...primary, ...fallback])]
     .filter((control) => !control.classList.contains('sport-odds-boosts') &&
@@ -727,7 +743,7 @@ export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
   const control = controls.find((candidate) => {
     const header = candidate.querySelector('.sport-type-item-header') || candidate;
     const text = normalize(header.textContent);
-    return /^(?:bong da|football)(?:\\s|live|\\d|$)/u.test(text) && !/^(?:bong da|football)\\s*2(?:\\s|$)/u.test(text);
+    return /^(?:bong da|football)(?:\\s*(?:live|truc tiep))?\\s*\\d*$/u.test(text) && !/^(?:bong da|football)\\s*2(?:\\s|$)/u.test(text);
   });
   if (!control) return { status: 'football-control-not-found' };
   if (control.classList.contains('active-type')) return { status: 'football-active' };
@@ -755,7 +771,7 @@ function ksportTimeTabExpression(labels: readonly string[], force = false): stri
       const header = candidate.querySelector('.sport-type-item-header') || candidate;
       const text = normalize(header.textContent);
       return !candidate.closest('.sport-odds-boosts, [class*="odds-boost"]') &&
-        /^(?:bong da|football)(?:\\s|live|\\d|$)/u.test(text) && !/^(?:bong da|football)\\s*2(?:\\s|$)/u.test(text);
+        /^(?:bong da|football)(?:\\s*(?:live|truc tiep))?\\s*\\d*$/u.test(text) && !/^(?:bong da|football)\\s*2(?:\\s|$)/u.test(text);
     });
     const groups = document.querySelectorAll('.sport-type-group-item').length;
     const scopes = document.querySelectorAll('.header-tab-content').length;
@@ -807,8 +823,10 @@ interface KsportNativeHttpPart {
 }
 
 interface KsportNativeHttpCapture {
+  publication?: Promise<void>;
   readonly sourceGeneration: number;
   readonly tabGeneration: number;
+  readonly bridgeGeneration: number;
   expiresAtMs: number;
   readonly parts: Map<"live" | "today", KsportNativeHttpPart>;
 }
@@ -1023,6 +1041,7 @@ export const CMD_FULL_BASELINE_EXPRESSION = `(() => {
   if (location.hostname !== 'cgnew.fts368.com' ||
     location.pathname !== '/Member/BetOdds/HdpDouble.aspx') return 'frame-unavailable';
   if (typeof globalThis.LoadFullRunningTodayData !== 'function') return 'function-unavailable';
+  if (Date.now() < (document.documentElement.__fieldlineCmdNativeCatalogV1?.retryAtMs ?? 0)) return 'busy';
   if (globalThis.RunningDataUpdating === true || globalThis.TodayDataUpdating === true) return 'busy';
   globalThis.LoadFullRunningTodayData();
   return 'baseline-requested';
@@ -1044,6 +1063,7 @@ interface SabaCollectorPageFailure {
 }
 
 export class NetworkObserver {
+  readonly #sbobetRequestBackoff: SbobetRequestBackoff;
   readonly #sendCommand: NetworkObserverDependencies["sendCommand"];
   readonly #forward: NetworkObserverDependencies["forward"];
   readonly #now: () => number;
@@ -1076,7 +1096,10 @@ export class NetworkObserver {
   #nextPublicEpochOrdinal = 0;
   readonly #activeWorkGenerations = new Map<string, number>();
   readonly #streamOrdinals = new Map<string, number>();
-  readonly #emissionTails = new Map<string, Promise<void>>();
+  readonly #emissions: PendingSourceWork;
+  readonly #maxPendingForwardBytes: number;
+  readonly #onForwardOverflow: NetworkObserverDependencies["onForwardOverflow"];
+  readonly #forwardOverflowSources = new Set<string>();
   readonly #webSockets = new Map<string, ObservedWebSocketState>();
   readonly #ignoredWebSockets = new Map<string, string>();
   readonly #socketBaselineRecoveryAtMs = new Map<string, number>();
@@ -1098,6 +1121,7 @@ export class NetworkObserver {
   readonly #lastTabLabels = new Map<string, string>();
   readonly #lastCatalogShape = new Map<string, string>();
   readonly #lastCaptureExit = new Map<string, string>();
+  readonly #cmdRecoveryOutcomes = new Map<string, { readonly code: string; readonly observedAtMs: number }>();
   // Only a target reported as an iframe is observed, while the attach counter
   // counts them all: two events with none observed says the type is not what is
   // expected, and nothing said what it was.
@@ -1127,6 +1151,7 @@ export class NetworkObserver {
   readonly #cmdLastBodies = new Map<string, string>();
   readonly #cmdLastSentAtMs = new Map<string, number>();
   readonly #cmdFullBaselineAtMs = new Map<string, number>();
+  readonly #cmdRequestRetryAtMs = new Map<string, number>();
   readonly #cmdSnapshotHosts = new Map<string, string>();
   readonly #domSnapshotOrdinals = new Map<string, number>();
   readonly #httpSnapshots = new Map<string, ReplayableHttpSnapshot[]>();
@@ -1159,7 +1184,8 @@ export class NetworkObserver {
   readonly #sabaUsableDomCatalogAtMs = new Map<string, number>();
   readonly #sabaResponsiveFootballDomAtMs = new Map<string, number>();
   readonly #sabaSnapshotLoads = new Set<string>();
-  readonly #sabaSnapshotStorageTails = new Map<string, Promise<void>>();
+  readonly #sabaSnapshotStorage = new Map<string, { saveGeneration: number | null;
+    clearPending: boolean; operation: Promise<void> }>();
   readonly #sabaSnapshotSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #sabaSnapshotLastSavedAtMs = new Map<string, number>();
   readonly #sabaDocumentMarkers = new Map<string, string>();
@@ -1167,7 +1193,7 @@ export class NetworkObserver {
   // can await its document marker. Without a per-source tail, the next frame
   // can overtake it and reach the API first, manufacturing provider revision
   // gaps from an otherwise healthy Socket.IO stream.
-  readonly #sabaWebSocketEventTails = new Map<string, Promise<void>>();
+  readonly #sabaWebSocketEvents: PendingSourceWork;
   readonly #cmdCapturesInFlight = new Map<string, { readonly token: symbol;
     readonly operation: Promise<void>; readonly startedAtMs: number }>();
   readonly #imLastRecoveryAtMs = new Map<string, number>();
@@ -1176,6 +1202,13 @@ export class NetworkObserver {
   readonly #cmdRecoveries = new Map<string, ActiveCmdRecovery>();
   readonly #cmdRecoveryRequests = new Map<string, symbol>();
   readonly #sabaDomPolls = new Map<string, Promise<void>>();
+  readonly #sabaBootstrapRefreshes = new Map<string, { readonly sourceGeneration: number;
+    readonly tabGeneration: number; readonly operation: Promise<void> }>();
+  readonly #sabaRecoveryBudget: SabaRecoveryBudget;
+  // Physical CDP queries outlive their logical timeout and even a source epoch.
+  readonly #sabaHeapQueries = new Set<Promise<unknown>>();
+  readonly #sabaRecoveryCursors = new Map<string, { readonly sourceGeneration: number; readonly index: number }>();
+  #sabaRecoveryGroupOrdinal = 0;
   readonly #sabaPublicDiscoveryAtMs = new Map<string, number>();
   readonly #sabaPublicDiscoveries = new Map<string, { readonly token: symbol;
     readonly operation: Promise<void> }>();
@@ -1200,6 +1233,7 @@ export class NetworkObserver {
     inFlight: boolean;
     restorePending: boolean;
     finished: boolean;
+    mainRosterPublished: boolean;
     publicMarketSampleKinds: Set<string>;
   }>();
   readonly #sabaDomObserversCleaned = new Set<string>();
@@ -1233,16 +1267,24 @@ export class NetworkObserver {
   readonly #ksportHttpFallbackModes = new Map<string, KsportHttpFallbackMode>();
   readonly #ksportHttpPairReceipts = new Map<string, { readonly sourceGeneration: number;
     readonly tabGeneration: number; readonly bridgeGeneration: number; readonly observedAtMs: number }>();
+  readonly #ksportHttpPairPublications = new Map<string, { readonly ordinal: number;
+    readonly cutoff: number; readonly frameKey: string; readonly documentKey: string;
+    readonly sourceGeneration: number; readonly tabGeneration: number; readonly bridgeGeneration: number;
+    readonly parts: Map<string, number>; committed: boolean }>();
   readonly #ksportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #ksportNativeHttpCaptures = new Map<string, KsportNativeHttpCapture>();
   readonly #ksportNativeHttpRecoveryAtMs = new Map<string, number>();
+  readonly #ksportHttpReplayCooldowns = new Map<string, { readonly retryAtMs: number;
+    readonly sourceGeneration: number; readonly tabGeneration: number; readonly bridgeGeneration: number }>();
+  readonly #ksportNativeHttpRecoveries = new Map<string, symbol>();
+  #sbobetLastFailureLane = "UNKNOWN";
   readonly #ksportBaselineLeaseAtMs = new Map<string, number>();
   readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sboOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #apsportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #apsportNavigationStartedAtMs = new Map<string, number>();
   readonly #apsportRosterOnlyRefreshes = new Map<string, Promise<void>>();
-  readonly #sbobetEventRequests = new Map<string, SbobetEventRequestTemplate>();
+  readonly #sbobetEventRequests = new Map<string, SbobetEventRequestCapture>();
   readonly #sbobetDiscoveryRequests = new Map<string, { readonly sourceId: string; readonly url: string;
     readonly bridgeGeneration: number; readonly sourceGeneration: number; readonly tabGeneration: number;
     readonly detailHeaders?: Readonly<Record<string, string>> }>();
@@ -1258,12 +1300,20 @@ export class NetworkObserver {
   constructor(dependencies: NetworkObserverDependencies) {
     this.#sendCommand = dependencies.sendCommand;
     this.#forward = dependencies.forward;
+    this.#maxPendingForwardBytes = dependencies.maxPendingForwardBytes ?? PENDING_FORWARD_BYTES_PER_SOURCE;
+    this.#onForwardOverflow = dependencies.onForwardOverflow;
+    const pendingBounds = { maxBytes: this.#maxPendingForwardBytes,
+      maxEntries: PENDING_FORWARD_ENTRIES_PER_SOURCE };
+    this.#emissions = new PendingSourceWork(pendingBounds);
+    this.#sabaWebSocketEvents = new PendingSourceWork(pendingBounds);
     this.#now = dependencies.now ?? Date.now;
+    this.#sbobetRequestBackoff = dependencies.sbobetRequestBackoff ?? new SbobetRequestBackoff({ now: this.#now });
     this.#monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.#recoverImBaseline = dependencies.recoverImBaseline ?? null;
     this.#frameCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 2_500;
     // More navigation can span rendering work; ordinary captures keep their fast timeout.
     this.#sabaProbeCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 10_000;
+    this.#sabaRecoveryBudget = dependencies.sabaRecoveryBudget ?? new SabaRecoveryBudget({ now: this.#now });
     this.#sabaCollectorEarlyBatchSize = dependencies.sabaCollectorEarlyBatchSize ?? 4;
     this.#btiCatalogRefreshTimeoutMs = dependencies.btiCatalogRefreshTimeoutMs ?? 60_000;
     this.#cmdRecoveryMaxAttempts = dependencies.cmdRecoveryMaxAttempts ?? CMD_RECOVERY_MAX_ATTEMPTS;
@@ -1460,9 +1510,16 @@ export class NetworkObserver {
   }
 
   hasUsableSabaCatalog(sourceId: string): boolean {
-    if (this.hasCompleteSabaBaseline(sourceId)) return true;
+    if (this.#hasFreshSabaSocketBaseline(sourceId)) return true;
     const capturedAtMs = this.#sabaUsableDomCatalogAtMs.get(sourceId);
-    return capturedAtMs !== undefined && this.#now() - capturedAtMs <= SABA_USABLE_DOM_LEASE_MS;
+    return capturedAtMs !== undefined && this.#now() >= capturedAtMs &&
+      this.#now() - capturedAtMs <= SABA_USABLE_DOM_LEASE_MS;
+  }
+
+  #hasFreshSabaSocketBaseline(sourceId: string): boolean {
+    const frameAtMs = this.#sabaCatalogFrameAtMs.get(sourceId);
+    const ageMs = frameAtMs === undefined ? Number.POSITIVE_INFINITY : this.#now() - frameAtMs;
+    return ageMs >= 0 && ageMs <= SABA_SOCKET_DOCUMENT_LEASE_MS && this.hasCompleteSabaBaseline(sourceId);
   }
 
   hasResponsiveSabaDocument(sourceId: string): boolean {
@@ -1497,6 +1554,7 @@ export class NetworkObserver {
 
   async #ensureCompleteKsportBaseline(source: ObservedSource): Promise<boolean> {
     if (source.lobby !== "KSPORT") return false;
+    if (await this.sbobetRequestsPaused()) return false;
     if (this.#hasFreshKsportHttpPair(source)) return true;
     const activeStream = this.#activeKsportStreams.get(source.sourceId);
     const frames = activeStream === undefined
@@ -1576,6 +1634,11 @@ export class NetworkObserver {
    *  nothing that could be seen from outside. */
   #noteCaptureExit(source: ObservedSource, reason: string): void {
     this.#lastCaptureExit.set(source.sourceId, reason);
+    if (source.lobby === "CMD" && reason.startsWith("CMD_RECOVERY_") &&
+      !["CMD_RECOVERY_QUEUED", "CMD_RECOVERY_RESOLVE_TARGET", "CMD_RECOVERY_PAGE_BUSY",
+        "CMD_RECOVERY_BASELINE_REQUESTED"].includes(reason)) {
+      this.#cmdRecoveryOutcomes.set(source.sourceId, { code: reason, observedAtMs: this.#now() });
+    }
   }
 
   /** Reads what the APSPORT capture sees at each gate. Its expression returns
@@ -1600,6 +1663,9 @@ export class NetworkObserver {
 
   async #selectTimeTab(source: ObservedSource, expression: string,
     isCurrent: () => boolean = () => true): Promise<boolean> {
+    if (source.lobby === "KSPORT" && await this.sbobetRequestsPaused()) return false;
+    const ownsSelection = isCurrent;
+    isCurrent = () => ownsSelection() && (source.lobby !== "KSPORT" || !this.#sbobetRequestBackoff.paused());
     if (!isCurrent()) return false;
     this.#armKsportNativeHttpCapture(source);
     const diagnostic = this.#wsAttachDiagnostic(source);
@@ -1676,13 +1742,14 @@ export class NetworkObserver {
   #armKsportNativeHttpCapture(source: ObservedSource): void {
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const existing = this.#ksportNativeHttpCaptures.get(source.sourceId);
     if (existing !== undefined && existing.sourceGeneration === sourceGeneration &&
-      existing.tabGeneration === tabGeneration) {
+      existing.tabGeneration === tabGeneration && existing.bridgeGeneration === bridgeGeneration) {
       existing.expiresAtMs = this.#now() + KSPORT_NATIVE_HTTP_CAPTURE_WINDOW_MS;
       return;
     }
-    this.#ksportNativeHttpCaptures.set(source.sourceId, { sourceGeneration, tabGeneration,
+    this.#ksportNativeHttpCaptures.set(source.sourceId, { sourceGeneration, tabGeneration, bridgeGeneration,
       expiresAtMs: this.#now() + KSPORT_NATIVE_HTTP_CAPTURE_WINDOW_MS,
       parts: new Map<"live" | "today", KsportNativeHttpPart>() });
   }
@@ -1690,9 +1757,10 @@ export class NetworkObserver {
   #currentKsportNativeHttpCapture(source: ObservedSource): KsportNativeHttpCapture | null {
     const capture = this.#ksportNativeHttpCaptures.get(source.sourceId);
     if (capture === undefined) return null;
-    if (capture.expiresAtMs < this.#now() ||
+    if (capture.publication === undefined && capture.expiresAtMs < this.#now() ||
       !this.#isSourceGenerationCurrent(source.sourceId, capture.sourceGeneration) ||
-      this.#captureTabGeneration(source.tabId) !== capture.tabGeneration) {
+      this.#captureTabGeneration(source.tabId) !== capture.tabGeneration ||
+      this.#captureBridgeGeneration(source.sourceId) !== capture.bridgeGeneration) {
       this.#ksportNativeHttpCaptures.delete(source.sourceId);
       return null;
     }
@@ -1859,6 +1927,43 @@ export class NetworkObserver {
     return (this.#cmdFullBaselineAtMs.get(sourceId) ?? Number.NEGATIVE_INFINITY) >= startedAtMs;
   }
 
+  cmdRequestsPaused(sourceId: string): boolean {
+    return this.#now() < (this.#cmdRequestRetryAtMs.get(sourceId) ?? 0);
+  }
+
+  async sbobetRequestsPaused(): Promise<boolean> {
+    await this.#sbobetRequestBackoff.ready();
+    return this.#sbobetRequestBackoff.paused();
+  }
+
+  canRequestSbobet(): boolean { return !this.#sbobetRequestBackoff.paused(); }
+
+  async probeCmdRequestsPaused(source: ObservedSource): Promise<boolean> {
+    if (source.lobby !== "CMD") return false;
+    const generation = this.#sourceGenerations.get(source.sourceId) ?? 0;
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    try {
+      const tree = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Page.getFrameTree"));
+      const frames = collectCmdRecoveryFrameDescriptors(tree);
+      const frame = frames.length === 1 ? frames[0] : undefined;
+      const binding = frame === undefined ? undefined : this.#mainWorldContexts.get(source.tabId)?.get(frame.id);
+      if (frame !== undefined && binding !== undefined) {
+        const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression: `Math.max(0, (document.documentElement.__fieldlineCmdNativeCatalogV1?.retryAtMs ?? 0) - Date.now())`,
+          contextId: binding.contextId, returnByValue: true
+        }, binding.sessionId));
+        const delayMs = nestedValue(evaluation, "result", "value");
+        if ((this.#sourceGenerations.get(source.sourceId) ?? 0) === generation &&
+          this.#captureTabGeneration(source.tabId) === tabGeneration &&
+          this.#mainWorldContexts.get(source.tabId)?.get(frame.id) === binding &&
+          typeof delayMs === "number" && Number.isSafeInteger(delayMs) && delayMs >= 0) {
+          this.#cmdRequestRetryAtMs.set(source.sourceId, this.#now() + delayMs);
+        }
+      }
+    } catch { /* Preserve known backoff; a missing renderer still uses normal bounded recovery. */ }
+    return this.cmdRequestsPaused(source.sourceId);
+  }
+
   hasCompleteImBaselineSince(sourceId: string, sinceMs: number): boolean {
     const proof = this.#imReadyBaselines.get(sourceId);
     return Number.isFinite(sinceMs) && proof !== undefined && proof.observedAtMs >= sinceMs && proof.isCurrent();
@@ -1890,12 +1995,14 @@ export class NetworkObserver {
     this.#sourceGenerations.set(sourceId, generation);
     this.#workScheduler.clear(sourceId);
     this.#sequences.delete(sourceId);
-    this.#emissionTails.delete(sourceId);
+    this.#clearPendingForwarding(sourceId);
+    this.#forwardOverflowSources.delete(sourceId);
     this.#streamOrdinals.delete(sourceId);
     this.#cmdSnapshots.delete(sourceId);
     this.#cmdLastBodies.delete(sourceId);
     this.#cmdLastSentAtMs.delete(sourceId);
     this.#cmdFullBaselineAtMs.delete(sourceId);
+    this.#cmdRecoveryOutcomes.delete(sourceId);
     this.#cmdSnapshotHosts.delete(sourceId);
     this.#domSnapshotOrdinals.delete(sourceId);
     this.#httpSnapshots.delete(sourceId);
@@ -1962,6 +2069,7 @@ export class NetworkObserver {
     this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
     this.#ksportNativeHttpCaptures.delete(sourceId);
     this.#ksportNativeHttpRecoveryAtMs.delete(sourceId);
+    this.#ksportHttpReplayCooldowns.delete(sourceId);
     this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
     this.#sboOrphanFrameRecoveryAtMs.delete(sourceId);
     this.#cmdCapturesInFlight.delete(sourceId);
@@ -2036,7 +2144,8 @@ export class NetworkObserver {
     this.#publicSourceEpochOrdinal(sourceId, sourceGeneration);
     this.#bridgeEpochGenerations.set(sourceId, this.#captureBridgeGeneration(sourceId) + 1);
     this.#sequences.delete(sourceId);
-    this.#emissionTails.delete(sourceId);
+    this.#clearPendingForwarding(sourceId);
+    this.#forwardOverflowSources.delete(sourceId);
     this.#retireSabaHiddenCollector(sourceId);
     return `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(sourceId, sourceGeneration)}`;
   }
@@ -2073,6 +2182,7 @@ export class NetworkObserver {
       if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
     }
     for (const sourceId of sourceIds) {
+      this.#clearPendingForwarding(sourceId);
       this.#retireSabaHiddenCollector(sourceId);
       this.#clearSbobetDetail(sourceId);
       this.#clearSbobetDiscovery(sourceId);
@@ -2087,6 +2197,7 @@ export class NetworkObserver {
   }
 
   releaseTab(tabId: number): void {
+    this.#cmdRequestRetryAtMs.delete(`chrome:CMD:${tabId}`);
     this.#tabGenerations.set(tabId, this.#captureTabGeneration(tabId) + 1);
     this.#startedTabs.delete(tabId);
     this.#mainWorldContexts.delete(tabId);
@@ -2094,6 +2205,8 @@ export class NetworkObserver {
     const remember = (sourceId: string): void => {
       if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
     };
+    for (const sourceId of this.#emissions.keys()) remember(sourceId);
+    for (const sourceId of this.#sabaWebSocketEvents.keys()) remember(sourceId);
     for (const sourceId of this.#sequences.keys()) remember(sourceId);
     for (const sourceId of this.#cmdSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#httpSnapshots.keys()) remember(sourceId);
@@ -2125,6 +2238,7 @@ export class NetworkObserver {
       this.#cmdLastBodies.delete(sourceId);
       this.#cmdLastSentAtMs.delete(sourceId);
       this.#cmdFullBaselineAtMs.delete(sourceId);
+      this.#cmdRecoveryOutcomes.delete(sourceId);
       this.#cmdSnapshotHosts.delete(sourceId);
       this.#domSnapshotOrdinals.delete(sourceId);
       this.#httpSnapshots.delete(sourceId);
@@ -2173,6 +2287,7 @@ export class NetworkObserver {
       this.#ksportBaselineRequests.delete(sourceId);
       this.#ksportNativeHttpCaptures.delete(sourceId);
       this.#ksportNativeHttpRecoveryAtMs.delete(sourceId);
+      this.#ksportHttpReplayCooldowns.delete(sourceId);
       this.#ksportCatalogFrameAtMs.delete(sourceId);
       this.#ksportBaselineAttemptAtMs.delete(sourceId);
       this.#ksportPeriodSelectionAtMs.delete(sourceId);
@@ -2270,6 +2385,26 @@ export class NetworkObserver {
     });
   }
 
+  bootstrapSabaCatalog(source: ObservedSource): Promise<void> {
+    if (source.lobby !== "SABA") return Promise.resolve();
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const existing = this.#sabaBootstrapRefreshes.get(source.sourceId);
+    if (existing?.sourceGeneration === sourceGeneration && existing.tabGeneration === tabGeneration) {
+      return existing.operation;
+    }
+    const operation = retrySabaBootstrapRefresh(() => this.refreshCatalog(source),
+      () => this.hasCompleteSabaBaseline(source.sourceId), undefined,
+      () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+        this.#captureTabGeneration(source.tabId) === tabGeneration).finally(() => {
+      if (this.#sabaBootstrapRefreshes.get(source.sourceId)?.operation === operation) {
+        this.#sabaBootstrapRefreshes.delete(source.sourceId);
+      }
+    });
+    this.#sabaBootstrapRefreshes.set(source.sourceId, { sourceGeneration, tabGeneration, operation });
+    return operation;
+  }
+
   async pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
     if (source.lobby !== "SABA" || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
     if (this.#sabaNavigationProbeTasks.has(source.sourceId)) return;
@@ -2314,8 +2449,9 @@ export class NetworkObserver {
     // Arm a real timer before any CDP evaluation, bridge publication or heap
     // scan. A crashed renderer can leave the very first DOM poll pending, so a
     // watchdog that only runs on a later poll can never fire.
-    if (!hasCompleteBaseline) {
-      this.#scheduleSabaHardSocketRecovery(source, baselineMissingAgeMs, silenceNowMs);
+    if (!hasCompleteBaseline || silenceAgeMs > SABA_SOCKET_SILENCE_RECOVERY_MS) {
+      this.#scheduleSabaHardSocketRecovery(source,
+        hasCompleteBaseline ? silenceAgeMs : baselineMissingAgeMs, silenceNowMs);
     }
     if (hasCompleteBaseline && silenceAgeMs <= SABA_SOCKET_SILENCE_RECOVERY_MS) {
       this.#enqueueSabaNavigationProbe(source, hostname, sourceGeneration, tabGeneration);
@@ -2704,9 +2840,9 @@ export class NetworkObserver {
             pendingPeriodFailure = null;
             return diagnostic;
           },
-          adapter, inFlight: false, restorePending: false, finished: false,
+          adapter, inFlight: false, restorePending: false, finished: false, mainRosterPublished: false,
           publicMarketSampleKinds: new Set(),
-          collector: new SabaHiddenMarketCollector({ binding, adapter,
+          collector: new SabaHiddenMarketCollector({ binding, adapter, publishMainRosterFirst: true,
             collectorGeneration: `saba:collector:${source.tabId}:${this.#now()}` }) });
       } else if (isRecord(diagnostic) && diagnostic.mutated === false) {
         // Read-only discovery has no terminal coverage result to retain. A
@@ -2752,14 +2888,18 @@ export class NetworkObserver {
     const sliceDeadlineMs = this.#monotonicNow() + 5_000;
     const maxOwners = state.collector.currentPeriod === "EARLY" ? this.#sabaCollectorEarlyBatchSize : 1;
     const result = state.finished || restorePendingAtEntry ? null : await state.collector.advance(
-      maxOwners, () => current() && this.#monotonicNow() < sliceDeadlineMs);
+      maxOwners, () => current() && this.#monotonicNow() < sliceDeadlineMs &&
+        (!state.collector.mainRosterComplete || state.mainRosterPublished),
+      { maxPassiveOwnersPerSlice: 512 });
     if (!current()) return false;
     const collectionErrorCode = state.lastErrorCode();
     const collectionFailure = state.takePageFailure();
     // A captured Today owner has already proved two stable closed reads on the
     // bound document. Do not repeat that whole-page proof; no-control and Early
     // slices still need independent Today restoration before publication.
-    let restored = result?.status === "COMPLETE" || (result?.status === "INCOMPLETE" &&
+    let restored = result?.status === "COMPLETE" ||
+      (!state.mainRosterPublished && result?.mainRosterItems !== undefined && result.status === "INCOMPLETE") ||
+      (result?.status === "INCOMPLETE" &&
       result.items.some((item) => item.kind === "OWNER_COMPLETE" && item.period === "TODAY" &&
         item.restored === true && item.safeControlOutcome !== "NO_ELIGIBLE_CONTROL"));
     let retryRestored = false;
@@ -2776,6 +2916,28 @@ export class NetworkObserver {
       } catch { restored = false; }
     }
     if (!current()) return false;
+    if (restored && !state.mainRosterPublished && result?.mainRosterItems !== undefined) {
+      const terminal = result.mainRosterItems.find((item) => item.kind === "MAIN_ROSTER_TERMINAL");
+      if (terminal === undefined) return false;
+      const observedAtMs = this.#now();
+      const receivedMonotonicMs = this.#monotonicNow();
+      const chunks = chunkCmdSnapshot(result.mainRosterItems, terminal.collectorGeneration, undefined, {
+        sweepId: terminal.collectorGeneration, sweepComplete: true,
+        sweepFrameKey: state.binding.frameKey, sweepDocumentKey: state.binding.documentKey
+      });
+      let forwarded = 0;
+      for (const chunk of chunks) {
+        if (!current()) return false;
+        await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT",
+          { encoding: "UTF8", body: JSON.stringify(chunk) }, {
+            observedAtMs, receivedMonotonicMs, sourceGeneration: state.sourceGeneration,
+            tabGeneration: state.tabGeneration, beforeForward: () => current(),
+            onForwarded: () => { forwarded += 1; }
+          });
+      }
+      if (!current() || forwarded !== chunks.length) return false;
+      state.mainRosterPublished = true;
+    }
     const restorationFailure = state.takePageFailure();
     if (restored) this.#sabaCollectorDomBlocks.delete(source.sourceId);
     if (restored) {
@@ -3218,6 +3380,7 @@ export class NetworkObserver {
    */
   async maintainKsportFeed(source: ObservedSource, options: { readonly quietMs?: number;
     readonly recoveryIntervalMs?: number } = {}): Promise<void> {
+    if (source.lobby === "KSPORT" && await this.sbobetRequestsPaused()) return;
     // Start independently of periodic DOM work and the price-forwarding tail.
     if (source.lobby === "KSPORT") void this.#sbobetDetailStates.get(source.sourceId)?.lane.tick().catch(() => undefined);
     if (source.lobby === "KSPORT") {
@@ -3241,6 +3404,7 @@ export class NetworkObserver {
   async #maintainKsportFeed(source: ObservedSource, options: { readonly quietMs?: number;
     readonly recoveryIntervalMs?: number } = {}): Promise<void> {
     if (source.lobby !== "KSPORT") return;
+    if (this.#sbobetRequestBackoff.paused()) return;
     const quietMs = options.quietMs ?? KSPORT_QUIET_WINDOW_MS;
     const nowMs = this.#now();
     const activeStream = this.#activeKsportStreams.get(source.sourceId);
@@ -3261,6 +3425,7 @@ export class NetworkObserver {
       const attemptDue = previousAttemptAtMs === undefined ||
         nowMs - previousAttemptAtMs >= KSPORT_HTTP_RECONCILE_INTERVAL_MS;
       const refreshed = await this.#refreshKsportHttpFallback(source, nowMs, fallbackMode);
+      if (this.#sbobetRequestBackoff.paused()) return;
       if (!ownsFallback()) return;
       // A stale template can fail after establishing fallback authority. Reuse
       // native reacquisition only after a due HTTP attempt, not a cadence skip.
@@ -3298,6 +3463,7 @@ export class NetworkObserver {
     }
     const refreshed = await this.#refreshKsportHttpFallback(source, nowMs);
     if (!refreshed) await this.#requestFreshKsportNativeHttpBaseline(source);
+    if (this.#sbobetRequestBackoff.paused()) return;
     await this.#requestFreshSocketBaseline(source, isKsportCatalogSocket);
   }
 
@@ -3341,7 +3507,9 @@ export class NetworkObserver {
       baselineRequested: false, finished: false, deadlineTimer: null
     };
     this.#cmdRecoveries.set(source.sourceId, active);
+    this.#noteCaptureExit(source, "CMD_RECOVERY_QUEUED");
     active.deadlineTimer = setTimeout(() => {
+      this.#noteCaptureExit(source, "CMD_RECOVERY_DEADLINE");
       active.session?.expire(active.deadlineAtMs);
       this.#finishCmdRecovery(active);
     }, this.#cmdRecoveryDeadlineMs);
@@ -3360,6 +3528,7 @@ export class NetworkObserver {
   }
 
   async #runCmdRecovery(active: ActiveCmdRecovery): Promise<void> {
+    this.#noteCaptureExit(active.source, "CMD_RECOVERY_RESOLVE_TARGET");
     const target = await this.#resolveCmdRecoveryTarget(active);
     if (active.finished) return;
     if (target === null) {
@@ -3370,15 +3539,33 @@ export class NetworkObserver {
     // Reuse the verified CMD page and existing poller. Native callbacks collect
     // Early/More without resetting the provider's visible Today table.
     if (!await this.#cmdRecoveryTargetIsCurrent(active)) return;
-    const nativeGeneration = JSON.stringify([target.document.sourceEpoch,
-      target.document.frameId, target.document.loaderId]);
-    await this.#awaitCmdRecovery(active, this.#withFrameCommandTimeout(
+    // A bridge resync needs a new transport baseline, but the authenticated
+    // document and its native More collection still belong to this same owner.
+    // Do not clear that collection solely because the public bridge epoch moved.
+    const nativeGeneration = JSON.stringify([this.#observerSessionId, active.source.sourceId,
+      active.sourceGeneration, active.tabGeneration, target.document.frameId,
+      target.document.loaderId, target.contextId, target.sessionId ?? null]);
+    const native = await this.#awaitCmdRecovery(active, this.#withFrameCommandTimeout(
       this.#sendCommand(active.source.tabId, "Runtime.evaluate", {
         expression: buildCmdNativeCatalogRefreshExpression(nativeGeneration), contextId: target.contextId,
         returnByValue: true, awaitPromise: false
       }, target.sessionId)
     ).catch(() => null));
     if (!await this.#cmdRecoveryTargetIsCurrent(active)) return;
+    if (native.kind === "VALUE") {
+      const status = nestedValue(native.value, "result", "value");
+      this.#lastCatalogShape.set(active.source.sourceId, formatCmdNativeCatalogDiagnostic(status));
+      if (typeof status === "object" && status !== null) {
+        const retryInMs = (status as Record<string, unknown>).requestRetryInMs;
+        if (typeof retryInMs === "number" && Number.isSafeInteger(retryInMs) && retryInMs >= 0) {
+          this.#cmdRequestRetryAtMs.set(active.source.sourceId, this.#now() + retryInMs);
+          if (retryInMs > 0) {
+            this.#noteCaptureExit(active.source, "CMD_RECOVERY_REQUEST_PAUSED");
+            return;
+          }
+        }
+      }
+    }
     active.session = this.#cmdRecoveryState.begin(target.document, {
       nowMs: this.#now(), maxAttempts: this.#cmdRecoveryMaxAttempts,
       deadlineMs: Math.max(1, active.deadlineAtMs - this.#now())
@@ -3392,6 +3579,8 @@ export class NetworkObserver {
       }
       const step = active.session.nextAttempt(this.#now());
       if (step.kind === "RESOLVED") {
+        this.#noteCaptureExit(active.source, step.resolution.outcome === "SUCCESS"
+          ? "CMD_RECOVERY_SUCCESS" : `CMD_RECOVERY_${step.resolution.reason}`);
         this.#finishCmdRecovery(active);
         return;
       }
@@ -3414,6 +3603,11 @@ export class NetworkObserver {
         return;
       }
       const value = nestedValue(evaluation.value, "result", "value");
+      this.#noteCaptureExit(active.source, value === "busy" ? "CMD_RECOVERY_PAGE_BUSY"
+        : value === "baseline-requested" ? "CMD_RECOVERY_BASELINE_REQUESTED"
+        : value === "frame-unavailable" ? "CMD_RECOVERY_FRAME_UNAVAILABLE"
+        : value === "function-unavailable" ? "CMD_RECOVERY_FUNCTION_UNAVAILABLE"
+        : "CMD_RECOVERY_EVALUATION_UNAVAILABLE");
       active.attemptWindow = false;
       if (value !== "busy" && value !== "baseline-requested") {
         active.session.abort("ABORTED");
@@ -3435,13 +3629,23 @@ export class NetworkObserver {
     const frameTreeResult = await this.#awaitCmdRecovery(active, this.#withFrameCommandTimeout(
       this.#sendCommand(active.source.tabId, "Page.getFrameTree")
     ).catch(() => null));
-    if (frameTreeResult.kind === "FINISHED" || frameTreeResult.value === null ||
-      !this.#cmdRecoveryIdentityIsCurrent(active)) return null;
+    if (frameTreeResult.kind === "FINISHED" || !this.#cmdRecoveryIdentityIsCurrent(active)) return null;
+    if (frameTreeResult.value === null) {
+      this.#noteCaptureExit(active.source, "CMD_RECOVERY_FRAME_READ_FAILED");
+      return null;
+    }
     const frames = collectCmdRecoveryFrameDescriptors(frameTreeResult.value);
-    if (frames.length !== 1) return null;
+    if (frames.length !== 1) {
+      this.#noteCaptureExit(active.source, frames.length === 0 ? "CMD_RECOVERY_FRAME_MISSING"
+        : "CMD_RECOVERY_FRAME_AMBIGUOUS");
+      return null;
+    }
     const frame = frames[0]!;
     const binding = this.#mainWorldContexts.get(active.source.tabId)?.get(frame.id);
-    if (binding === undefined) return null;
+    if (binding === undefined) {
+      this.#noteCaptureExit(active.source, "CMD_RECOVERY_CONTEXT_MISSING");
+      return null;
+    }
     const { contextId, sessionId } = binding;
     const owningTree = await this.#awaitCmdRecovery(active, this.#withFrameCommandTimeout(
       this.#sendCommand(active.source.tabId, "Page.getFrameTree", {}, sessionId)
@@ -3450,7 +3654,12 @@ export class NetworkObserver {
       !this.#cmdRecoveryIdentityIsCurrent(active) ||
       currentFrameLoader(owningTree.value, frame.id) !== frame.loaderId ||
       this.#mainWorldContexts.get(active.source.tabId)?.get(frame.id)?.contextId !== contextId ||
-      this.#mainWorldContexts.get(active.source.tabId)?.get(frame.id)?.sessionId !== sessionId) return null;
+      this.#mainWorldContexts.get(active.source.tabId)?.get(frame.id)?.sessionId !== sessionId) {
+      if (this.#cmdRecoveryIdentityIsCurrent(active)) {
+        this.#noteCaptureExit(active.source, "CMD_RECOVERY_DOCUMENT_CHANGED");
+      }
+      return null;
+    }
     return {
       document: { sourceId: active.source.sourceId,
         sourceEpoch: `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(
@@ -3515,21 +3724,37 @@ export class NetworkObserver {
     this.#cmdRecoveryRequests.set(key, active.token);
   }
 
-  #completeCmdRecoveryRequest(token: symbol | undefined, pending: PendingRequest, body: string): void {
-    if (token === undefined) return;
+  #rememberCmdFullBaselineReceipt(pending: PendingRequest, body: string,
+    observedAtMs: number, bridgeGeneration: number, correlatedRecovery: boolean): void {
+    // Native full-scope requests also run outside an active recovery window.
+    // A successfully forwarded full still proves page health after that short
+    // control deadline; it must not cause keepalive to replace a working tab.
+    if (pending.source.lobby !== "CMD" || pending.providerFunctionCode !== 1 ||
+      (pending.cmdFullScope !== true && !correlatedRecovery) ||
+      pending.requestDocumentKey === undefined || pending.requestFrameKey === undefined ||
+      !this.#isPendingCurrent(pending) || this.#captureBridgeGeneration(pending.source.sourceId) !== bridgeGeneration ||
+      this.#forwardOverflowSources.has(pending.source.sourceId) || !isCompleteCmdFullResponse(body)) return;
+    this.#cmdFullBaselineAtMs.set(pending.source.sourceId,
+      Math.max(this.#cmdFullBaselineAtMs.get(pending.source.sourceId) ?? Number.NEGATIVE_INFINITY, observedAtMs));
+  }
+
+  #completeCmdRecoveryRequest(token: symbol | undefined, pending: PendingRequest, body: string): boolean {
+    if (token === undefined) return false;
     const active = this.#cmdRecoveries.get(pending.source.sourceId);
     const target = active?.target;
     if (active === undefined || target === undefined || target === null || active.token !== token || active.finished ||
       pending.providerFunctionCode !== 1 || pending.sessionId !== target.sessionId ||
       pending.frameId !== target.document.frameId || pending.loaderId !== target.document.loaderId ||
       pending.sourceGeneration !== target.sourceGeneration || pending.tabGeneration !== target.tabGeneration ||
-      !this.#cmdRecoveryIdentityIsCurrent(active) || !isCompleteCmdFullResponse(body)) return;
+      !this.#cmdRecoveryIdentityIsCurrent(active) || !isCompleteCmdFullResponse(body)) return false;
     const resolution = this.#cmdRecoveryState.complete({ document: target.document,
       providerFunctionCode: 1, responseComplete: true }, this.#now());
     if (resolution?.outcome === "SUCCESS") {
-      this.#cmdFullBaselineAtMs.set(pending.source.sourceId, this.#now());
+      this.#noteCaptureExit(pending.source, "CMD_RECOVERY_SUCCESS");
       this.#finishCmdRecovery(active);
+      return true;
     }
+    return false;
   }
 
   async #awaitCmdRecovery<T>(active: ActiveCmdRecovery, operation: Promise<T>): Promise<CmdRecoveryAwait<T>> {
@@ -3604,11 +3829,26 @@ export class NetworkObserver {
 
   async #refreshCatalog(source: ObservedSource, _options: CatalogRefreshOptions): Promise<void> {
     if (source.lobby === "IM") {
-      const results = await this.#evaluateImCatalogMainWorlds(source, true);
+      const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+      const tabGeneration = this.#captureTabGeneration(source.tabId);
+      const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+      const evaluations: { readonly value: ImRefreshEvaluationDiagnostic; readonly atMs: number }[] = [];
+      const results = await this.#evaluateImCatalogMainWorlds(source, true, diagnostic => {
+        if (evaluations.length < 32) evaluations.push({ value: diagnostic, atMs: this.#now() });
+      });
+      // Another frame may still be pending after the first result is collected.
+      // Never publish that old round's diagnostics under a replacement epoch.
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration ||
+        this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration) return;
+      const observedAtMs = this.#now();
       await this.#emit(source, "https://imsports.directsb.net/__fieldline_im_catalog_refresh__",
         "Diagnostic", "TAB_STATE", {
-          encoding: "UTF8", body: JSON.stringify({ results })
-      });
+          encoding: "UTF8", body: JSON.stringify({ results,
+            ...(evaluations.length === 0 ? {} : { imRefresh: { observedAtMs,
+              evaluations: evaluations.map(({ value, atMs }) => ({ ...value, retryInMs: value.retryInMs === null ? null
+                : Math.max(0, value.retryInMs - Math.max(0, observedAtMs - atMs)) })) } }) })
+      }, { sourceGeneration, tabGeneration });
       return;
     }
     if (source.lobby === "SABA") {
@@ -4381,8 +4621,11 @@ export class NetworkObserver {
 
   async #requestFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean,
     preferredSessionId?: string, onAttemptAdmitted?: () => void, ownsRequest?: () => boolean): Promise<void> {
+    if (source.lobby === "KSPORT" && await this.sbobetRequestsPaused()) return;
     const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
     const isCurrent = (): boolean => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      (source.lobby !== "KSPORT" || !this.#sbobetRequestBackoff.paused()) &&
+      (source.lobby !== "SABA" || !this.#hasFreshSabaSocketBaseline(source.sourceId)) &&
       ownsRequest?.() !== false && !this.#hasFreshKsportHttpPair(source);
     if (!isCurrent()) return;
     const nowMs = this.#now();
@@ -4395,6 +4638,10 @@ export class NetworkObserver {
     if (active === undefined && source.lobby !== "SABA" && source.lobby !== "KSPORT" &&
       source.lobby !== "SBO" && source.lobby !== "TSPORT") return;
     if (!isCurrent()) return;
+    if (source.lobby === "SABA") {
+      if (this.#sabaHeapQueries.size > 0) return;
+      if (await this.#sabaRecoveryBudget.paused() || !isCurrent()) return;
+    }
     this.#socketBaselineRecoveryAtMs.set(source.sourceId, nowMs);
     if (source.lobby === "TSPORT") {
       // CDP exposes WebSocket lifecycle events but no supported socket-close
@@ -4478,8 +4725,19 @@ export class NetworkObserver {
       } catch {} } return count; }`
     }];
     const reconnectDiagnostic = this.#wsAttachDiagnostic(source);
-    onAttemptAdmitted?.();
-    reconnectDiagnostic.reconnectAttempts += 1;
+    let sabaAdmitted = false;
+    const pageHeapDeferred = (target: { readonly sessionId?: string }): boolean => {
+      if (source.lobby !== "SABA" || target.sessionId !== undefined &&
+        sabaWorkerSessions.has(target.sessionId)) return false;
+      // A fresh viewport can contain only a small subset of the football list.
+      // It cannot indefinitely suppress the bounded reset/field-table recovery
+      // needed to acquire the full native socket catalog.
+      return this.#hasFreshSabaSocketBaseline(source.sourceId);
+    };
+    if (source.lobby !== "SABA") {
+      onAttemptAdmitted?.();
+      reconnectDiagnostic.reconnectAttempts += 1;
+    }
     const noteOutcome = (target: { readonly contextId?: number; readonly sessionId?: string },
       outcome: string): void => {
       const label = `${target.sessionId !== undefined ? "session" : target.contextId !== undefined
@@ -4489,12 +4747,17 @@ export class NetworkObserver {
       entries.push(label);
       reconnectDiagnostic.reconnectOutcomes = entries.slice(-12).join(" ");
     };
+    const cursor = source.lobby === "SABA" ? this.#sabaRecoveryCursors.get(source.sourceId) : undefined;
+    const firstCandidate = cursor?.sourceGeneration === sourceGeneration ? cursor.index : 0;
+    let candidateIndex = 0;
+    let heapScans = 0;
     for (const target of targets) {
       const sendToSocketTarget = (method: string, params: Record<string, unknown>): Promise<unknown> =>
         target.sessionId === undefined
           ? this.#sendCommand(source.tabId, method, params)
           : this.#sendCommand(source.tabId, method, params, target.sessionId);
-      const group = `fieldline-baseline-recovery-${source.tabId}`;
+      const group = `fieldline-baseline-recovery-${source.tabId}` +
+        (source.lobby === "SABA" ? `-${++this.#sabaRecoveryGroupOrdinal}` : "");
       try {
         const targetStrategies = source.lobby === "SABA" && target.sessionId !== undefined &&
           sabaWorkerSessions.has(target.sessionId) ? [{
@@ -4513,6 +4776,13 @@ export class NetworkObserver {
             } catch {} } return count; }`
           }] : strategies;
         for (const strategy of targetStrategies) {
+          if (source.lobby === "SABA") {
+            const index = candidateIndex++;
+            if (index < firstCandidate) continue;
+            if (pageHeapDeferred(target)) { noteOutcome(target, "fresh-socket-baseline"); continue; }
+            if (heapScans >= 3) { noteOutcome(target, "scan-budget"); return; }
+            this.#sabaRecoveryCursors.set(source.sourceId, { sourceGeneration, index: index + 1 });
+          }
           if (!isCurrent()) return;
           const prototype = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.evaluate", {
             expression: strategy.prototypeExpression,
@@ -4523,22 +4793,59 @@ export class NetworkObserver {
           const prototypeId = nestedValue(prototype, "result", "objectId");
           if (typeof prototypeId !== "string") { noteOutcome(target, "no-prototype"); continue; }
           if (!isCurrent()) return;
-          const queried = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.queryObjects", {
+          if (pageHeapDeferred(target)) { noteOutcome(target, "fresh-socket-baseline"); continue; }
+          if (source.lobby === "SABA") {
+            if (this.#sabaHeapQueries.size > 0) return;
+            if (!sabaAdmitted) {
+              if (!await this.#sabaRecoveryBudget.admit() || !isCurrent() ||
+                this.#sabaHeapQueries.size > 0 || pageHeapDeferred(target)) return;
+              sabaAdmitted = true;
+              onAttemptAdmitted?.();
+              reconnectDiagnostic.reconnectAttempts += 1;
+            }
+          }
+          heapScans += 1;
+          const query = sendToSocketTarget("Runtime.queryObjects", {
             prototypeObjectId: prototypeId, objectGroup: group
-          }), source.lobby === "SABA" ? SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS :
+          });
+          let settled = false;
+          let timedOut = false;
+          if (source.lobby === "SABA") {
+            this.#sabaHeapQueries.add(query);
+            const onSettled = (): void => {
+              settled = true;
+              this.#sabaHeapQueries.delete(query);
+              // The first release can run before a timed-out query creates its
+              // result handles. Release those late handles in the exact session.
+              if (timedOut) void this.#withFrameCommandTimeout(sendToSocketTarget(
+                "Runtime.releaseObjectGroup", { objectGroup: group })).catch(() => undefined);
+            };
+            void query.then(onSettled, onSettled);
+          }
+          const queried = await this.#withFrameCommandTimeout(query,
+            source.lobby === "SABA" ? SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS :
               this.#frameCommandTimeoutMs)
             .catch(() => null);
+          if (source.lobby === "SABA" && !settled) {
+            timedOut = true;
+            noteOutcome(target, "query-pending");
+            return;
+          }
           if (!isCurrent()) return;
           const instancesId = nestedValue(queried, "objects", "objectId");
           if (typeof instancesId !== "string") { noteOutcome(target, "no-instances"); continue; }
           if (!isCurrent()) return;
+          if (pageHeapDeferred(target)) { noteOutcome(target, "fresh-socket-baseline"); continue; }
           const result = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.callFunctionOn", {
             objectId: instancesId, functionDeclaration: strategy.reconnect, returnByValue: true
           })).catch(() => null);
           if (!isCurrent()) return;
           const count = nestedValue(result, "result", "value");
           noteOutcome(target, `closed-${typeof count === "number" ? count : "err"}`);
-          if (typeof count === "number" && count > 0) return;
+          if (typeof count === "number" && count > 0) {
+            if (source.lobby === "SABA") this.#sabaRecoveryCursors.delete(source.sourceId);
+            return;
+          }
         }
       } finally {
         // Remote object handles belong to the target session, not to our
@@ -4555,6 +4862,7 @@ export class NetworkObserver {
         }
       }
     }
+    if (source.lobby === "SABA" && isCurrent()) this.#sabaRecoveryCursors.delete(source.sourceId);
   }
 
   async #observeChildTarget(source: ObservedSource, sessionId: string, targetId?: string,
@@ -4819,7 +5127,7 @@ export class NetworkObserver {
     await this.#requestFreshKsportNativeHttpBaseline(source);
   }
 
-  #hasFreshKsportHttpPair(source: ObservedSource): boolean {
+  #hasFreshKsportHttpPair(source: ObservedSource, maxAgeMs = KSPORT_BASELINE_LEASE_RENEW_MS): boolean {
     if (source.lobby !== "KSPORT") return false;
     const receipt = this.#ksportHttpPairReceipts.get(source.sourceId);
     if (receipt === undefined) return false;
@@ -4827,10 +5135,29 @@ export class NetworkObserver {
     return this.#isSourceGenerationCurrent(source.sourceId, receipt.sourceGeneration) &&
       this.#captureTabGeneration(source.tabId) === receipt.tabGeneration &&
       this.#captureBridgeGeneration(source.sourceId) === receipt.bridgeGeneration &&
-      ageMs >= 0 && ageMs < KSPORT_BASELINE_LEASE_RENEW_MS;
+      ageMs >= 0 && ageMs < maxAgeMs;
   }
 
   async #requestFreshKsportHttpBaseline(source: ObservedSource): Promise<boolean> {
+    if (await this.sbobetRequestsPaused()) return false;
+    const replayCooldown = this.#ksportHttpReplayCooldowns.get(source.sourceId);
+    if (replayCooldown !== undefined) {
+      const routeIsCurrent = () =>
+        this.#isSourceGenerationCurrent(source.sourceId, replayCooldown.sourceGeneration) &&
+        this.#captureTabGeneration(source.tabId) === replayCooldown.tabGeneration &&
+        this.#captureBridgeGeneration(source.sourceId) === replayCooldown.bridgeGeneration;
+      if (routeIsCurrent()) {
+        // A working native route stays primary. Probing the failed replay first
+        // every thirty seconds can spend its fetch timeout before renewing the
+        // real baseline. Retry replay only if native itself stops completing.
+        const refreshed = await this.#requestFreshKsportNativeHttpBaseline(source);
+        if (!routeIsCurrent()) return false;
+        if (refreshed || this.#now() < replayCooldown.retryAtMs || this.#sbobetRequestBackoff.paused()) return refreshed;
+      }
+      if (this.#ksportHttpReplayCooldowns.get(source.sourceId) === replayCooldown) {
+        this.#ksportHttpReplayCooldowns.delete(source.sourceId);
+      }
+    }
     const priorReceipt = this.#ksportHttpPairReceipts.get(source.sourceId);
     const activeEntry = this.#activeKsportSocket(source.sourceId);
     let refreshed = false;
@@ -4860,7 +5187,10 @@ export class NetworkObserver {
   }
 
   async #requestFreshKsportNativeHttpBaseline(source: ObservedSource): Promise<boolean> {
-    if (this.#hasFreshKsportHttpPair(source)) return true;
+    if (await this.sbobetRequestsPaused()) return false;
+    // The longer socket baseline lease is not a refresh cadence for HTTP-only
+    // authority. Only skip native requests within their own eight-second cadence.
+    if (this.#hasFreshKsportHttpPair(source, KSPORT_NATIVE_HTTP_RECOVERY_RETRY_MS)) return true;
     // An observed list URL can stop returning a usable paired baseline. Let
     // the provider issue its own period requests through the existing selectors
     // and capture their responses, including after established fallback expires.
@@ -4870,31 +5200,48 @@ export class NetworkObserver {
     const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const isCurrent = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
       this.#captureTabGeneration(source.tabId) === tabGeneration &&
-      this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration;
+      this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration && !this.#sbobetRequestBackoff.paused();
     if (!isCurrent()) return false;
     const nowMs = this.#now();
     const lastAttemptAtMs = this.#ksportNativeHttpRecoveryAtMs.get(source.sourceId);
     if (lastAttemptAtMs !== undefined &&
       nowMs - lastAttemptAtMs < KSPORT_NATIVE_HTTP_RECOVERY_RETRY_MS) return false;
     this.#ksportNativeHttpRecoveryAtMs.set(source.sourceId, nowMs);
-    const ordinalBefore = this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0;
+    const nativeRecovery = Symbol("native-recovery");
+    this.#ksportNativeHttpRecoveries.set(source.sourceId, nativeRecovery);
+    try {
     this.#armKsportNativeHttpCapture(source);
+    const capture = this.#currentKsportNativeHttpCapture(source)!;
+    const published = async (): Promise<boolean> => {
+      if (capture.publication === undefined) return false;
+      await this.#withFrameCommandTimeout(capture.publication, 15_000).catch(() => undefined);
+      if (!isCurrent() || !this.#hasFreshKsportHttpPair(source)) return false;
+      this.#sbobetRequestBackoff.succeeded(nowMs);
+      this.#lastCatalogShape.set(source.sourceId, "http[NATIVE:catalog-requested]");
+      return true;
+    };
+    // Retain the physical publication until it settles, including across a
+    // logical timeout. A later tick must wait for it instead of clicking again.
+    if (capture.publication !== undefined) return await published();
     const todaySelected = await this.#selectTimeTab(source, KSPORT_TODAY_NATIVE_HTTP_EXPRESSION, isCurrent);
     if (!isCurrent()) return false;
     await new Promise<void>((resolve) => setTimeout(resolve, 600));
     if (!isCurrent()) return false;
     const liveSelected = await this.#selectTimeTab(source, KSPORT_LIVE_NATIVE_HTTP_EXPRESSION, isCurrent);
     if (!isCurrent()) return false;
+    if (capture.publication !== undefined) return await published();
     if (!todaySelected && !liveSelected) return false;
     for (let attempt = 0; attempt < 12; attempt += 1) {
       if (!isCurrent()) return false;
-      if ((this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) > ordinalBefore) {
-        this.#lastCatalogShape.set(source.sourceId, "http[NATIVE:catalog-requested]");
-        return true;
-      }
+      if (capture.publication !== undefined) return await published();
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
     }
-    return isCurrent() && (this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) > ordinalBefore;
+    return isCurrent() && await published();
+    } finally {
+      if (this.#ksportNativeHttpRecoveries.get(source.sourceId) === nativeRecovery) {
+        this.#ksportNativeHttpRecoveries.delete(source.sourceId);
+      }
+    }
   }
 
   async #requestFreshKsportHttpBaselineAfterDrain(source: ObservedSource, fence?: {
@@ -4902,7 +5249,10 @@ export class NetworkObserver {
     readonly socket: ObservedWebSocketState;
     readonly catalogAuthorityGeneration: number;
   }): Promise<boolean> {
+    if (this.#sbobetRequestBackoff.paused()) return false;
     const sourceGenerationAtStart = this.#captureSourceGeneration(source.sourceId);
+    const tabGenerationAtStart = this.#captureTabGeneration(source.tabId);
+    const bridgeGenerationAtStart = this.#captureBridgeGeneration(source.sourceId);
     const template = this.#sbobetEventRequests.get(source.sourceId);
     let templateUrl: URL | null = null;
     if (template !== undefined) {
@@ -4922,6 +5272,8 @@ export class NetworkObserver {
     const recoveryGenerationAtStart = owner?.ksportRecovery?.currentGeneration ?? null;
     const attemptIsCurrent = (): boolean =>
       this.#isSourceGenerationCurrent(source.sourceId, sourceGenerationAtStart) &&
+      this.#captureTabGeneration(source.tabId) === tabGenerationAtStart &&
+      this.#captureBridgeGeneration(source.sourceId) === bridgeGenerationAtStart &&
       (fence === undefined
         ? this.#activeKsportSocket(source.sourceId) === undefined
         : (this.#activeKsportStreams.get(source.sourceId) ?? null) === activeStreamAtStart &&
@@ -4930,10 +5282,29 @@ export class NetworkObserver {
           fence.socket.closing !== true &&
           (fence.socket.ksportRecovery?.catalogAuthorityGeneration ?? 0) ===
             fence.catalogAuthorityGeneration);
+    // A stale or incorrectly routed request can return 400/404 indefinitely. After its quiet
+    // window, reacquire once from the current page. Retirement is cancellation,
+    // not another provider refusal; it must not delay a replacement source.
+    if (this.#sbobetRequestBackoff.lastStatus() === 400 || this.#sbobetRequestBackoff.lastStatus() === 404) {
+      const tabGeneration = this.#captureTabGeneration(source.tabId);
+      const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+      const ownsNativeRetry = () => attemptIsCurrent() &&
+        this.#captureTabGeneration(source.tabId) === tabGeneration &&
+        this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration;
+      if (!ownsNativeRetry()) return false;
+      const startedAtMs = this.#now();
+      const refreshed = await this.#requestFreshKsportNativeHttpBaseline(source);
+      if (!ownsNativeRetry()) return false;
+      if (refreshed && this.#hasFreshKsportHttpPair(source)) this.#sbobetRequestBackoff.succeeded(startedAtMs);
+      // No selector answer or paired receipt is a local recovery failure. Only
+      // a new current native HTTP refusal may renew the shared quiet window.
+      return refreshed;
+    }
     const knownContexts = [...(this.#mainWorldContexts.get(source.tabId)?.entries() ?? [])];
     const targets: Array<{ readonly contextId?: number; readonly sessionId?: string;
-      readonly frameId?: string; readonly targetId?: string }> = knownContexts.map(
-      ([frameId, binding]) => ({ contextId: binding.contextId, frameId,
+      readonly frameId?: string; readonly targetId?: string;
+      readonly contextBinding?: MainWorldContextBinding }> = knownContexts.map(
+      ([frameId, binding]) => ({ contextId: binding.contextId, frameId, contextBinding: binding,
         ...(binding.sessionId === undefined ? {} : { sessionId: binding.sessionId }) }));
     if (targets.length === 0 && targetSocket !== undefined) targets.push({
       ...(targetSocket.sessionId === undefined ? {} : { sessionId: targetSocket.sessionId })
@@ -4976,8 +5347,11 @@ export class NetworkObserver {
     }
     const attachedSocketTargets = [...attachedTargets.entries()].map(([targetId, sessionId]) =>
       ({ targetId, sessionId }));
-    targets.unshift(...attachedSocketTargets);
-    const expression = `(async () => {
+    // A document-bound Main receipt can establish the More/All Dates owner
+    // after API restart. A worker-only pair cannot do that independently;
+    // keep workers as fallback when no current document can supply the pair.
+    targets.push(...attachedSocketTargets);
+    const expressionFor = (requestedTimeRange: "live" | "today") => `(async () => {
       const marker = "fieldline-ksport-catalog-refresh";
       const executionSurface = typeof document === "undefined" ? "WORKER" : "DOCUMENT";
       const executionOrigin = new URL(location.href).origin;
@@ -4988,18 +5362,16 @@ export class NetworkObserver {
       const isFootballScope = (url) => Object.entries(footballQuery).every(([name, expected]) =>
         url.searchParams.getAll(name).every((value) => value === expected));
       const capturedUrl = ${JSON.stringify(templateUrl?.href ?? null)};
-      const performanceUrls = [...performance.getEntriesByType("resource")].map((entry) => entry.name)
+      const performanceUrls = [...performance.getEntriesByType("resource")]
+        .filter((entry) => !(typeof entry.responseStatus === "number" && entry.responseStatus >= 400))
+        .map((entry) => entry.name)
         .filter((value) => { try { const url = new URL(value); return url.protocol === "https:" &&
           url.username === "" && url.password === "" && isProviderUrl(url) && isFootballScope(url) &&
           url.pathname === "/api/v2/getEvent" && !url.searchParams.has("eventId"); } catch { return false; } });
-      const sameOriginFallback = executionSurface === "WORKER" && (() => {
-        try {
-          const origin = new URL(executionOrigin);
-          return origin.protocol === "https:" && origin.username === "" && origin.password === "" &&
-            isProviderHost(origin.hostname) ? new URL("/api/v2/getEvent", executionOrigin).href : null;
-        } catch { return null; }
-      })();
-      const templateUrl = capturedUrl || performanceUrls.at(-1) || sameOriginFallback;
+      // Auxiliary workers can live on the lobby origin, which has no catalog API.
+      // Require an observed endpoint instead of probing that origin and putting
+      // the actual source into a shared 404 backoff before its context is tried.
+      const templateUrl = capturedUrl || performanceUrls.at(-1);
       if (!templateUrl) return { status: marker + "-template-missing", page: location.origin + location.pathname };
       const base = new URL(templateUrl);
       if (base.protocol !== "https:" || base.username !== "" || base.password !== "" ||
@@ -5028,11 +5400,15 @@ export class NetworkObserver {
       const observedStyle = base.searchParams.get("timeRange") || "live";
       const providerRangeStyle = (value) => /^[A-Z]/u.test(observedStyle)
         ? value[0].toUpperCase() + value.slice(1) : value;
-      for (const timeRange of ["live", "today"]) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+      for (const timeRange of [${JSON.stringify(requestedTimeRange)}]) {
         const url = new URL(exactUrls.get(timeRange) || templateUrl);
         url.searchParams.delete("eventId");
         if (!exactUrls.has(timeRange)) url.searchParams.set("timeRange", providerRangeStyle(timeRange));
-        const response = await fetch(url.href, { method: "GET", headers, credentials: "include", cache: "no-store" });
+        const response = await fetch(url.href, { method: "GET", headers, credentials: "include",
+          cache: "no-store", redirect: "error", signal: controller.signal });
         if (!response.ok) {
           const controls = typeof document === "undefined" ? [] :
             [...document.querySelectorAll('.sport-menu-container *, button, a, [role="button"], [data-sport]')]
@@ -5044,20 +5420,36 @@ export class NetworkObserver {
             .filter((item) => item.className || item.id || item.role || item.sport)
             .slice(0, 120);
           return { status: marker + "-failed", timeRange, code: response.status,
+            retryAfterMs: ${SBOBET_RETRY_AFTER_EXPRESSION}(response.headers?.get('retry-after')),
             page: location.origin + location.pathname, controls, method, rangeCarrier, hasPostData };
         }
         responses.push({ timeRange, url: url.href, body: await response.text() });
       }
       return { status: "catalog-requested", marker, executionSurface, executionOrigin,
         origin: base.origin, responses };
+      } catch { return { status: marker + "-failed", code: 0 }; }
+      finally { clearTimeout(timeout); }
     })()`;
     const attempts: Array<{ readonly target: "CONTEXT" | "SESSION" | "ROOT";
       readonly status: string; readonly page?: string; readonly controls?: unknown;
       readonly timeRange?: "live" | "today"; readonly code?: number;
       readonly method?: "GET" | "POST"; readonly rangeCarrier?: "URL" | "BODY" | "NONE";
       readonly hasPostData?: boolean }> = [];
+    let rejectedContexts = 0;
+    let lastRejectedTargetIsCurrent: (() => Promise<boolean>) | undefined;
+    let lastRejectedTargetCurrent: (() => boolean) | undefined;
     for (const target of targets) {
-      if (!attemptIsCurrent()) return false;
+      if (!attemptIsCurrent() || this.#sbobetRequestBackoff.paused()) return false;
+      if (rejectedContexts > 0) {
+        await new Promise<void>(resolve => setTimeout(resolve, 500));
+        if (!attemptIsCurrent() || this.#sbobetRequestBackoff.paused()) return false;
+      }
+      const targetIsCurrent = () => attemptIsCurrent() &&
+        (target.contextBinding === undefined || target.frameId !== undefined &&
+          this.#mainWorldContexts.get(source.tabId)?.get(target.frameId) === target.contextBinding) &&
+        (target.targetId === undefined || this.#ksportAttachedTargetSessions.get(source.sourceId)
+          ?.get(target.targetId) === target.sessionId);
+      if (!targetIsCurrent()) return false;
       const frameTree = await this.#withFrameCommandTimeout(target.sessionId === undefined
         ? this.#sendCommand(source.tabId, "Page.getFrameTree")
         : this.#sendCommand(source.tabId, "Page.getFrameTree", {}, target.sessionId)).catch(() => ({}));
@@ -5065,6 +5457,23 @@ export class NetworkObserver {
       const verifiedDocument = verifiedDocumentForDescriptor(target.frameId === undefined
         ? descriptors[0]
         : descriptors.find((frame) => frame.id === target.frameId), target.sessionId);
+      const refusalIsCurrent = async () => {
+        if (!targetIsCurrent()) return false;
+        if (target.targetId !== undefined) return true;
+        if (verifiedDocument === undefined) return false;
+        const currentTree = await this.#withFrameCommandTimeout(target.sessionId === undefined
+          ? this.#sendCommand(source.tabId, "Page.getFrameTree")
+          : this.#sendCommand(source.tabId, "Page.getFrameTree", {}, target.sessionId)).catch(() => null);
+        return targetIsCurrent() && currentTree !== null &&
+          currentFrameLoader(currentTree, verifiedDocument.frameId) === verifiedDocument.loaderId;
+      };
+      const coolDownReplay = () => {
+        if (targetIsCurrent()) this.#ksportHttpReplayCooldowns.set(source.sourceId, {
+          retryAtMs: this.#now() + KSPORT_HTTP_REPLAY_RETRY_MS,
+          sourceGeneration: sourceGenerationAtStart, tabGeneration: tabGenerationAtStart,
+          bridgeGeneration: bridgeGenerationAtStart
+        });
+      };
       const sequenceBeforeBoundary = this.#sequences.get(source.sourceId) ?? 0;
       await this.#emit(source, "https://sb21.net/__fieldline_ksport_http_recovery_start__",
         "Diagnostic", "TAB_STATE", { encoding: "UTF8",
@@ -5072,13 +5481,55 @@ export class NetworkObserver {
       const sequenceAfterBoundary = this.#sequences.get(source.sourceId) ?? 0;
       if (sequenceAfterBoundary !== sequenceBeforeBoundary + 1) continue;
       const requestStartSequence = sequenceBeforeBoundary;
-      const params = { expression, ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
-        returnByValue: true, awaitPromise: true };
-      const evaluation = await this.#withFrameCommandTimeout(target.sessionId === undefined
-        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
-        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId),
-      15_000).catch(() => null);
-      const value = nestedValue(evaluation, "result", "value");
+      if (!attemptIsCurrent() || this.#sbobetRequestBackoff.paused()) return false;
+      const startedAtMs = this.#now();
+      let evaluation: unknown = null;
+      let value: unknown;
+      let firstPartition: Record<string, unknown> | undefined;
+      for (const timeRange of ["live", "today"] as const) {
+        if (!attemptIsCurrent() || this.#sbobetRequestBackoff.paused()) return false;
+        const params = { expression: expressionFor(timeRange),
+          ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
+          returnByValue: true, awaitPromise: true };
+        evaluation = await this.#withFrameCommandTimeout(target.sessionId === undefined
+          ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+          : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId),
+        15_000).catch(() => null);
+        value = nestedValue(evaluation, "result", "value");
+        if (!isRecord(value) || value.status !== "catalog-requested" || !Array.isArray(value.responses)) break;
+        if (firstPartition !== undefined) {
+          if (value.origin !== firstPartition.origin) break;
+          value = { ...value, responses: [...firstPartition.responses as unknown[], ...value.responses] };
+          break;
+        }
+        if (value.responses.length !== 1) break;
+        firstPartition = value;
+      }
+      if (!targetIsCurrent()) return false;
+      const commandFailed = evaluation === null || isRecord(evaluation) && evaluation.exceptionDetails !== undefined;
+      if (commandFailed) {
+        this.#sbobetLastFailureLane = "MAIN_CDP";
+        coolDownReplay();
+      }
+      if (isRecord(value) && typeof value.code === "number" &&
+        (value.code === 0 || value.code >= 400 && value.code <= 599)) {
+        if (value.code !== 0 && (!await refusalIsCurrent() || !targetIsCurrent())) return false;
+        this.#sbobetLastFailureLane = "MAIN_HTTP";
+        if (value.code === 0) {
+          // No HTTP response exists for a failed/aborted browser fetch. Cool down
+          // this replay route without treating it as a provider refusal that
+          // blocks the page's working native Live/Today request path.
+          coolDownReplay();
+        } else if (value.code === 400 && !(typeof value.retryAfterMs === "number" && value.retryAfterMs > 0)) {
+          // An attached auxiliary context may reject a request that succeeds
+          // in its actual page owner. Try at most three existing contexts,
+          // paced above, before entering the shared quiet window.
+          lastRejectedTargetIsCurrent = refusalIsCurrent;
+          lastRejectedTargetCurrent = targetIsCurrent;
+          if (++rejectedContexts >= 3) this.#sbobetRequestBackoff.fail(400);
+        } else this.#sbobetRequestBackoff.fail(value.code,
+          typeof value.retryAfterMs === "number" ? value.retryAfterMs : 0);
+      }
       if (!attemptIsCurrent()) return false;
       attempts.push({ target: target.sessionId !== undefined ? "SESSION" : target.contextId !== undefined
         ? "CONTEXT" : "ROOT", status: isRecord(value) && typeof value.status === "string"
@@ -5088,13 +5539,14 @@ export class NetworkObserver {
         ...(isRecord(value) && (value.timeRange === "live" || value.timeRange === "today")
           ? { timeRange: value.timeRange } : {}),
         ...(isRecord(value) && typeof value.code === "number" && Number.isInteger(value.code) &&
-          value.code >= 100 && value.code <= 599 ? { code: value.code } : {}),
+          (value.code === 0 || value.code >= 100 && value.code <= 599) ? { code: value.code } : {}),
         ...(isRecord(value) && (value.method === "GET" || value.method === "POST")
           ? { method: value.method } : {}),
         ...(isRecord(value) && (value.rangeCarrier === "URL" || value.rangeCarrier === "BODY" ||
           value.rangeCarrier === "NONE") ? { rangeCarrier: value.rangeCarrier } : {}),
         ...(isRecord(value) && typeof value.hasPostData === "boolean"
           ? { hasPostData: value.hasPostData } : {}) });
+      if (commandFailed || isRecord(value) && value.code === 0) break;
       if (!isRecord(value) || value.status !== "catalog-requested" || !Array.isArray(value.responses) ||
         value.responses.length !== 2 || typeof value.origin !== "string") continue;
       const workerOwnsOrigin = value.executionSurface === "WORKER" && target.targetId !== undefined &&
@@ -5138,8 +5590,11 @@ export class NetworkObserver {
             providerContentIntent: "FOOTBALL_FULL_CATALOG", requestStartSequence,
             ...(verifiedDocument === undefined ? { verifiedTarget: verifiedTarget! } : { verifiedDocument }) });
       }
+      if (attemptIsCurrent() && this.#hasFreshKsportHttpPair(source)) this.#sbobetRequestBackoff.succeeded(startedAtMs);
       return true;
     }
+    if (lastRejectedTargetIsCurrent !== undefined && !this.#sbobetRequestBackoff.paused() &&
+      await lastRejectedTargetIsCurrent() && lastRejectedTargetCurrent?.()) this.#sbobetRequestBackoff.fail(400);
     const nowMs = this.#now();
     this.#lastCatalogShape.set(source.sourceId, `http[${attempts.map((attempt) =>
       `${attempt.target}:${attempt.status}${attempt.code === undefined ? "" : `:${attempt.code}`}`)
@@ -5162,28 +5617,39 @@ export class NetworkObserver {
     if (!isFullKsportPartitionSnapshot(snapshot)) return;
     const capture = this.#currentKsportNativeHttpCapture(pending.source);
     if (capture === null || capture.sourceGeneration !== pending.sourceGeneration ||
-      capture.tabGeneration !== pending.tabGeneration) return;
+      capture.tabGeneration !== pending.tabGeneration || capture.publication !== undefined) return;
     capture.parts.set(partition, { url: pending.url, body });
     if (!capture.parts.has("live") || !capture.parts.has("today")) return;
-    this.#ksportNativeHttpCaptures.delete(pending.source.sourceId);
-    if (!this.#isPendingCurrent(pending)) return;
+    capture.publication = this.#publishKsportNativeHttpPair(pending, capture);
+    try { await capture.publication; }
+    finally {
+      if (this.#ksportNativeHttpCaptures.get(pending.source.sourceId) === capture) {
+        this.#ksportNativeHttpCaptures.delete(pending.source.sourceId);
+      }
+    }
+  }
+
+  async #publishKsportNativeHttpPair(pending: PendingRequest, capture: KsportNativeHttpCapture): Promise<void> {
+    const isCurrent = () => this.#isPendingCurrent(pending) &&
+      this.#captureBridgeGeneration(pending.source.sourceId) === capture.bridgeGeneration;
+    if (!isCurrent()) return;
 
     const frameTree = await this.#withFrameCommandTimeout(
       this.#sendCommand(pending.source.tabId, "Page.getFrameTree")
     ).catch(() => ({}));
     const verifiedDocument = verifiedDocumentForDescriptor(collectFrameDescriptors(frameTree)[0]);
-    if (verifiedDocument === undefined || !this.#isPendingCurrent(pending)) return;
+    if (verifiedDocument === undefined || !isCurrent()) return;
     const sequenceBeforeBoundary = this.#sequences.get(pending.source.sourceId) ?? 0;
     await this.#emit(pending.source, "https://sb21.net/__fieldline_ksport_http_recovery_start__",
       "Diagnostic", "TAB_STATE", { encoding: "UTF8",
         body: '{"kind":"KSPORT_HTTP_NATIVE_RECOVERY_START"}' });
     if ((this.#sequences.get(pending.source.sourceId) ?? 0) !== sequenceBeforeBoundary + 1 ||
-      !this.#isPendingCurrent(pending)) return;
+      !isCurrent()) return;
     const ordinal = (this.#ksportSnapshotOrdinals.get(pending.source.sourceId) ?? 0) + 1;
     this.#ksportSnapshotOrdinals.set(pending.source.sourceId, ordinal);
     const generation = `ksport-http:${pending.source.tabId}:${ordinal}`;
     for (const nativePartition of ["live", "today"] as const) {
-      if (!this.#isPendingCurrent(pending)) return;
+      if (!isCurrent()) return;
       const part = capture.parts.get(nativePartition)!;
       await this.ingestHttpResponse(pending.source, part.url, "Fetch", part.body, {
         method: "GET", streamId: generation,
@@ -5233,7 +5699,8 @@ export class NetworkObserver {
     return true;
   }
 
-  async #evaluateImCatalogMainWorlds(source: ObservedSource, awaitPromise: boolean): Promise<string[]> {
+  async #evaluateImCatalogMainWorlds(source: ObservedSource, awaitPromise: boolean,
+    onDiagnostic?: (diagnostic: ImRefreshEvaluationDiagnostic) => void): Promise<string[]> {
     const evaluationStartedAtMs = this.#now();
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const tabGeneration = this.#captureTabGeneration(source.tabId);
@@ -5265,7 +5732,7 @@ export class NetworkObserver {
         (binding === undefined || descriptor === undefined || contexts?.get(descriptor.id) === binding);
       const collectorGeneration = `${this.#observerSessionId}:${sourceGeneration}:${tabGeneration}:` +
         `${this.#captureBridgeGeneration(source.sourceId)}:${descriptor?.loaderId ?? "current"}`;
-      const params = { expression: buildImCatalogRefreshExpression(collectorGeneration),
+      const params = { expression: buildImSafeCatalogRefreshExpression(collectorGeneration),
         ...(binding === undefined ? {} : { contextId: binding.contextId }),
         returnByValue: true, awaitPromise };
       const response = await this.#withFrameCommandTimeout(binding?.sessionId === undefined
@@ -5319,14 +5786,33 @@ export class NetworkObserver {
         .test(status) ? status : "unavailable";
       const failure = isRecord(value) && isRecord(value.coverage) && isRecord(value.coverage.lastFailure)
         ? value.coverage.lastFailure : null;
-      if ((safeValue === "rate-limited" || safeValue === "request-failed") && failure !== null) {
+      const coverage = isRecord(value) && isRecord(value.coverage) ? value.coverage : null;
+      const result = (status: string): string => {
+        if (coverage !== null && evaluationTargetIsCurrent() &&
+          this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration) {
+          onDiagnostic?.(imRefreshDiagnostic(label === "top" ? "top" : "child", status, coverage, this.#now()));
+        }
+        return `${label}:${status}`;
+      };
+      // A persisted lastFailure is context for a quiet gate, not a new request failure.
+      const gateReason = coverage?.gateReason;
+      if (safeValue === "rate-limited" && (gateReason === "LOCK_HELD" || gateReason === "COOLDOWN")) {
+        return result(`gate-${gateReason.toLowerCase().replaceAll("_", "-")}`);
+      }
+      if ((safeValue === "rate-limited" || safeValue === "request-failed" || safeValue === "collector-paused") && failure !== null) {
         const code = failure.nativeStatusCode;
         if (typeof code === "number" && Number.isSafeInteger(code) && code >= 0 && code <= 999999) {
-          return `${label}:native-status-${code}`;
+          return result(`native-status-${code}`);
         }
-        if (failure.status === 429) return `${label}:http-status-429`;
+        if (failure.status === 401 || failure.status === 403 || failure.status === 429) {
+          return result(`http-status-${failure.status}`);
+        }
+        if (typeof failure.errorCategory === "string" &&
+          /^(?:SIGNATURE|NETWORK|BODY_READ|INVALID_JSON|ROSTER_SHAPE|REQUEST_TIMEOUT|REQUEST_FAILED|NATIVE_AUTH_CHANGED|NATIVE_AUTH_NOT_READY)$/u.test(failure.errorCategory)) {
+          return result(`failure-${failure.errorCategory.toLowerCase().replaceAll("_", "-")}`);
+        }
       }
-      return `${label}:${safeValue}`;
+      return result(safeValue);
     };
     const evaluations: Array<Promise<string>> = [evaluate("top", frameDescriptors[0])];
     for (const frameId of frameIds.slice(1)) {
@@ -5430,6 +5916,7 @@ export class NetworkObserver {
   }
 
   #tickSbobetEarly(source: ObservedSource): void {
+    if (this.#sbobetRequestBackoff.paused()) return;
     const state = this.#sbobetEarlyStates.get(source.sourceId);
     if (state?.template && (!this.#sbobetMoreTemplateCurrent(state.template) ||
       !this.#sbobetEarlyMainCurrent(state.template.mainReceipt))) this.#clearSbobetEarly(source.sourceId);
@@ -5454,18 +5941,26 @@ export class NetworkObserver {
       ? this.#sendCommand(source.tabId, method, params)
       : this.#sendCommand(source.tabId, method, params, pending.sessionId);
     const operation = (async () => {
+      const startedAtMs = this.#now();
       let succeeded = false;
       let retryAfterMs = 0;
-      const timer = setTimeout(active.cancel, 8_000);
+      const timer = setTimeout(() => active.cancel(), 8_000);
       try {
         const tree = await command("Page.getFrameTree");
         const document = sbobetDiscoveryDocument(tree, pending.frameId!);
-        if (!current() || document === null || document.loaderId !== pending.loaderId) return;
+        if (!current() || document === null || document.loaderId !== pending.loaderId ||
+          this.#sbobetRequestBackoff.paused()) return;
         const expression = buildSbobetEarlyFetchExpression(template.request, document.origin, template.headers);
         if (expression === null) return;
         const evaluated = await command("Runtime.evaluate", { expression, contextId: template.context.contextId,
           returnByValue: true, awaitPromise: true });
         const value = nestedValue(evaluated, "result", "value");
+        if (isRecord(value) && typeof value.status === "number" && value.status >= 400 && value.status <= 599) {
+          if (!current() || !await this.#requestDocumentIsCurrent(pending) || !current()) return;
+          this.#sbobetLastFailureLane = "EARLY_HTTP";
+          this.#sbobetRequestBackoff.fail(value.status,
+            typeof value.retryAfterMs === "number" ? value.retryAfterMs : 0);
+        }
         if (!current() || !isRecord(value)) return;
         if (value.status !== 200 || typeof value.body !== "string") {
           if (typeof value.retryAfterMs === "number" && Number.isFinite(value.retryAfterMs)) {
@@ -5477,9 +5972,12 @@ export class NetworkObserver {
           requestStartSequence: 0, observedAtMs: this.#now() }) === null) return;
         const observedBody = await active.acknowledgement;
         succeeded = current() && JSON.stringify(JSON.parse(observedBody)) === JSON.stringify(JSON.parse(value.body));
+        if (succeeded) this.#sbobetRequestBackoff.succeeded(startedAtMs);
       } catch { /* Only the actual, current HTTP receipt can complete this attempt. */ }
       finally {
         clearTimeout(timer);
+        // Incomplete receipts and local timeouts use this lane's retry clock.
+        // The physical operation stays occupied until its page request settles.
         active.cancel();
         await active.forwarding?.catch(() => undefined);
         if (state.active === active) {
@@ -5515,13 +6013,16 @@ export class NetworkObserver {
     const fragments = splitUtf8Text(JSON.stringify(batch), NETWORK_CHUNK_BODY_BYTES);
     const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
     let forwarded = 0;
-    const forwarding = Promise.all(fragments.map((bodyFragment, chunkIndex) => this.#emit(pending.source,
+    const forwarding = (async () => { for (const [chunkIndex, bodyFragment] of fragments.entries()) {
+      if (!current() || this.#forwardOverflowSources.has(pending.source.sourceId)) return;
+      await this.#emit(pending.source,
       early.request.url, pending.resourceType, "HTTP_RESPONSE", { encoding: "UTF8",
         body: fragments.length === 1 ? bodyFragment : JSON.stringify({ schemaVersion: 1,
           snapshotId, chunkIndex, chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
       }, { request, ...clocks, sourceGeneration: pending.sourceGeneration,
         tabGeneration: pending.tabGeneration, beforeForward: current,
-        onForwarded: () => { forwarded += 1; } }))).then(() => undefined);
+        onForwarded: () => { forwarded += 1; } });
+    } })();
     if (early.active !== undefined) early.active.forwarding = forwarding;
     await forwarding;
     if (forwarded !== fragments.length || !current()) return;
@@ -5539,10 +6040,15 @@ export class NetworkObserver {
     let state = this.#sbobetMoreStates.get(source.sourceId);
     if (state === undefined) {
       const refresh = new SbobetCatalogRefresh({ mode: "COMPLEMENTARY_MORE", now: this.#now,
+        canRequest: () => !this.#sbobetRequestBackoff.paused(),
         allocateRequestStartSequence: () => Math.max(0, (this.#sequences.get(source.sourceId) ?? 0) - 1),
         request: input => this.#requestSbobetMore(state!, input),
         onBatch: (batch, signal) => this.#acknowledgeSbobetMore(state!, batch, signal),
-        onFailure: failure => state!.active.get(failure.eventId)?.cancel()
+        onFailure: failure => {
+          // The scheduler already bounds per-event retries and pending capacity.
+          // An invalid or missing More receipt must not pause Main Live/Today.
+          state!.active.get(failure.eventId)?.cancel();
+        }
       });
       state = { source, refresh, generation: null, template: null, owners: new Map(), active: new Map(),
         todayOwners: [], earlyOwners: [], liveOwnerIds: new Set(), rosterDocumentKey: null, earlyOrdinal: 0,
@@ -5679,6 +6185,8 @@ export class NetworkObserver {
   }
 
   async #requestSbobetMore(state: SbobetObserverMoreState, input: SbobetDetailRequest): Promise<SbobetMoreRefreshResponse> {
+    if (this.#sbobetRequestBackoff.paused()) return { status: 429, retryAfterMs: this.#sbobetRequestBackoff.retryInMs() };
+    const startedAtMs = this.#now();
     const template = state.template;
     const owner = state.owners.get(input.eventId);
     if (template === null || owner === undefined || input.signal.aborted || input.generation !== state.generation ||
@@ -5692,7 +6200,7 @@ export class NetworkObserver {
     let reject!: (reason: Error) => void;
     const acknowledgement = new Promise<string>((resolve, fail) => { confirm = resolve; reject = fail; });
     void acknowledgement.catch(() => undefined);
-    const active: SbobetActiveMore = { owner, template, request, signal: input.signal,
+    const active: SbobetActiveMore = { owner, template, request, signal: input.signal, startedAtMs,
       firstRequestOrdinal: this.#nextObserverRequestOrdinal, acknowledgement, confirm,
       cancel: () => {
         input.signal.removeEventListener("abort", active.cancel);
@@ -5711,12 +6219,19 @@ export class NetworkObserver {
     try {
       const tree = await command("Page.getFrameTree");
       const document = sbobetDiscoveryDocument(tree, pending.frameId!);
-      if (!current() || document === null || document.loaderId !== pending.loaderId) { active.cancel(); return { status: 0 }; }
+      if (!current() || document === null || document.loaderId !== pending.loaderId ||
+        this.#sbobetRequestBackoff.paused()) { active.cancel(); return { status: 0 }; }
       const expression = buildSbobetMoreFetchExpression(request, document.origin);
       if (expression === null) { active.cancel(); return { status: 0 }; }
       const evaluated = await command("Runtime.evaluate", { expression, contextId: template.context.contextId,
         returnByValue: true, awaitPromise: true });
       const value = nestedValue(evaluated, "result", "value");
+      if (isRecord(value) && typeof value.status === "number" && value.status >= 400 && value.status <= 599) {
+        if (!current() || !await this.#requestDocumentIsCurrent(pending) || !current()) return { status: 0 };
+        this.#sbobetLastFailureLane = "MORE_HTTP";
+        this.#sbobetRequestBackoff.fail(value.status,
+          typeof value.retryAfterMs === "number" ? value.retryAfterMs : 0);
+      }
       if (!current() || !isRecord(value) || !Number.isSafeInteger(value.status)) { active.cancel(); return { status: 0 }; }
       if (value.status !== 200 || typeof value.body !== "string") {
         active.cancel();
@@ -5738,6 +6253,7 @@ export class NetworkObserver {
       const body = await active.acknowledgement;
       if (!this.#sbobetMoreActiveCurrent(state, active) || batch.leagueId !== active.owner.leagueId ||
         JSON.stringify(JSON.parse(body)) !== JSON.stringify(batch.groups)) throw new Error("SBOBET_MORE_RECEIPT_MISMATCH");
+      this.#sbobetRequestBackoff.succeeded(active.startedAtMs);
     } finally {
       // A cancelled acknowledgement must not free a scheduler slot while the
       // corresponding observed forward is still physically pending.
@@ -5767,13 +6283,16 @@ export class NetworkObserver {
     const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
     // No snapshot replay/cache or full-event membership claim for complementary More.
     let forwarded = 0;
-    const forwarding = Promise.all(fragments.map((bodyFragment, chunkIndex) => this.#emit(pending.source,
+    const forwarding = (async () => { for (const [chunkIndex, bodyFragment] of fragments.entries()) {
+      if (!current() || this.#forwardOverflowSources.has(pending.source.sourceId)) return;
+      await this.#emit(pending.source,
       more.request.url, pending.resourceType, "HTTP_RESPONSE", { encoding: "UTF8",
         body: fragments.length === 1 ? bodyFragment : JSON.stringify({ schemaVersion: 1,
           snapshotId, chunkIndex, chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
       }, { request, ...clocks, sourceGeneration: pending.sourceGeneration,
         tabGeneration: pending.tabGeneration, beforeForward: current,
-        onForwarded: () => { forwarded += 1; } }))).then(() => undefined);
+        onForwarded: () => { forwarded += 1; } });
+    } })();
     if (more.active !== undefined) more.active.forwarding = forwarding;
     await forwarding;
     if (forwarded === fragments.length && current()) {
@@ -5786,6 +6305,7 @@ export class NetworkObserver {
     let state = this.#sbobetDetailStates.get(source.sourceId);
     if (state === undefined) {
       const lane = new SbobetObserverDetailLane({ tabId: source.tabId,
+        requestBackoff: this.#sbobetRequestBackoff,
         currentGeneration: () => state!.generation !== null &&
           this.#isSourceGenerationCurrent(source.sourceId, state!.sourceGeneration) &&
           this.#captureTabGeneration(source.tabId) === state!.tabGeneration &&
@@ -5815,6 +6335,7 @@ export class NetworkObserver {
 
   #clearSbobetDetail(sourceId: string): void {
     this.#ksportHttpPairReceipts.delete(sourceId);
+    this.#ksportHttpPairPublications.delete(sourceId);
     this.#clearSbobetEarly(sourceId);
     this.#clearSbobetMore(sourceId);
     const state = this.#sbobetDetailStates.get(sourceId);
@@ -5886,7 +6407,7 @@ export class NetworkObserver {
     if (state.lane.rememberTemplate(template, state.generation!)) state.template = template;
   }
 
-  #rememberSbobetDetailRoster(pending: PendingRequest, body: string, bridgeGeneration: number,
+  #rememberSbobetHttpPairAndDetailRoster(pending: PendingRequest, body: string, bridgeGeneration: number,
     observedAtMs: number): void {
     if (pending.source.lobby !== "KSPORT" || !this.#isPendingCurrent(pending) ||
       this.#captureBridgeGeneration(pending.source.sourceId) !== bridgeGeneration ||
@@ -5900,6 +6421,9 @@ export class NetworkObserver {
     let native: unknown;
     try { native = JSON.parse(body); } catch { return; }
     if (!isFullKsportPartitionSnapshot(native)) return;
+    // Main authority follows the complete native partition contract. Optional
+    // Detail scheduling has stricter kickoff/roster requirements below.
+    this.#rememberKsportHttpPair(pending, bridgeGeneration, observedAtMs, Number(match[2]));
     const live = pending.providerPartition === "KSPORT_LIVE";
     const events = extractSbobetPrematchRoster(native, { phase: live ? "LIVE" : "PREMATCH" });
     if (events === null) return;
@@ -5923,13 +6447,31 @@ export class NetworkObserver {
     if (state.lane.setRoster({ generation: state.generation!, events: today.events.filter((event) => !inPlay.ids.has(event.eventId)) })) {
       state.committedOrdinal = ordinal;
       state.pendingRoster = null;
-      // This is a validated Live/Today pair already forwarded in the current
-      // source. Its original receipt clock guards recovery, never quote age.
-      this.#ksportHttpPairReceipts.set(pending.source.sourceId, {
-        sourceGeneration: pending.sourceGeneration, tabGeneration: pending.tabGeneration,
-        bridgeGeneration, observedAtMs
-      });
     }
+  }
+
+  #rememberKsportHttpPair(pending: PendingRequest, bridgeGeneration: number, observedAtMs: number,
+    ordinal: number): void {
+    let pair = this.#ksportHttpPairPublications.get(pending.source.sourceId);
+    if (pair !== undefined && (pair.sourceGeneration !== pending.sourceGeneration ||
+      pair.tabGeneration !== pending.tabGeneration || pair.bridgeGeneration !== bridgeGeneration)) pair = undefined;
+    if (pair !== undefined && (ordinal < pair.ordinal || ordinal === pair.ordinal && pair.committed)) return;
+    if (pair === undefined || ordinal > pair.ordinal) {
+      pair = { ordinal, cutoff: pending.requestStartSequence!, frameKey: pending.requestFrameKey!,
+        documentKey: pending.requestDocumentKey!, sourceGeneration: pending.sourceGeneration,
+        tabGeneration: pending.tabGeneration, bridgeGeneration, parts: new Map(), committed: false };
+      this.#ksportHttpPairPublications.set(pending.source.sourceId, pair);
+    }
+    if (pair.cutoff !== pending.requestStartSequence || pair.frameKey !== pending.requestFrameKey ||
+      pair.documentKey !== pending.requestDocumentKey) return;
+    if (!pair.parts.has(pending.providerPartition!)) pair.parts.set(pending.providerPartition!, observedAtMs);
+    if (!pair.parts.has("KSPORT_LIVE") || !pair.parts.has("KSPORT_TODAY")) return;
+    pair.committed = true;
+    // This is the original older part receipt, never publication completion time.
+    this.#ksportHttpPairReceipts.set(pending.source.sourceId, {
+      sourceGeneration: pending.sourceGeneration, tabGeneration: pending.tabGeneration,
+      bridgeGeneration, observedAtMs: Math.min(...pair.parts.values())
+    });
   }
 
   async #emitSbobetDetail(source: ObservedSource, batch: SbobetDetailBatch, signal: AbortSignal,
@@ -5965,11 +6507,14 @@ export class NetworkObserver {
       if (!valid) admitted = false;
       return valid;
     };
-    await Promise.all(fragments.map((bodyFragment, chunkIndex) => this.#emit(source, url, "Fetch", "HTTP_RESPONSE", {
+    for (const [chunkIndex, bodyFragment] of fragments.entries()) {
+      if (!current() || this.#forwardOverflowSources.has(source.sourceId)) throw new Error("SBOBET_DETAIL_STALE");
+      await this.#emit(source, url, "Fetch", "HTTP_RESPONSE", {
       encoding: "UTF8", body: fragments.length === 1 ? bodyFragment : JSON.stringify({ schemaVersion: 1,
         snapshotId, chunkIndex, chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
     }, { request, observedAtMs: batch.observedAtMs, receivedMonotonicMs: receipt.receivedMonotonicMs,
-      sourceGeneration: binding.sourceGeneration, tabGeneration: binding.tabGeneration, beforeForward })));
+      sourceGeneration: binding.sourceGeneration, tabGeneration: binding.tabGeneration, beforeForward });
+    }
     if (!admitted || !current()) throw new Error("SBOBET_DETAIL_STALE");
   }
 
@@ -6013,7 +6558,14 @@ export class NetworkObserver {
       `sockets[${[...(this.#socketPathsSeen.get(source.sourceId) ?? new Map())]
         .map(([path, count]) => `${path}:${count}`).join(",")}] ` +
       (this.#lastCatalogShape.get(source.sourceId) ?? "");
-    return source.lobby === "KSPORT" ? (this.#sbobetDiscoveryText(source.sourceId) + existing).slice(0, 900) : existing;
+    if (source.lobby === "CMD") {
+      const outcome = this.#cmdRecoveryOutcomes.get(source.sourceId);
+      return (outcome === undefined ? existing :
+        `CMD_LAST[code:${outcome.code};atMs:${outcome.observedAtMs}] ${existing}`).slice(0, 900);
+    }
+    return source.lobby === "KSPORT" ? (`SBO_PAUSE[${this.#sbobetLastFailureLane};` +
+      `status:${this.#sbobetRequestBackoff.lastStatus()};waitMs:${this.#sbobetRequestBackoff.retryInMs()}] ` +
+      this.#sbobetDiscoveryText(source.sourceId) + existing).slice(0, 900) : existing;
   }
 
   /** Existing main-world contexts only; passive public DOM, no click/fetch/attach. */
@@ -6078,7 +6630,7 @@ export class NetworkObserver {
     // only be judged by whether the fixtures appeared - not by whether it
     // found the tab at all.
     const diagnostic = source.lobby === "KSPORT" || source.lobby === "TSPORT" ||
-      source.lobby === "SABA"
+      source.lobby === "SABA" || source.lobby === "CMD"
       ? this.#wsAttachDiagnostic(source) : null;
     const btiPageHealth = source.lobby === "BTI" ? await this.probeBtiPageHealth(source) : null;
     const webSockets = diagnostic === null ? 0 : [...this.#webSockets.values()].filter((socket) =>
@@ -6095,6 +6647,11 @@ export class NetworkObserver {
           discoveryAttempted: this.#sabaNavigationProbeAttempts.has(source.sourceId),
           collectorState: this.#sabaCollectors.has(source.sourceId)
             ? this.#sabaCollectors.get(source.sourceId)!.finished ? "FINISHED" : "RUNNING" : "NONE",
+          lastErrorCode: this.#sabaCollectors.get(source.sourceId)?.lastErrorCode() ??
+            this.#sabaCollectors.get(source.sourceId)?.collector.terminalError ?? null,
+          currentPeriod: this.#sabaCollectors.get(source.sourceId)?.collector.currentPeriod ?? null,
+          mainRosterComplete: this.#sabaCollectors.get(source.sourceId)?.mainRosterPublished ?? false,
+          hiddenMarketsComplete: this.#sabaCollectors.get(source.sourceId)?.collector.hiddenMarketsComplete ?? false,
           domBlocked: this.#sabaCollectorDomBlocks.has(source.sourceId),
           probeBlocked: this.#sabaProbePublicationBlocks.has(source.sourceId)
         } } : {}),
@@ -6172,25 +6729,24 @@ export class NetworkObserver {
 
   async handleEvent(source: ObservedSource, method: string, rawParams: unknown,
     sessionId?: string): Promise<void> {
+    if (this.#forwardOverflowSources.has(source.sourceId) && method.startsWith("Network.")) return;
     const sabaProbeBlockedAtReceipt = source.lobby === "SABA" &&
       method === "Network.webSocketFrameReceived" &&
       this.#sabaProbePublicationBlocks.has(source.sourceId);
     if (source.lobby === "SABA" && method.startsWith("Network.webSocket")) {
       const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
-      const tailKey = `${source.sourceId}\u0000${String(sourceGeneration)}`;
-      const prior = this.#sabaWebSocketEventTails.get(tailKey) ?? Promise.resolve();
-      const operation = prior.catch(() => undefined).then(async () => {
-        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+      const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+      const tabGeneration = this.#captureTabGeneration(source.tabId);
+      const operation = this.#sabaWebSocketEvents.enqueue(source.sourceId,
+        retainedPayloadBytes(rawParams, this.#maxPendingForwardBytes), async () => {
+        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+          this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
+          this.#captureTabGeneration(source.tabId) !== tabGeneration ||
+          this.#forwardOverflowSources.has(source.sourceId)) return;
         await this.#handleEvent(source, method, rawParams, sessionId, sabaProbeBlockedAtReceipt);
       });
-      this.#sabaWebSocketEventTails.set(tailKey, operation);
-      try {
-        await operation;
-      } finally {
-        if (this.#sabaWebSocketEventTails.get(tailKey) === operation) {
-          this.#sabaWebSocketEventTails.delete(tailKey);
-        }
-      }
+      if (operation === null) this.#retireOverflowingForwarding(source);
+      else await operation;
       return;
     }
     await this.#handleEvent(source, method, rawParams, sessionId, sabaProbeBlockedAtReceipt);
@@ -6198,6 +6754,7 @@ export class NetworkObserver {
 
   async #handleEvent(source: ObservedSource, method: string, rawParams: unknown,
     sessionId?: string, sabaProbeBlockedAtReceipt = false): Promise<void> {
+    const receiptBridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const params = isRecord(rawParams) ? rawParams : {};
     if (method === "Network.webSocketCreated" && (source.lobby === "KSPORT" || source.lobby === "TSPORT")) {
       this.#wsAttachDiagnostic(source).webSocketCreated += 1;
@@ -6465,7 +7022,13 @@ export class NetworkObserver {
         this.#requestStreamIds.delete(key);
       }
       if (source.lobby === "KSPORT" && (!this.#ksportRefreshesInFlight.has(source.sourceId) ||
-        this.#currentKsportNativeHttpCapture(source) !== null) &&
+        this.#currentKsportNativeHttpCapture(source) !== null ||
+        // After API reconnect, the prior bridge's template cannot arm All
+        // Dates. Observe the first successful actual Main request in this
+        // bridge even when our HTTP refresh initiated it; do not reuse old
+        // completion or fabricate a receipt from the evaluation result.
+        this.#sbobetEventRequests.get(source.sourceId)?.bridgeGeneration !==
+          this.#captureBridgeGeneration(source.sourceId)) &&
         request !== null && typeof request.url === "string" && requestMethod === "GET" &&
         request.hasPostData !== true && !(typeof request.postData === "string" && request.postData.length > 0)) {
         try {
@@ -6479,8 +7042,14 @@ export class NetworkObserver {
               /^(?:cookie|host|content-length|accept-encoding|connection|origin|referer|user-agent|sec-|:)/iu.test(name) ||
                 (typeof value !== "string" && typeof value !== "number") ? [] : [[name, String(value)]]));
             const identity = this.#requestIdentities.get(key);
+            const nativeRecoveryTargetId = requestDocument === null && sessionId !== undefined &&
+              this.#ksportNativeHttpRecoveries.has(source.sourceId) ?
+              [...(this.#ksportAttachedTargetSessions.get(source.sourceId)?.entries() ?? [])]
+                .find(([, attachedSession]) => attachedSession === sessionId)?.[0] : undefined;
             if (identity !== undefined) this.#requestIdentities.set(key, { ...identity,
               sbobetEventRequest: { url: request.url, headers, method: "GET", hasPostData: false,
+                ...(this.#ksportNativeHttpRecoveries.has(source.sourceId) ? { nativeRecovery: true as const } : {}),
+                ...(nativeRecoveryTargetId === undefined ? {} : { nativeRecoveryTargetId }),
                 observerRequestOrdinal: identity.observerRequestOrdinal,
                 sourceGeneration: this.#captureSourceGeneration(source.sourceId),
                 bridgeGeneration: this.#captureBridgeGeneration(source.sourceId) } });
@@ -6790,6 +7359,7 @@ export class NetworkObserver {
         // OPEN from the old SABA document.
         await this.#sabaDocumentMarker(socket.source, socket.sessionId, socket.sourceGeneration);
         if (socketIsClosing(socket) ||
+          this.#captureBridgeGeneration(source.sourceId) !== receiptBridgeGeneration ||
           !this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration)) return;
         socket.sabaLifecycleAnnounced = true;
         await this.#emit(socket.source, socket.url, "WebSocket", "WS_STATE", {
@@ -6797,6 +7367,7 @@ export class NetworkObserver {
         }, { request: { streamId: socket.streamId }, ...clocks,
           sourceGeneration: socket.sourceGeneration });
         if (socketIsClosing(socket) ||
+          this.#captureBridgeGeneration(source.sourceId) !== receiptBridgeGeneration ||
           !this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration)) return;
       }
       if (socket.ksportRecovery !== undefined) {
@@ -6917,7 +7488,8 @@ export class NetworkObserver {
       if (opcode !== 2) {
         if (socket.source.lobby === "SABA" || socket.source.lobby === "KSPORT" || socket.source.lobby === "SBO") {
           await this.#sabaDocumentMarker(socket.source, socket.sessionId, socket.sourceGeneration);
-          if (!this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration)) return;
+          if (!this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration) ||
+            this.#captureBridgeGeneration(source.sourceId) !== receiptBridgeGeneration) return;
         }
         this.#rememberTsportWsEvent(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
         this.#rememberCatalogWsFrame(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
@@ -6945,6 +7517,28 @@ export class NetworkObserver {
       if (requestIdentity === undefined) return;
       const { sbobetMore: moreCandidate, sbobetEarly: earlyCandidate,
         sbobetEventRequest: eventCandidate, ...httpIdentity } = requestIdentity;
+      if (source.lobby === "KSPORT" && eventCandidate !== undefined && response.url === eventCandidate.url &&
+        typeof response.status === "number" && response.status >= 400 && response.status <= 599 &&
+        (providerPartition === "KSPORT_LIVE" || providerPartition === "KSPORT_TODAY") &&
+        eventCandidate.nativeRecovery === true &&
+        this.#isSourceGenerationCurrent(source.sourceId, eventCandidate.sourceGeneration) &&
+        this.#captureTabGeneration(source.tabId) === requestIdentity.tabGeneration &&
+        this.#captureBridgeGeneration(source.sourceId) === eventCandidate.bridgeGeneration) {
+        if (eventCandidate.nativeRecoveryTargetId !== undefined) {
+          if (sessionId === undefined || this.#ksportAttachedTargetSessions.get(source.sourceId)
+            ?.get(eventCandidate.nativeRecoveryTargetId) !== sessionId) return;
+        } else {
+          const refusalPending: PendingRequest = { source, sourceGeneration: eventCandidate.sourceGeneration,
+            url: response.url, resourceType, ...httpIdentity,
+            ...(sessionId === undefined ? {} : { sessionId }) };
+          if (!await this.#requestDocumentIsCurrent(refusalPending) || !this.#isPendingCurrent(refusalPending) ||
+            this.#captureBridgeGeneration(source.sourceId) !== eventCandidate.bridgeGeneration) return;
+        }
+        const retryAfter = isRecord(response.headers) ? Object.entries(response.headers)
+          .find(([name]) => name.toLowerCase() === "retry-after")?.[1] : undefined;
+        this.#sbobetLastFailureLane = "NATIVE_HTTP";
+        this.#sbobetRequestBackoff.fail(response.status, sbobetRetryAfterMs(retryAfter, this.#now()));
+      }
       // A pending, failed, redirected or retired request cannot replace the
       // last working main-feed URL/header pair. Response arrival is not request order.
       if (eventCandidate !== undefined && response.status === 200 && response.url === eventCandidate.url &&
@@ -7061,7 +7655,9 @@ export class NetworkObserver {
         }
         const response = await this.#readResponseBody(source.tabId, requestId,
           isImGetSeUrl(pending.source, pending.url), pending.sessionId);
-        if (!this.#isPendingCurrent(pending)) return;
+        if (!this.#isPendingCurrent(pending) ||
+          this.#captureBridgeGeneration(source.sourceId) !== receiptBridgeGeneration ||
+          this.#forwardOverflowSources.has(source.sourceId)) return;
         if (!isRecord(response) || typeof response.body !== "string") return;
         if (pending.sbobetEarly !== undefined) {
           const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
@@ -7076,7 +7672,9 @@ export class NetworkObserver {
           return;
         }
         if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
-        if (!this.#isPendingCurrent(pending)) return;
+        if (!this.#isPendingCurrent(pending) ||
+          this.#captureBridgeGeneration(source.sourceId) !== receiptBridgeGeneration ||
+          this.#forwardOverflowSources.has(source.sourceId)) return;
         if (pending.sbobetDiscovery !== undefined) {
           if (this.#captureBridgeGeneration(source.sourceId) !== pending.sbobetDiscovery.bridgeGeneration ||
             this.#sbobetDiscoveryBudget(source.sourceId) === null) {
@@ -7090,6 +7688,8 @@ export class NetworkObserver {
           }
           if (pending.sbobetDiscovery.diagnosticOnly) return;
         }
+        if (this.#captureBridgeGeneration(source.sourceId) !== receiptBridgeGeneration ||
+          this.#forwardOverflowSources.has(source.sourceId)) return;
         responseBodyRead = true;
         if (response.base64Encoded === true) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
@@ -7105,32 +7705,62 @@ export class NetworkObserver {
           return;
         }
         await this.#recoverMissingImBaseline(pending);
-        if (!this.#isPendingCurrent(pending)) return;
+        if (!this.#isPendingCurrent(pending) ||
+          this.#captureBridgeGeneration(source.sourceId) !== receiptBridgeGeneration ||
+          this.#forwardOverflowSources.has(source.sourceId)) return;
         if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
-        if (!this.#isPendingCurrent(pending)) return;
+        if (!this.#isPendingCurrent(pending) ||
+          this.#captureBridgeGeneration(source.sourceId) !== receiptBridgeGeneration ||
+          this.#forwardOverflowSources.has(source.sourceId)) return;
         const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
         this.#rememberHttpSnapshot(pending, safeBody, clocks);
         const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
         if (fragments.length === 1) {
+          let forwarded = false;
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: safeBody
           }, { request: pendingRequestMetadata(pending), ...clocks,
-            sourceGeneration: pending.sourceGeneration, tabGeneration: pending.tabGeneration });
-          this.#completeCmdRecoveryRequest(cmdRecoveryToken, pending, safeBody);
+            sourceGeneration: pending.sourceGeneration, tabGeneration: pending.tabGeneration,
+            onForwarded: () => { forwarded = true; } });
+          if (!forwarded) return;
+          const correlatedRecovery = this.#completeCmdRecoveryRequest(cmdRecoveryToken, pending, safeBody);
+          this.#rememberCmdFullBaselineReceipt(pending, safeBody, clocks.observedAtMs, receiptBridgeGeneration, correlatedRecovery);
           return;
         }
         if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return;
         const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
         const emissionPending = pending;
-        const emissions = fragments.map((bodyFragment, chunkIndex) =>
-          this.#emit(emissionPending.source, emissionPending.url, emissionPending.resourceType, "HTTP_RESPONSE", {
+        const emissionBridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+        for (const [chunkIndex, bodyFragment] of fragments.entries()) {
+          if (!this.#isPendingCurrent(emissionPending) || this.#forwardOverflowSources.has(source.sourceId) ||
+            this.#captureBridgeGeneration(source.sourceId) !== emissionBridgeGeneration) return;
+          let forwarded = false;
+          await this.#emit(emissionPending.source, emissionPending.url, emissionPending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
               chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
           }, { request: pendingRequestMetadata(emissionPending), ...clocks,
             sourceGeneration: emissionPending.sourceGeneration, tabGeneration: emissionPending.tabGeneration,
-            beforeForward: () => this.#requestDocumentIsCurrent(emissionPending) }));
-        await Promise.all(emissions);
-        this.#completeCmdRecoveryRequest(cmdRecoveryToken, pending, safeBody);
+            // Hundreds of renderer round trips can age a healthy large body
+            // past the API receipt limit. Intermediate fragments cannot
+            // publish a body; its final fragment still needs current-loader
+            // proof, while every fragment keeps the source/tab/bridge fences.
+            ...((chunkIndex === 0 || chunkIndex === fragments.length - 1)
+              ? { beforeForward: () => this.#requestDocumentIsCurrent(emissionPending) } : {}),
+            onForwarded: () => { forwarded = true; } });
+          if (!forwarded) {
+            // Once a prefix crossed the bridge, a missing fragment requires
+            // the same source resync as a dropped delta. Never send its suffix
+            // or acknowledge an incomplete CMD baseline as recovered.
+            if (chunkIndex > 0 && this.#isPendingCurrent(emissionPending) &&
+              this.#captureBridgeGeneration(source.sourceId) === emissionBridgeGeneration) {
+              this.#noteCaptureExit(source, "NETWORK_BODY_DOCUMENT_UNAVAILABLE");
+              this.#retireOverflowingForwarding(source);
+            }
+            return;
+          }
+        }
+        const correlatedRecovery = this.#completeCmdRecoveryRequest(cmdRecoveryToken, pending, safeBody);
+        this.#rememberCmdFullBaselineReceipt(pending, safeBody, clocks.observedAtMs, receiptBridgeGeneration, correlatedRecovery);
       } catch {
         if (!responseBodyRead && isImGetSeUrl(pending.source, pending.url) &&
           this.#isPendingCurrent(pending)) {
@@ -7223,19 +7853,24 @@ export class NetworkObserver {
         { reconcileCutoffSequence: requestMetadata.reconcileCutoffSequence }) };
     const safeBody = redactNetworkBody(body);
     await this.#recoverMissingImBaseline(pending);
-    if (!this.#isPendingCurrent(pending)) return;
+    if (!this.#isPendingCurrent(pending) || this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
+      this.#forwardOverflowSources.has(source.sourceId)) return;
     if (pending.requestDocumentKey !== undefined && requestMetadata.currentDocumentConfirmed !== true &&
       !await this.#requestDocumentIsCurrent(pending)) return;
-    if (!this.#isPendingCurrent(pending)) return;
+    if (!this.#isPendingCurrent(pending) || this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
+      this.#forwardOverflowSources.has(source.sourceId)) return;
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
     const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
     const sanitizedRequestMetadata = pendingRequestMetadata(pending);
     const request = Object.keys(sanitizedRequestMetadata).length === 0 ? {} : { request: sanitizedRequestMetadata };
+    let forwarded = 0;
+    const onForwarded = () => { forwarded += 1; };
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
-        { ...request, ...clocks, sourceGeneration, tabGeneration });
-      this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration, clocks.observedAtMs);
+        { ...request, ...clocks, sourceGeneration, tabGeneration, onForwarded });
+      if (forwarded !== 1) return;
+      this.#rememberSbobetHttpPairAndDetailRoster(pending, safeBody, bridgeGeneration, clocks.observedAtMs);
       await this.#rememberSbobetMoreRoster(pending, safeBody, bridgeGeneration);
       return;
     }
@@ -7245,13 +7880,17 @@ export class NetworkObserver {
     // still fenced by source, bridge and tab generation in #emit; repeating a
     // remote Page.getFrameTree call for every chunk stretched a two-part IM
     // baseline beyond the 30-second realtime lease.
-    const emissions = fragments.map((bodyFragment, chunkIndex) => this.#emit(source, url, resourceType, "HTTP_RESPONSE", {
+    for (const [chunkIndex, bodyFragment] of fragments.entries()) {
+      if (!this.#isPendingCurrent(pending) || this.#forwardOverflowSources.has(source.sourceId) ||
+        this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration) return;
+      await this.#emit(source, url, resourceType, "HTTP_RESPONSE", {
         encoding: "UTF8",
         body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex, chunkCount: fragments.length,
           bodyEncoding: "UTF8", bodyFragment })
-      }, { ...request, ...clocks, sourceGeneration, tabGeneration }));
-    await Promise.all(emissions);
-    this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration, clocks.observedAtMs);
+      }, { ...request, ...clocks, sourceGeneration, tabGeneration, onForwarded });
+    }
+    if (forwarded !== fragments.length) return;
+    this.#rememberSbobetHttpPairAndDetailRoster(pending, safeBody, bridgeGeneration, clocks.observedAtMs);
     await this.#rememberSbobetMoreRoster(pending, safeBody, bridgeGeneration);
   }
 
@@ -8225,36 +8864,48 @@ export class NetworkObserver {
       }
       return;
     }
-    const cache = this.#sabaWsSnapshotCache(sourceId);
-    if (cache === null) return;
-    const sourceGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
-    const previous = this.#sabaSnapshotStorageTails.get(sourceId) ?? Promise.resolve();
-    const operation = previous.catch(() => undefined).then(async () => {
-      if (!this.#isSourceGenerationCurrent(sourceId, sourceGeneration)) return;
-      await this.#saveSabaWsSnapshots!(cache).catch(() => undefined);
-      if (this.#isSourceGenerationCurrent(sourceId, sourceGeneration)) {
-        this.#sabaSnapshotLastSavedAtMs.set(sourceId, this.#now());
-      }
-    });
-    const settled = operation.finally(() => {
-      if (this.#sabaSnapshotStorageTails.get(sourceId) === settled) {
-        this.#sabaSnapshotStorageTails.delete(sourceId);
-      }
-    });
-    this.#sabaSnapshotStorageTails.set(sourceId, settled);
+    const work = this.#sabaSnapshotStorageWork(sourceId);
+    // Retain only the request generation. Materialize the newest valid cache
+    // when its write starts, never one historical copy per incoming frame.
+    work.saveGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
   }
 
   #scheduleSabaWsSnapshotClear(sourceId: string): Promise<void> {
-    const previous = this.#sabaSnapshotStorageTails.get(sourceId) ?? Promise.resolve();
-    const operation = previous.catch(() => undefined)
-      .then(() => this.#clearSabaWsSnapshots(sourceId).catch(() => undefined));
-    const settled = operation.finally(() => {
-      if (this.#sabaSnapshotStorageTails.get(sourceId) === settled) {
-        this.#sabaSnapshotStorageTails.delete(sourceId);
+    const work = this.#sabaSnapshotStorageWork(sourceId);
+    work.saveGeneration = null;
+    work.clearPending = true;
+    return work.operation;
+  }
+
+  #sabaSnapshotStorageWork(sourceId: string): { saveGeneration: number | null;
+    clearPending: boolean; operation: Promise<void> } {
+    const existing = this.#sabaSnapshotStorage.get(sourceId);
+    if (existing !== undefined) return existing;
+    const work = { saveGeneration: null as number | null, clearPending: false,
+      operation: Promise.resolve() };
+    this.#sabaSnapshotStorage.set(sourceId, work);
+    work.operation = Promise.resolve().then(async () => {
+      while (work.clearPending || work.saveGeneration !== null) {
+        if (work.clearPending) {
+          work.clearPending = false;
+          await this.#clearSabaWsSnapshots(sourceId).catch(() => undefined);
+          continue;
+        }
+        const sourceGeneration = work.saveGeneration!;
+        work.saveGeneration = null;
+        if (!this.#isSourceGenerationCurrent(sourceId, sourceGeneration)) continue;
+        const cache = this.#sabaWsSnapshotCache(sourceId);
+        if (cache === null) continue;
+        await this.#saveSabaWsSnapshots!(cache).catch(() => undefined);
+        if (this.#isSourceGenerationCurrent(sourceId, sourceGeneration)) {
+          this.#sabaSnapshotLastSavedAtMs.set(sourceId, this.#now());
+        }
       }
+      // Delete before settling the shared completion, with no microtask gap in
+      // which another save could join an already-finished writer and get lost.
+      if (this.#sabaSnapshotStorage.get(sourceId) === work) this.#sabaSnapshotStorage.delete(sourceId);
     });
-    this.#sabaSnapshotStorageTails.set(sourceId, settled);
-    return settled;
+    return work;
   }
 
   #sabaWsSnapshotCache(sourceId: string): PersistedSabaWsSnapshots | null {
@@ -8409,14 +9060,16 @@ export class NetworkObserver {
       readonly onForwarded?: () => void;
     } = {}
   ): Promise<void> {
+    if (this.#forwardOverflowSources.has(source.sourceId)) return;
     const sourceGeneration = metadata.sourceGeneration ?? this.#captureSourceGeneration(source.sourceId);
     const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const tabGeneration = metadata.tabGeneration ?? this.#captureTabGeneration(source.tabId);
-    const previous = this.#emissionTails.get(source.sourceId) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(async () => {
+    const current = this.#emissions.enqueue(source.sourceId,
+      retainedPayloadBytes(payload, this.#maxPendingForwardBytes) + url.length * 2, async () => {
       if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
         this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
-        this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
+        this.#captureTabGeneration(source.tabId) !== tabGeneration ||
+        this.#forwardOverflowSources.has(source.sourceId)) return;
       if (metadata.beforeForward !== undefined) {
         const admitted = metadata.beforeForward();
         // A synchronous context/signal fence must stay in the same microtask as
@@ -8425,7 +9078,8 @@ export class NetworkObserver {
       }
       if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
         this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
-        this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
+        this.#captureTabGeneration(source.tabId) !== tabGeneration ||
+        this.#forwardOverflowSources.has(source.sourceId)) return;
       const sequence = this.#sequences.get(source.sourceId) ?? 0;
       try {
         const redacted = redactNetworkEnvelope({
@@ -8455,12 +9109,24 @@ export class NetworkObserver {
         if (!(error instanceof Error) || !/^BRIDGE_PAYLOAD_/u.test(error.message)) throw error;
       }
     });
-    this.#emissionTails.set(source.sourceId, current);
-    try {
-      await current;
-    } finally {
-      if (this.#emissionTails.get(source.sourceId) === current) this.#emissionTails.delete(source.sourceId);
-    }
+    if (current === null) this.#retireOverflowingForwarding(source);
+    else await current;
+  }
+
+  #clearPendingForwarding(sourceId: string): void {
+    this.#emissions.clear(sourceId);
+    this.#sabaWebSocketEvents.clear(sourceId);
+  }
+
+  #retireOverflowingForwarding(source: ObservedSource): void {
+    if (this.#forwardOverflowSources.has(source.sourceId)) return;
+    this.#emissions.clear(source.sourceId);
+    this.#sabaWebSocketEvents.clear(source.sourceId);
+    this.#forwardOverflowSources.add(source.sourceId);
+    // A lost delta invalidates this lane. Only an explicit epoch replacement
+    // reopens it; waiting for space would retain the rejected payload instead.
+    try { void Promise.resolve(this.#onForwardOverflow?.(source)).catch(() => undefined); }
+    catch { /* Leave the source fenced until recovery replaces its epoch. */ }
   }
 
   #captureSourceGeneration(sourceId: string): number {
@@ -8516,7 +9182,10 @@ export class NetworkObserver {
     }
     if (pending.frameId === undefined || pending.loaderId === undefined ||
       pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return false;
-    const frameTree = await (pending.sessionId === undefined
+    // Multipart admission owns the source's serial forwarding lane. A dead
+    // Chrome read must fail closed within the existing command budget so it
+    // cannot retain that lane across source/bridge epoch replacement.
+    const frameTree = await this.#withFrameCommandTimeout(pending.sessionId === undefined
       ? this.#sendCommand(pending.source.tabId, "Page.getFrameTree")
       : this.#sendCommand(pending.source.tabId, "Page.getFrameTree", {}, pending.sessionId))
       .catch(() => null);

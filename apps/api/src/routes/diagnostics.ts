@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { getHeapStatistics } from "node:v8";
 import type { PipelineDiagnostic } from "../diagnostics/pipeline-telemetry.js";
 
 export interface PipelineDiagnosticsLike {
@@ -7,6 +8,14 @@ export interface PipelineDiagnosticsLike {
 }
 
 export function registerDiagnosticRoutes(app: FastifyInstance, diagnostics: PipelineDiagnosticsLike): void {
+  app.get("/api/diag/runtime", async () => {
+    const memory = process.memoryUsage();
+    const cpu = process.cpuUsage();
+    return { pid: process.pid, uptimeMs: Math.floor(process.uptime() * 1_000),
+      rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal,
+      heapLimitBytes: getHeapStatistics().heap_size_limit,
+      cpuUserMicros: cpu.user, cpuSystemMicros: cpu.system };
+  });
   app.get("/api/diag/pipeline", async (_request, reply) => {
     try {
       return { accounts: await diagnostics.list() };

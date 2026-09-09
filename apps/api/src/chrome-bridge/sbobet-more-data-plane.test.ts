@@ -39,6 +39,13 @@ function more(sequence: number, groups: Groups, cutoff = 2, ordinal = sequence):
     eventId: EVENT, leagueId: "481", requestStartSequence: cutoff, observedAtMs: base(sequence).observedAtMs,
     marketContainerComplete: false, groups }) } };
 }
+function emptyEarly(sequence: number): ChromeBridgeEnvelope {
+  const receipt = main(sequence, "today", null);
+  return { ...receipt, request: { ...receipt.request, streamId: `sbobet-early:8:${sequence}`,
+    reconcileCutoffSequence: sequence - 1 }, payload: { encoding: "UTF8", body: JSON.stringify({
+      kind: "SBOBET_EARLY_CATALOG", generation: EPOCH, requestStartSequence: sequence - 1,
+      observedAtMs: receipt.observedAtMs, rosterComplete: true, body: [] }) } };
+}
 function detail(sequence: number, groups: Groups, cutoff: number): ChromeBridgeEnvelope {
   const receipt = more(sequence, groups, cutoff);
   return { ...receipt, request: { ...receipt.request, pathnameClass: "/api/v2/getEvent",
@@ -300,9 +307,10 @@ describe("More through the real catalog data plane", () => {
       revisions.publish(value.accountId, value, { snapshotState, freshnessMs: 60_000 }) });
     const ingest = (receipt: ChromeBridgeEnvelope) => plane.ingest(ChromeBridgeEnvelopeSchema.parse(receipt), { connectionGeneration: 1 });
     ingest(main(1, "live", null));
-    expect(ingest(main(2, "today", { "3": [goal()] }))).toBe(true);
+    expect(ingest(main(2, "today", { "3": [goal()] }))).toBe(false);
+    expect(ingest(emptyEarly(3))).toBe(true);
     const previous = revisions.get("catalog-source:SBOBET:FOOTBALL")!;
-    const invalid = more(3, { "3": [goal("0")] });
+    const invalid = more(4, { "3": [goal("0")] }, 3);
     expect(JSON.parse(invalid.payload.body).marketContainerComplete).toBe(false);
     expect(ingest(invalid)).toBe(true);
     const current = revisions.get(previous.accountId)!;
@@ -310,8 +318,8 @@ describe("More through the real catalog data plane", () => {
     expect(current.catalog.quotes).toEqual([]);
     expect(current.catalog.markets).toEqual([]);
     expect(current.catalog.nativeMarketObservations).toContainEqual(expect.objectContaining({
-      providerMarketId: GOAL, disposition: "EXCLUDED", observedAtMs: WALL + 300 }));
-    expect(ingest(more(4, {}, 3))).toBe(false);
+      providerMarketId: GOAL, disposition: "EXCLUDED", observedAtMs: WALL + 400 }));
+    expect(ingest(more(5, {}, 4))).toBe(false);
     expect(revisions.get(previous.accountId)!.revision).toBe(current.revision);
   });
 
@@ -322,12 +330,13 @@ describe("More through the real catalog data plane", () => {
       revisions.publish(value.accountId, value, { snapshotState, freshnessMs: 60_000 }) });
     const ingest = (receipt: ChromeBridgeEnvelope) => plane.ingest(ChromeBridgeEnvelopeSchema.parse(receipt), { connectionGeneration: 1 });
     expect(ingest(main(1, "live", null))).toBe(false);
-    expect(ingest(main(2, "today", { "3": [goal()] }))).toBe(true);
-    expect(ingest(more(3, { "21": [corner()] }))).toBe(true);
+    expect(ingest(main(2, "today", { "3": [goal()] }))).toBe(false);
+    expect(ingest(emptyEarly(3))).toBe(true);
+    expect(ingest(more(4, { "21": [corner()] }, 3))).toBe(true);
     const current = revisions.get("catalog-source:SBOBET:FOOTBALL")!;
     expect(current.catalog.quotes).toContainEqual(expect.objectContaining({ providerMarketId: CORNER,
-      rawOdds: "0.91", receivedMonotonicMs: 1030, sequence: 3 }));
-    expect(ingest(more(4, {}, 3))).toBe(false);
+      rawOdds: "0.91", receivedMonotonicMs: 1040, sequence: 4 }));
+    expect(ingest(more(5, {}, 4))).toBe(false);
     expect(revisions.get(current.accountId)!.revision).toBe(current.revision);
     expect(await plane.read(current.accountId)).toEqual(current.catalog);
   });

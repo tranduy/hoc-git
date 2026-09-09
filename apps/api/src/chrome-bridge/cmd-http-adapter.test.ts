@@ -282,6 +282,43 @@ describe("CmdHttpCatalogAdapter", () => {
     expect(adapter.decode(envelope({ ...fullResponse, t: 99 }, 7, 1))).toEqual([]);
   });
 
+  it.each([{ kind: "empty", data: [] }, { kind: "price change", data: oddsChange.data }])(
+    "renews a newly observed full at the cursor reached by an incremental response ($kind)", ({ data }) => {
+    const adapter = new CmdHttpCatalogAdapter();
+    adapter.decode(envelope({ ...fullResponse, t: 100 }, 1));
+    adapter.decode(envelope({ t: 101, a: true, data }, 2, 3));
+
+    const renewedEnvelope = envelope({ ...fullResponse, t: 101 }, 3);
+    expect(adapter.decode(renewedEnvelope).at(-1)).toMatchObject({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", generation: "cmd:101:observation:3",
+      observedAtMs: renewedEnvelope.observedAtMs
+    });
+    expect(adapter.decode(renewedEnvelope)).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("cursor-same-not-renewed");
+    expect(adapter.decode(envelope({ ...fullResponse, t: 100 }, 4))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("cursor-older");
+  });
+
+  it("keeps request, owner and completeness fences when a full follows an incremental cursor", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    adapter.decode(envelope({ ...fullResponse, t: 100 }, 1));
+    adapter.decode(envelope({ t: 101, a: true, data: [] }, 2, 3));
+    const next = envelope({ ...fullResponse, t: 101 }, 3);
+    for (const request of [
+      { ...next.request, observerRequestId: "observer-a:request:1" },
+      { ...next.request, observerRequestId: "observer-b:request:3" },
+      { ...next.request, requestDocumentKey: "http-document:other" }
+    ]) {
+      expect(adapter.decode({ ...next, request })).toEqual([]);
+      expect(adapter.takeIgnoreReason()).toBe("cursor-same-not-renewed");
+    }
+    expect(adapter.decode(envelope({ t: 101, a: true, data: [], today: [] }, 4))).toEqual([]);
+    expect(adapter.decode(envelope({ t: 101, a: true, data: [], today: [], f: [] }, 5))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("baseline-no-full-rows");
+    expect(adapter.decode(envelope({ ...fullResponse, t: 101 }, 6)).at(-1))
+      .toMatchObject({ authoritativeBaseline: true, generation: "cmd:101:observation:6" });
+  });
+
   it("renews beyond a fixed history window but rejects an unseen older request ordinal", () => {
     const adapter = new CmdHttpCatalogAdapter();
     const body = { ...fullResponse, t: 100 };

@@ -1,7 +1,7 @@
 import { isSupportedFootballTwoWayLine, normalizeSbobetCatalog,
   type SbobetCatalogInputRecord, type SbobetCatalogMarket,
   type SbobetCatalogSelection } from "@tool-chenh/adapters";
-import { footballBinaryMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, footballResultMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
 
 export interface SbobetMarketGroupShape {
   readonly groupKey: string;
@@ -34,7 +34,8 @@ function pair(value: unknown, selection: SbobetCatalogSelection["selection"],
   if (match === null) return null;
   const price = Number(match[1]);
   if (!Number.isFinite(price) || (format === "DECIMAL" ? price <= 1 : price === 0 || Math.abs(price) > 1)) return null;
-  const expectedSide = selection === "HOME" || selection === "OVER" || selection === "ODD" || selection === "YES" ? "h" : "a";
+  const expectedSide = selection === "DRAW" || selection === "HOME_AWAY" ? "d"
+    : selection === "HOME" || selection === "HOME_DRAW" || selection === "OVER" || selection === "ODD" || selection === "YES" ? "h" : "a";
   if (!match[2]!.endsWith(expectedSide)) return null;
   return { selectionId: match[2]!, selection, priceText: match[1]!, locked,
     ...(format === "DECIMAL" ? { priceFormat: format } : {}) };
@@ -150,11 +151,9 @@ export function inspectSbobetMarketLabelEvidence(source: string): readonly Sbobe
   return evidence;
 }
 
-type SbobetTwoWayMarketType = Exclude<SbobetCatalogMarket["marketType"], "FT_1X2">;
-
 interface SbobetNativeMarketLayout {
-  readonly type: SbobetTwoWayMarketType;
-  readonly layout: "TOTAL" | "HANDICAP" | "ODD_EVEN" | "BTTS" | "YES_NO" | "LINE_YES_NO";
+  readonly type: SbobetCatalogMarket["marketType"];
+  readonly layout: "TOTAL" | "HANDICAP" | "ODD_EVEN" | "BTTS" | "YES_NO" | "LINE_YES_NO" | "THREE_WAY" | "DOUBLE_CHANCE";
   readonly format: "MALAY" | "DECIMAL";
 }
 
@@ -163,6 +162,14 @@ interface SbobetNativeMarketLayout {
 // native groups to their row maps and ODD/EVEN or YES/NO outcome order.
 // Card group IDs use tG (native), not the separate Gt bet-placement enum.
 const sbobetMarketByGroup: Readonly<Record<string, SbobetNativeMarketLayout>> = {
+  // SBO's own tG enum, force-decimal z predicate, and the preserved getEvent
+  // rows prove HOME/AWAY/DRAW slots 0/1/2, offer 3 and suspension 4.
+  "1": { type: "FT_1X2", layout: "THREE_WAY", format: "DECIMAL" },
+  "2": { type: "FH_1X2", layout: "THREE_WAY", format: "DECIMAL" },
+  // Own public row V / renderer Vw: 1ORX=0, XOR2=1, 1OR2=2.
+  "12": { type: "FT_DOUBLE_CHANCE", layout: "DOUBLE_CHANCE", format: "DECIMAL" },
+  "13": { type: "FH_DOUBLE_CHANCE", layout: "DOUBLE_CHANCE", format: "DECIMAL" },
+  "89": { type: "SH_1X2", layout: "THREE_WAY", format: "DECIMAL" },
   "3": { type: "FT_TOTAL", layout: "TOTAL", format: "MALAY" },
   "4": { type: "FH_TOTAL", layout: "TOTAL", format: "MALAY" },
   "5": { type: "FT_AH", layout: "HANDICAP", format: "MALAY" },
@@ -215,6 +222,27 @@ const sbobetMarketByGroup: Readonly<Record<string, SbobetNativeMarketLayout>> = 
 const sbobetThreeWayGroups = new Set(["1", "2", "17", "18", "29", "30", "68", "81", "82", "87", "88", "89", "90", "97"]);
 const sbobetRefundGroups = new Set(["16", "75", "150", "151"]);
 
+// Names and periods below are independently present in SBO's tG enum in the
+// saved f8af9179 public-source evidence. They identify native inventory only;
+// they do not establish a binary complement or an exact-score settlement map.
+const sbobetNativeInventory: Readonly<Record<string, { label: string; scope: string }>> = {
+  "10": { label: "CORRECT_SCORE", scope: "FULL_TIME" },
+  "11": { label: "FH_CORRECT_SCORE", scope: "FIRST_HALF" },
+  "12": { label: "DOUBLE_CHANCE", scope: "FULL_TIME" },
+  "13": { label: "FH_DOUBLE_CHANCE", scope: "FIRST_HALF" },
+  "14": { label: "TOTAL_SCORE", scope: "FULL_TIME" },
+  "15": { label: "FH_TOTAL_SCORE", scope: "FIRST_HALF" },
+  "65": { label: "HIGHEST_SCORING_HALF", scope: "FULL_TIME" },
+  "98": { label: "DOUBLE_CHANCE_BTTS", scope: "FULL_TIME" },
+  "131": { label: "CORNER_RANGE", scope: "FULL_TIME" },
+  "132": { label: "HOME_EXACT_GOALS", scope: "FULL_TIME" },
+  "133": { label: "AWAY_EXACT_GOALS", scope: "FULL_TIME" },
+  "134": { label: "HOME_CORNER_RANGE", scope: "FULL_TIME" },
+  "135": { label: "AWAY_CORNER_RANGE", scope: "FULL_TIME" },
+  "136": { label: "CORNER_FH_RANGE", scope: "FIRST_HALF" },
+  "140": { label: "CORNER_FH_OVER_EXACT_UNDER", scope: "FIRST_HALF" }
+};
+
 function nativeMarketIdIndex(layout: SbobetNativeMarketLayout): number {
   return layout.layout === "ODD_EVEN" || layout.layout === "YES_NO" ? 2 : layout.layout === "HANDICAP" ? 4 : 3;
 }
@@ -234,11 +262,19 @@ function market(value: unknown, groupKey: string): SbobetCatalogMarket | null {
   const idIndex = nativeMarketIdIndex(descriptor);
   const suspended = tokens[idIndex + 1];
   if (suspended !== undefined && suspended !== "0" && suspended !== "1") return null;
+  if (layout === "THREE_WAY" || layout === "DOUBLE_CHANCE") {
+    const outcomes = layout === "DOUBLE_CHANCE" ? ["HOME_DRAW", "DRAW_AWAY", "HOME_AWAY"] as const : ["HOME", "AWAY", "DRAW"] as const;
+    const selections = outcomes.map((outcome, index) => pair(tokens[index], outcome, format, suspended !== "0"))
+      .filter((selection): selection is SbobetCatalogSelection => selection !== null);
+    const marketId = tokens[idIndex];
+    if (selections.length === 0 || marketId === undefined || !/^\d{4,30}$/u.test(marketId)) return null;
+    return { marketId, marketType: type, lineText: null, selections };
+  }
   const firstIndex = layout === "ODD_EVEN" || layout === "YES_NO" ? 0 : 1;
   const first = pair(tokens[firstIndex], isTotal ? "OVER" : isHandicap ? "HOME" : layout === "ODD_EVEN" ? "ODD" : "YES",
-    format, suspended === "1");
+    format, suspended !== "0");
   const second = pair(tokens[firstIndex + 1], isTotal ? "UNDER" : isHandicap ? "AWAY" : layout === "ODD_EVEN" ? "EVEN" : "NO",
-    format, suspended === "1");
+    format, suspended !== "0");
   if (first === null || second === null) return null;
   const favored = isHandicap ? tokens[3] : null;
   const marketId = tokens[idIndex];
@@ -394,6 +430,7 @@ export function extractSbobetNativeMarketObservations(
             ? nativeMarketId : `${eventId}:native:${groupKey}:${rowIndex}`;
           const selectionSides = [...rowText.matchAll(/\*\d{1,40}([had])/gu)].map((match) => match[1]!.toUpperCase());
           const spec = mappedType === null ? null : footballBinaryMarketSpec(mappedType);
+          const inventory = sbobetNativeInventory[groupKey];
           const candidate = parsed === null || !validContainer ? null : eventRecord(raw, fallback.get(eventId)!, [parsed]);
           const normalized = candidate !== null && normalizeSbobetCatalog([candidate], {
             observedAtMs, receivedMonotonicMs: 0, sequence: 0
@@ -402,12 +439,26 @@ export function extractSbobetNativeMarketObservations(
             : parsed !== null && !validContainer ? "INVALID_NATIVE_GROUP_SHAPE"
             : parsed !== null && !normalized ? "NORMALIZATION_REJECTED"
             : sbobetThreeWayGroups.has(groupKey) ? "THREE_WAY_OUTCOME_DOMAIN"
-            : sbobetRefundGroups.has(groupKey) ? "PUSH_OR_REFUND_SETTLEMENT" : null;
+            : sbobetRefundGroups.has(groupKey) ? "PUSH_OR_REFUND_SETTLEMENT"
+            : inventory !== undefined ? "CANONICAL_EQUIVALENCE_NOT_PROVEN" : null;
           observations.push({ provider: "SBOBET", category: "FOOTBALL", providerEventId: eventId,
             providerMarketId: parsed?.marketId ?? fallbackMarketId, nativeType: groupKey,
-            nativeLabel: null, nativeScope: spec?.scope ?? null,
+            ...(descriptor !== undefined && ["0", "1"].includes(tokens[nativeMarketIdIndex(descriptor) + 1] ?? "")
+              ? { status: tokens[nativeMarketIdIndex(descriptor) + 1] === "1" ? "SUSPENDED" as const : "OPEN" as const } : {}),
+            nativeLabel: inventory?.label ?? mappedType,
+            ...(typeof rawRow === "string" && rawRow.length <= 4096 ? { nativeRow: rawRow } : {}),
+            nativeScope: spec?.scope ?? (mappedType === null ? null : footballResultMarketSpec(mappedType)?.scope) ?? inventory?.scope ?? null,
             outcomeLabels: selectionSides,
+            nativeSelections: tokens.flatMap((token, index) => {
+              const match = pairPattern.exec(token);
+              if (match === null) return [];
+              const rawLine = descriptor?.layout === "TOTAL" || descriptor?.layout === "HANDICAP" || descriptor?.layout === "LINE_YES_NO"
+                || (inventory !== undefined && !tokens[0]!.includes("*")) ? tokens[0]! : null;
+              return [{ selectionId: match[2]!, outcomeId: match[2]!.slice(-1), line: rawLine, price: match[1]!,
+                ...(descriptor !== undefined ? { rawFormat: descriptor.format } : inventory !== undefined ? { rawFormat: "DECIMAL" as const } : {}) }];
+            }),
             observedAtMs, disposition: normalized ? "NORMALIZED"
+              : excludedReason === "CANONICAL_EQUIVALENCE_NOT_PROVEN" || excludedReason === "THREE_WAY_OUTCOME_DOMAIN" ? "UNMAPPED"
               : excludedReason !== null || mappedType !== null ? "EXCLUDED" : "UNMAPPED",
             reason: normalized ? "CANONICAL_MARKET_MAPPED" : excludedReason ??
               (mappedType !== null ? "INVALID_TWO_WAY_SHAPE" : "NATIVE_TYPE_UNMAPPED") });

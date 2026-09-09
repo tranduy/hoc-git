@@ -1,6 +1,7 @@
-import { isSupportedFootballTwoWayLine,
+import { isSupportedFootballTwoWayLine, isSupportedFootballSplitLine,
   type SbobetCatalogInputRecord, type SbobetCatalogMarket, type SbobetCatalogSelection } from "@tool-chenh/adapters";
-import type { FootballBinaryOutcome, MarketType, NativeMarketObservation } from "@tool-chenh/contracts";
+import { type FootballBinaryOutcome, type FootballResultSelection,
+  type MarketType, type NativeMarketObservation, type OddsFormat } from "@tool-chenh/contracts";
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -29,9 +30,36 @@ export function normalizeImOdds(value: unknown): number | null {
 
 interface ImFootballMarketSemantics {
   readonly marketType: MarketType;
-  readonly outcomes: ReadonlyMap<number, FootballBinaryOutcome>;
+  readonly outcomes: ReadonlyMap<number, FootballBinaryOutcome | FootballResultSelection>;
   readonly linePolicy: "LINE" | "NONE";
   readonly handicap: boolean;
+  readonly specifierTotal?: boolean;
+}
+
+/** IM publishes mixed formats per selection even when the request asks for one format. */
+export function normalizeImSelectionPrice(value: unknown): { priceText: string; priceFormat: OddsFormat } | null {
+  const item = record(value);
+  const price = item?.o;
+  if (item === null || typeof price !== "number" || !Number.isFinite(price)) return null;
+  if (item.ot === undefined) {
+    const legacy = normalizeImOdds(price);
+    return legacy === null ? null : { priceText: String(legacy), priceFormat: "MALAY" };
+  }
+  let normalized = price;
+  let priceFormat: OddsFormat;
+  switch (item.ot) {
+    case 1: if (price === 0 || Math.abs(price) > 1) return null; priceFormat = "MALAY"; break;
+    case 2: if (price <= 0) return null; priceFormat = "HK"; break;
+    case 3: if (price <= 1) return null; priceFormat = "DECIMAL"; break;
+    case 4:
+      if (Math.abs(price) < 1) return null;
+      normalized = price > 0 ? 1 + price : 1 - 1 / price;
+      priceFormat = "DECIMAL"; break;
+    case 6: if (Math.abs(price) < 100) return null; priceFormat = "AMERICAN"; break;
+    default: return null;
+  }
+  return /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(String(normalized))
+    ? { priceText: String(normalized), priceFormat } : null;
 }
 
 export function imMarketObservedAtMs(value: unknown, envelopeObservedAtMs: number): number | null {
@@ -85,14 +113,31 @@ function imMarketSemantics(bti: number, gp: number): ImFootballMarketSemantics |
     const marketType = periodMarket(gp, "FT_BTTS", "FH_BTTS", "SH_BTTS");
     return marketType === null ? null : noLine(marketType, yesNoOutcomes(87, 88));
   }
+  if (bti === 3) {
+    const marketType = periodMarket(gp, "FT_1X2", "FH_1X2", "SH_1X2");
+    return marketType === null ? null : { marketType, linePolicy: "NONE", handicap: false,
+      outcomes: new Map<number, FootballBinaryOutcome | "DRAW">([[5, "HOME"], [6, "AWAY"], [7, "DRAW"]]) };
+  }
+  // Public IM selection enum: _1X=43, _X2=44, _12=45. Native array order varies.
+  if (bti === 8) {
+    const marketType = periodMarket(gp, "FT_DOUBLE_CHANCE", "FH_DOUBLE_CHANCE", "SH_DOUBLE_CHANCE");
+    return marketType === null ? null : { marketType, outcomes: new Map([[43, "HOME_DRAW"], [44, "DRAW_AWAY"], [45, "HOME_AWAY"]]),
+      linePolicy: "NONE", handicap: false };
+  }
+  if (bti === 160 || bti === 161) {
+    const marketType = bti === 160 ? periodMarket(gp, "HOME_FT_TOTAL", "HOME_FH_TOTAL")
+      : periodMarket(gp, "AWAY_FT_TOTAL", "AWAY_FH_TOTAL");
+    return marketType === null ? null : line(marketType, bti === 160
+      ? outcomeMap([638, "OVER"], [639, "UNDER"]) : outcomeMap([640, "OVER"], [641, "UNDER"]));
+  }
   if (gp !== 1 && bti !== 299 && bti !== 306) return null;
   switch (bti) {
     case 19: return noLine("HOME_FT_WIN_EITHER_HALF", yesNoOutcomes(89, 90));
     case 20: return noLine("AWAY_FT_WIN_EITHER_HALF", yesNoOutcomes(91, 92));
     case 22: return noLine("HOME_FT_CLEAN_SHEET", yesNoOutcomes(97, 98));
     case 23: return noLine("AWAY_FT_CLEAN_SHEET", yesNoOutcomes(99, 100));
-    case 24: return line("FT_BOTH_HALVES_OVER_TOTAL", yesNoOutcomes(101, 102));
-    case 25: return line("FT_BOTH_HALVES_UNDER_TOTAL", yesNoOutcomes(103, 104));
+    case 24: return { ...line("FT_BOTH_HALVES_OVER_TOTAL", yesNoOutcomes(101, 102)), specifierTotal: true };
+    case 25: return { ...line("FT_BOTH_HALVES_UNDER_TOTAL", yesNoOutcomes(103, 104)), specifierTotal: true };
     case 26: return noLine("HOME_FT_WIN_BOTH_HALVES", yesNoOutcomes(105, 106));
     case 27: return noLine("AWAY_FT_WIN_BOTH_HALVES", yesNoOutcomes(107, 108));
     case 31: return line("HOME_FT_TOTAL", customTotalOutcomes(118, 119));
@@ -106,8 +151,6 @@ function imMarketSemantics(bti: number, gp: number): ImFootballMarketSemantics |
     case 78: return noLine("HOME_FT_TO_WIN", yesNoOutcomes(334, 335));
     case 79: return noLine("AWAY_FT_TO_WIN", yesNoOutcomes(336, 337));
     case 80: return noLine("FT_ANY_TEAM_TO_WIN", yesNoOutcomes(338, 339));
-    case 160: return line("HOME_FT_TOTAL", outcomeMap([638, "OVER"], [639, "UNDER"]));
-    case 161: return line("AWAY_FT_TOTAL", outcomeMap([640, "OVER"], [641, "UNDER"]));
     case 299: {
       const marketType = periodMarket(gp, "CORNER_FT_AH", "CORNER_FH_AH");
       return marketType === null ? null : line(marketType, handicapOutcomes, true);
@@ -120,21 +163,53 @@ function imMarketSemantics(bti: number, gp: number): ImFootballMarketSemantics |
   }
 }
 
-function selection(value: unknown, semantics: ImFootballMarketSemantics): SbobetCatalogSelection | null {
+function specifierTotal(item: Record<string, unknown>): string | null {
+  const match = /^total=(\d+(?:\.\d+)?)$/u.exec(text(item.s) ?? "");
+  if (match === null || !supportedLine(Number(match[1]))) return null;
+  const total = Number(match[1]);
+  if (item.hdp !== undefined && item.hdp !== total) return null;
+  if (item.dih !== undefined && Number(item.dih) !== total) return null;
+  return String(total);
+}
+
+function numericTotalLine(value: unknown): number | null {
+  const label = text(value);
+  if (label === null || !/^\d+(?:\.\d+)?(?:\s*[\/-]\s*\d+(?:\.\d+)?)?$/u.test(label)) return null;
+  const parts = label.split(/[\/-]/u).map(Number);
+  if (parts.some(value => !supportedLine(value)) || parts.length > 2 ||
+    (parts.length === 2 && !isSupportedFootballSplitLine(parts[0]!, parts[1]!))) return null;
+  return parts.reduce((sum, value) => sum + value, 0) / parts.length;
+}
+
+function consistentTotalLines(items: readonly unknown[], semantics: ImFootballMarketSemantics): boolean {
+  if (semantics.linePolicy !== "LINE" || semantics.handicap) return true;
+  const values = items.map(value => {
+    const item = record(value);
+    if (item === null) return null;
+    if (semantics.specifierTotal) { const line = specifierTotal(item); return line === null ? null : Number(line); }
+    const line = numericTotalLine(item.dih);
+    return line !== null && (item.hdp === undefined || item.hdp === line) ? line : null;
+  });
+  return values.every(value => value !== null && value === values[0]);
+}
+
+function selection(value: unknown, semantics: ImFootballMarketSemantics, locked: boolean): SbobetCatalogSelection | null {
   const item = record(value);
   const selected = item === null ? undefined : semantics.outcomes.get(Number(item.si));
   if (item === null || selected === undefined ||
-    (semantics.linePolicy === "LINE" && !supportedLine(item.hdp))) return null;
-  const normalizedOdds = normalizeImOdds(item.o);
-  if (normalizedOdds === null) return null;
+    (semantics.linePolicy === "LINE" && semantics.specifierTotal !== true && !supportedLine(item.hdp))) return null;
+  const price = normalizeImSelectionPrice(item);
+  if (price === null) return null;
   const selectionId = identifier(item.wsi);
-  const lineText = semantics.linePolicy === "LINE" ? text(item.dih) : null;
+  const lineText = semantics.specifierTotal === true ? specifierTotal(item)
+    : semantics.linePolicy === "LINE" ? text(item.dih) : null;
   if (selectionId === null || (semantics.linePolicy === "LINE" && lineText === null)) return null;
   return {
     selectionId,
     selection: selected,
-    priceText: String(normalizedOdds),
-    locked: false,
+    priceText: price.priceText,
+    ...(price.priceFormat === "MALAY" ? {} : { priceFormat: price.priceFormat }),
+    locked,
     ...(lineText === null ? {} : { lineText })
   };
 }
@@ -142,14 +217,22 @@ function selection(value: unknown, semantics: ImFootballMarketSemantics): Sbobet
 function market(value: unknown): SbobetCatalogMarket | null {
   const item = record(value);
   const semantics = item === null ? null : imMarketSemantics(Number(item.bti), Number(item.gp));
-  if (item === null || semantics === null || !Array.isArray(item.ws) || item.ws.length !== 2) return null;
+  if (item === null || semantics === null || !Array.isArray(item.ws) ||
+    item.ws.length === 0 || item.ws.length > semantics.outcomes.size) return null;
   const marketId = identifier(item.mi);
-  const selections = item.ws.map((value) => selection(value, semantics));
+  // Public IM L0 mapper uses market.il as isLocked. Missing legacy projection
+  // metadata is not evidence that an offer is open.
+  const selections = item.ws.map((value) => selection(value, semantics, item.il !== false));
   if (marketId === null || selections.some((item) => item === null)) return null;
   const exact = selections as SbobetCatalogSelection[];
-  if (new Set(exact.map((item) => item.selection)).size !== 2) return null;
+  if (new Set(exact.map((item) => item.selection)).size !== exact.length ||
+    new Set(exact.map((item) => item.selectionId)).size !== exact.length) return null;
+  if (!consistentTotalLines(item.ws, semantics)) return null;
+  const signedSingleHandicap = semantics.handicap && exact.length === 1;
+  if (signedSingleHandicap && !/^(?:[+-]\d|0(?:\.0+)?$)/u.test(exact[0]?.lineText ?? "")) return null;
   return { marketId, marketType: semantics.marketType,
     lineText: semantics.handicap || semantics.linePolicy === "NONE" ? null : exact[0]?.lineText ?? null,
+    ...(signedSingleHandicap ? { handicapLineFormat: "SIGNED" as const } : {}),
     selections: exact };
 }
 
@@ -157,7 +240,7 @@ function markets(value: unknown): readonly SbobetCatalogMarket[] {
   return Array.isArray(value) ? value.map(market).filter((item): item is SbobetCatalogMarket => item !== null) : [];
 }
 
-const imKnownExcludedBetTypes = new Set([3, 4, 6, 7, 8, 9, 11, 35, 38, 39, 158, 159, 313]);
+const imKnownExcludedBetTypes = new Set([4, 6, 7, 9, 11, 35, 38, 39, 158, 159, 313]);
 
 export function observeNativeImFootballMarkets(value: unknown, observedAtMs: number):
 readonly NativeMarketObservation[] {
@@ -201,12 +284,21 @@ readonly NativeMarketObservation[] {
         return label === null ? [] : [label];
       });
       observations.push({ provider: "IM", category: "FOOTBALL", providerEventId, providerMarketId,
+        ...(typeof item?.il === "boolean" ? { status: item.il ? "SUSPENDED" as const : "OPEN" as const } : {}),
         nativeType, nativeLabel: [...new Set(labels)].join(" | ").slice(0, 512) || null, nativeScope,
         outcomeLabels: rawOutcomeLabels, observedAtMs: marketObservedAtMs, disposition, reason,
         nativeSelections: selections.map(candidateSelection => {
           const selected = record(candidateSelection);
           return { selectionId: nativeScalar(selected?.wsi, 256), outcomeId: nativeScalar(selected?.si, 256),
-            line: nativeScalar(selected?.dih, 512) ?? nativeScalar(selected?.hdp, 512), price: nativeScalar(selected?.o, 128) };
+            line: nativeScalar(selected?.dih, 512) ?? nativeScalar(selected?.hdp, 512) ??
+              (semantics?.specifierTotal && selected !== null ? specifierTotal(selected) : null),
+            price: nativeScalar(selected?.o, 128),
+            ...(selected?.ot === 1 ? { rawFormat: "MALAY" as const }
+              : selected?.ot === 2 ? { rawFormat: "HK" as const }
+              : selected?.ot === 3 ? { rawFormat: "DECIMAL" as const }
+              : selected?.ot === 6 ? { rawFormat: "AMERICAN" as const }
+              : selected?.ot === undefined && typeof selected?.o === "number" && Number.isFinite(selected.o) && selected.o !== 0
+                ? { rawFormat: selected.o > 0 ? "HK" as const : "MALAY" as const } : {}) };
         }) });
     }
   }
@@ -221,18 +313,19 @@ function validDeltaMarket(value: unknown): boolean {
   const semantics = imMarketSemantics(item.bti, item.gp);
   const supportedDomain = semantics !== null;
   if (!supportedDomain) return true;
-  if (item.ws.length !== 2) return false;
+  if (item.ws.length === 0 || item.ws.length > semantics.outcomes.size) return false;
   const actualSelections = new Set<number>();
   for (const candidate of item.ws) {
     const itemSelection = record(candidate);
     const selectionId = Number(itemSelection?.si);
     if (itemSelection === null || identifier(itemSelection.wsi) === null || !semantics.outcomes.has(selectionId) ||
-      actualSelections.has(selectionId) || normalizeImOdds(itemSelection.o) === null ||
-      (semantics.linePolicy === "LINE" && (!isLineFieldWellFormed(itemSelection.hdp) ||
-        text(itemSelection.dih) === null))) return false;
+      actualSelections.has(selectionId) || normalizeImSelectionPrice(itemSelection) === null ||
+      (semantics.linePolicy === "LINE" && (semantics.specifierTotal === true
+        ? specifierTotal(itemSelection) === null
+        : !isLineFieldWellFormed(itemSelection.hdp) || text(itemSelection.dih) === null))) return false;
     actualSelections.add(selectionId);
   }
-  return actualSelections.size === 2;
+  return actualSelections.size === item.ws.length && consistentTotalLines(item.ws, semantics);
 }
 
 /**

@@ -22,6 +22,19 @@ function envelope(body: unknown, sequence = 1, path = "/api/EventV6/GetSE",
 }
 
 describe("ImHttpCatalogAdapter", () => {
+  it("publishes a proven single-side handicap and immediately carries a native lock delta", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const market = { ...event.mls[0]!, il: false, ws: [event.mls[0]!.ws[1]!] };
+    adapter.decode(envelope({ StatusCode: 100, sel: [{ ...event, mls: [market] }] }, 1, undefined, "IM_MARKET_1"));
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined, "IM_MARKET_2"))[0]?.value).toMatchObject({
+      quotes: [expect.objectContaining({ providerSelectionId: "102", selection: "AWAY", line: "0.5", status: "OPEN" })]
+    });
+    expect(adapter.decode(envelope({ StatusCode: 100, dc: [{ eid: event.eid, a: 3, v: [{ ...market, il: true }] }] },
+      3, "/api/EventV6/GetSEDelta"))[0]?.value).toMatchObject({
+      quotes: [expect.objectContaining({ providerSelectionId: "102", status: "SUSPENDED" })],
+      nativeMarketObservations: [expect.objectContaining({ status: "SUSPENDED" })]
+    });
+  });
   const seedBothPartitions = (adapter: ImHttpCatalogAdapter): void => {
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined, "IM_MARKET_1"))).toEqual([]);
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined, "IM_MARKET_2"))).toHaveLength(1);
@@ -72,8 +85,8 @@ describe("ImHttpCatalogAdapter", () => {
   it("commits Hong Kong odds only after both partitions share one cutoff and generation", () => {
     const adapter = new ImHttpCatalogAdapter();
     const hongKongEvent = { ...event, mls: [{ ...event.mls[0], ws: [
-      { ...event.mls[0]!.ws[0], o: 1.25 },
-      { ...event.mls[0]!.ws[1], o: 3 }
+      { ...event.mls[0]!.ws[0], o: 1.25, ot: 2 },
+      { ...event.mls[0]!.ws[1], o: 3, ot: 2 }
     ] }] };
 
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [hongKongEvent] }, 11, undefined,
@@ -84,10 +97,24 @@ describe("ImHttpCatalogAdapter", () => {
       authoritativeBaseline: true, evidenceMode: "BASELINE", generation: "im:8:1"
     });
     const catalog = committed!.value as {
-      quotes: readonly { providerSelectionId: string; rawOdds: string }[];
+      quotes: readonly { providerSelectionId: string; rawOdds: string; rawFormat: string }[];
     };
-    expect(catalog.quotes.map((quote) => [quote.providerSelectionId, quote.rawOdds]))
-      .toEqual([["101", "-0.8"], ["102", "-0.3333333333333333"]]);
+    expect(catalog.quotes.map((quote) => [quote.providerSelectionId, quote.rawOdds, quote.rawFormat]))
+      .toEqual([["101", "1.25", "HK"], ["102", "3", "HK"]]);
+  });
+
+  it("admits explicit American prices through the same native-format validator as extraction", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const american = { ...event, mls: [{ ...event.mls[0], ws: [
+      { ...event.mls[0]!.ws[0], o: -150, ot: 6 },
+      { ...event.mls[0]!.ws[1], o: 125, ot: 6 }
+    ] }] };
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [american] }, 1, undefined, "IM_MARKET_1"))).toEqual([]);
+    const result = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined, "IM_MARKET_2"))[0]?.value;
+    expect(result).toMatchObject({ quotes: [
+      expect.objectContaining({ providerSelectionId: "101", rawOdds: "-150", rawFormat: "AMERICAN" }),
+      expect.objectContaining({ providerSelectionId: "102", rawOdds: "125", rawFormat: "AMERICAN" })
+    ] });
   });
 
   it.each([
@@ -194,21 +221,21 @@ describe("ImHttpCatalogAdapter", () => {
     const adapter = new ImHttpCatalogAdapter();
     seedBothPartitions(adapter);
     const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0], ws: [
-      { ...event.mls[0]!.ws[0], o: 1.25 },
-      { ...event.mls[0]!.ws[1], o: 2 }
+      { ...event.mls[0]!.ws[0], o: 1.25, ot: 2 },
+      { ...event.mls[0]!.ws[1], o: 2, ot: 2 }
     ] }] }] };
 
     const update = adapter.decode(envelope(delta, 3, "/api/EventV6/GetSEDelta"))[0]?.value as {
       events: readonly { providerEventId: string }[];
       markets: readonly { providerMarketId: string }[];
-      quotes: readonly { providerSelectionId: string; rawOdds: string }[];
+      quotes: readonly { providerSelectionId: string; rawOdds: string; rawFormat: string }[];
     };
     expect(update).toMatchObject({
       events: [{ providerEventId: "112516390" }],
       markets: [{ providerMarketId: "10" }]
     });
-    expect(update.quotes.map((quote) => [quote.providerSelectionId, quote.rawOdds]))
-      .toEqual([["101", "-0.8"], ["102", "-0.5"]]);
+    expect(update.quotes.map((quote) => [quote.providerSelectionId, quote.rawOdds, quote.rawFormat]))
+      .toEqual([["101", "1.25", "HK"], ["102", "2", "HK"]]);
   });
 
   it("rejects a delayed delta at or before the committed reconciliation cutoff", () => {

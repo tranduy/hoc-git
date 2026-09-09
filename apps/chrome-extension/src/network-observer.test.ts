@@ -21,6 +21,13 @@ async function settleObserverBackgroundTasks(turns = 100): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
+async function attachSabaRecoveryWorker(observer: NetworkObserver,
+  source: { readonly lobby: "SABA"; readonly sourceId: string; readonly tabId: number }): Promise<void> {
+  await observer.handleEvent(source, "Target.attachedToTarget", {
+    sessionId: "saba-recovery-worker", targetInfo: { targetId: "recovery-worker", type: "worker" }
+  });
+}
+
 function sabaUnknownProbeState(documentToken: string): Record<string, unknown> {
   return { documentToken, rowCount: 50, tableCount: 1, activePeriod: "UNKNOWN",
     periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [], moreCandidates: [],
@@ -1316,11 +1323,13 @@ describe("NetworkObserver", () => {
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("IsCombo: false");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SortType: 2");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("CompetitionIds: []");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("Promise.all([1, 2].map");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("const pair = [1, 2].map");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("Promise.all(pair)");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("StatusCode: catalog.parsed.StatusCode, sel:");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("new AbortController()");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("signal: controller.signal");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).not.toMatch(/odds?|price|stake/iu);
+    // Native odds-format headers are required for the signed read request.
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).not.toMatch(/placebet|stake/iu);
     expect(() => new Function(`return ${IM_CATALOG_DISCOVERY_EXPRESSION}`)).not.toThrow();
   });
 
@@ -1506,6 +1515,63 @@ describe("NetworkObserver", () => {
     expect(requests[0]).toMatchObject({ cmdFullScope: true, providerFunctionCode: 6, reconcileCutoffSequence: 0 });
     expect(requests[1]).toMatchObject({ providerGroupId: group, requestDocumentKey: expect.any(String) });
     expect(JSON.stringify(requests)).not.toContain("private-account");
+  });
+
+  it("keeps CMD fallback and recovery quiet for the native request cooldown", async () => {
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    let nowMs = 1_000;
+    const frameTree = { frameTree: { frame: { id: "odds-frame", loaderId: "loader-current",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx" } } };
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return frameTree;
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("__fieldlineCmdNativeCatalogV1")) {
+        return { result: { value: { status: "ready", requestPaused: true, requestRetryInMs: 120_000 } } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: async () => undefined, now: () => nowMs });
+    await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "odds-frame", isDefault: true } }
+    });
+    await observer.recoverCmdCatalog(cmd);
+    expect(observer.cmdRequestsPaused(cmd.sourceId)).toBe(true);
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_FULL_BASELINE_EXPRESSION)).toBe(false);
+    nowMs += 120_001;
+    expect(observer.cmdRequestsPaused(cmd.sourceId)).toBe(false);
+  });
+
+  it("blocks the legacy CMD request in the page even before the observer learns of HTTP backoff", () => {
+    let calls = 0;
+    const run = new Function("location", "document", "globalThis", "Date", `return ${CMD_FULL_BASELINE_EXPRESSION}`);
+    const location = { hostname: "cgnew.fts368.com", pathname: "/Member/BetOdds/HdpDouble.aspx" };
+    const document = { documentElement: { __fieldlineCmdNativeCatalogV1: { retryAtMs: 120_000 } } };
+    const globals = { LoadFullRunningTodayData: () => { calls += 1; } };
+    expect(run(location, document, globals, { now: () => 119_999 })).toBe("busy");
+    expect(calls).toBe(0);
+    expect(run(location, document, globals, { now: () => 120_000 })).toBe("baseline-requested");
+    expect(calls).toBe(1);
+  });
+
+  it("checks the actual CMD document for cooldown before recovery can navigate", async () => {
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const frameTree = { frameTree: { frame: { id: "odds-frame", loaderId: "loader-current",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx" } } };
+    const observer = new NetworkObserver({ now: () => 1_000, forward: async () => undefined,
+      sendCommand: async (_tabId, method, _params, sessionId) => {
+        if (method === "Page.getFrameTree") return frameTree;
+        if (method === "Runtime.evaluate") {
+          expect(sessionId).toBe("child-session");
+          return { result: { value: 120_000 } };
+        }
+        return {};
+      } });
+    await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "odds-frame", isDefault: true } }
+    }, "child-session");
+    expect(observer.cmdRequestsPaused(cmd.sourceId)).toBe(false);
+    expect(await observer.probeCmdRequestsPaused(cmd)).toBe(true);
+    expect(observer.cmdRequestsPaused(cmd.sourceId)).toBe(true);
   });
 
   it("evaluates CMD recovery on the owning child session and completes only a matching current-loader fc=1", async () => {
@@ -2053,6 +2119,9 @@ describe("NetworkObserver", () => {
 
     now = 43_000;
     await observer.pollSabaDomChanges(source, "push.example");
+    expect(reconnects()).toBe(1);
+    now = 52_000;
+    await observer.pollSabaDomChanges(source, "push.example");
     await vi.waitFor(() => expect(reconnects()).toBe(2));
   });
 
@@ -2318,11 +2387,12 @@ describe("NetworkObserver", () => {
 
     observer.beginSourceEpoch(source.sourceId);
     await observer.refreshCatalog(source);
+    await settleObserverBackgroundTasks();
 
     expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
       params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
     expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.queryObjects", {
-      prototypeObjectId: "socket-io-prototype", objectGroup: "fieldline-baseline-recovery-8"
+      prototypeObjectId: "socket-io-prototype", objectGroup: expect.stringMatching(/^fieldline-baseline-recovery-8-\d+$/u)
     });
     expect(sendCommand.mock.calls.find(([, method]) => method === "Runtime.callFunctionOn")?.[2])
       .toMatchObject({ objectId: "socket-io-instances",
@@ -2612,7 +2682,7 @@ describe("NetworkObserver", () => {
         return { result: { value: sabaUnknownProbeState("healthy-backoff") } };
       }
       if (method === "Runtime.evaluate" && params?.expression ===
-        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        "globalThis.io && globalThis.io.Socket && globalThis.io.Socket.prototype") {
         return { result: { objectId: "socket-io-prototype" } };
       }
       if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
@@ -2624,6 +2694,7 @@ describe("NetworkObserver", () => {
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => now });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    await attachSabaRecoveryWorker(observer, saba);
     const pollAfterDiscovery = async (): Promise<void> => {
       await observer.pollSabaDomChanges(saba, "sports.example");
       await settleObserverBackgroundTasks();
@@ -2637,7 +2708,7 @@ describe("NetworkObserver", () => {
       String(params?.functionDeclaration).includes("socket.disconnect(); socket.connect()"))
       .length;
     const completedRecoveries = (): number => sendCommand.mock.calls.filter(([, method, params]) =>
-      method === "Runtime.releaseObjectGroup" && params?.objectGroup === "fieldline-baseline-recovery-8")
+      method === "Runtime.releaseObjectGroup" && String(params?.objectGroup).startsWith("fieldline-baseline-recovery-8-"))
       .length;
     const sendDelta = async (revision: number): Promise<void> => {
       await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
@@ -2673,16 +2744,18 @@ describe("NetworkObserver", () => {
     await vi.waitFor(() => expect(reconnects()).toBe(3));
     await vi.waitFor(() => expect(completedRecoveries()).toBe(3));
     await pollAt(305_001, 4);
+    expect(reconnects()).toBe(3);
+    await pollAt(445_001);
     await vi.waitFor(() => expect(reconnects()).toBe(4));
     await vi.waitFor(() => expect(completedRecoveries()).toBe(4));
-    await pollAt(604_999);
+    await pollAt(744_999);
     expect(reconnects()).toBe(4);
-    await pollAt(605_001, 5);
+    await pollAt(745_001, 5);
     await vi.waitFor(() => expect(reconnects()).toBe(5));
     await vi.waitFor(() => expect(completedRecoveries()).toBe(5));
-    await pollAt(905_000);
+    await pollAt(1_045_000);
     expect(reconnects()).toBe(5);
-    await pollAt(905_001, 6);
+    await pollAt(1_045_001, 6);
     await vi.waitFor(() => expect(reconnects()).toBe(6));
     await vi.waitFor(() => expect(completedRecoveries()).toBe(6));
 
@@ -2691,18 +2764,22 @@ describe("NetworkObserver", () => {
     expect(observer.hasCompleteSabaBaseline(saba.sourceId)).toBe(false);
 
     // Once the last usable DOM authority expires with no replacement, the
-    // urgent soft path bypasses the healthy source's next 300-second deadline.
+    // urgent soft path still honors the shared heavy-recovery batch pause.
     catalogReady = false;
-    await pollAt(1_055_002);
+    await pollAt(1_195_002);
+    expect(reconnects()).toBe(6);
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(false);
+    await pollAt(1_345_001);
     await vi.waitFor(() => expect(reconnects()).toBe(7));
     await vi.waitFor(() => expect(completedRecoveries()).toBe(7));
     expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(false);
 
     observer.beginSourceEpoch(saba.sourceId);
+    await attachSabaRecoveryWorker(observer, saba);
     catalogReady = true;
-    await pollAt(1_100_000, 7);
+    await pollAt(1_390_000, 7);
     expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
-    await pollAt(1_120_001, 8);
+    await pollAt(1_410_001, 8);
     await vi.waitFor(() => expect(reconnects()).toBe(8));
     await vi.waitFor(() => expect(completedRecoveries()).toBe(8));
   });
@@ -2730,7 +2807,7 @@ describe("NetworkObserver", () => {
         return { result: { value: sabaUnknownProbeState("backoff-overtake") } };
       }
       if (method === "Runtime.evaluate" && params?.expression ===
-        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        "globalThis.io && globalThis.io.Socket && globalThis.io.Socket.prototype") {
         return { result: { objectId: "socket-io-prototype" } };
       }
       if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
@@ -2742,6 +2819,7 @@ describe("NetworkObserver", () => {
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
       now: () => now, monotonicNow: () => now });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    await attachSabaRecoveryWorker(observer, saba);
     const pollAfterDiscovery = async (): Promise<void> => {
       await observer.pollSabaDomChanges(saba, "sports.example");
       await settleObserverBackgroundTasks();
@@ -2757,7 +2835,7 @@ describe("NetworkObserver", () => {
     const waitForRecoveries = async (count: number): Promise<void> => {
       await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method, params]) =>
         method === "Runtime.releaseObjectGroup" &&
-        params?.objectGroup === "fieldline-baseline-recovery-8")).toHaveLength(count));
+        String(params?.objectGroup).startsWith("fieldline-baseline-recovery-8-"))).toHaveLength(count));
     };
     const delta = (revision: string) => `42${JSON.stringify(
       ["m", "b1", [["f", 0, ["type"]], [0, "o"]], revision])}`;
@@ -2845,7 +2923,7 @@ describe("NetworkObserver", () => {
         return { result: { value: sabaUnknownProbeState("backoff-inflight") } };
       }
       if (method === "Runtime.evaluate" && params?.expression ===
-        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        "globalThis.io && globalThis.io.Socket && globalThis.io.Socket.prototype") {
         return { result: { objectId: "socket-io-prototype" } };
       }
       if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
@@ -2857,6 +2935,7 @@ describe("NetworkObserver", () => {
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
       now: () => now, monotonicNow: () => now });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    await attachSabaRecoveryWorker(observer, saba);
     const pollAfterDiscovery = async (): Promise<void> => {
       await observer.pollSabaDomChanges(saba, "sports.example");
       await settleObserverBackgroundTasks();
@@ -2941,7 +3020,7 @@ describe("NetworkObserver", () => {
         return { result: { value: sabaUnknownProbeState("backoff-retired") } };
       }
       if (method === "Runtime.evaluate" && params?.expression ===
-        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        "globalThis.io && globalThis.io.Socket && globalThis.io.Socket.prototype") {
         return { result: { objectId: "socket-io-prototype" } };
       }
       if (method === "Runtime.queryObjects") {
@@ -2958,6 +3037,7 @@ describe("NetworkObserver", () => {
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
       now: () => now, monotonicNow: () => now });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    await attachSabaRecoveryWorker(observer, saba);
     const pollAfterDiscovery = async (): Promise<void> => {
       await observer.pollSabaDomChanges(saba, "sports.example");
       await settleObserverBackgroundTasks();
@@ -2975,7 +3055,7 @@ describe("NetworkObserver", () => {
     const waitForReleased = async (count: number): Promise<void> => {
       await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method, params]) =>
         method === "Runtime.releaseObjectGroup" &&
-        params?.objectGroup === "fieldline-baseline-recovery-8")).toHaveLength(count));
+        String(params?.objectGroup).startsWith("fieldline-baseline-recovery-8-"))).toHaveLength(count));
       await Promise.resolve();
     };
 
@@ -3002,16 +3082,23 @@ describe("NetworkObserver", () => {
     await pollAfterDiscovery();
     await vi.waitFor(() => expect(queryCount).toBe(3));
     observer.beginSourceEpoch(saba.sourceId);
+    await attachSabaRecoveryWorker(observer, saba);
     now = 155_000;
     await pollAfterDiscovery();
     await settleObserverBackgroundTasks();
     now = 175_001;
     await pollAfterDiscovery();
-    await waitForReconnects(3);
-    await waitForReleased(3);
+    expect(queryCount).toBe(3);
     releaseRetiredQuery();
-    await waitForReleased(4);
+    await waitForReleased(3);
     now = 215_001;
+    await pollAfterDiscovery();
+    expect(queryCount).toBe(3);
+    now = 450_001;
+    await pollAfterDiscovery();
+    await waitForReconnects(3);
+    await waitForReleased(4);
+    now = 490_001;
     await pollAfterDiscovery();
     await waitForReconnects(4);
     await waitForReleased(5);
@@ -3049,7 +3136,7 @@ describe("NetworkObserver", () => {
         return { result: { value: records } };
       }
       if (method === "Runtime.evaluate" && params?.expression ===
-        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        "globalThis.io && globalThis.io.Socket && globalThis.io.Socket.prototype") {
         return { result: { objectId: "socket-io-prototype" } };
       }
       if (method === "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
@@ -3071,6 +3158,7 @@ describe("NetworkObserver", () => {
       forward: async (envelope) => { forwarded.push(envelope); },
       now: () => advanceProbeClock ? (now += 100) : now, monotonicNow: () => now });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    await attachSabaRecoveryWorker(observer, saba);
     const reconnects = (): number => sendCommand.mock.calls.filter(([, method, params]) =>
       method === "Runtime.callFunctionOn" &&
       String(params?.functionDeclaration).includes("socket.disconnect(); socket.connect()"))
@@ -3078,7 +3166,7 @@ describe("NetworkObserver", () => {
     const waitForRecoveries = async (count: number): Promise<void> => {
       await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method, params]) =>
         method === "Runtime.releaseObjectGroup" &&
-        params?.objectGroup === "fieldline-baseline-recovery-8")).toHaveLength(count));
+        String(params?.objectGroup).startsWith("fieldline-baseline-recovery-8-"))).toHaveLength(count));
     };
 
     await observer.handleEvent(saba, "Network.webSocketCreated", {
@@ -3087,6 +3175,7 @@ describe("NetworkObserver", () => {
     await observer.pollSabaDomChanges(saba, "sports.example");
     await settleObserverBackgroundTasks();
     observer.beginSourceEpoch(saba.sourceId);
+    await attachSabaRecoveryWorker(observer, saba);
     now = 35_001;
     probeEnabled = true;
     advanceProbeClock = true;
@@ -3207,10 +3296,14 @@ describe("NetworkObserver", () => {
       isrbt: false, iscyb: false, hs: 0, as: 0, rbt: "", eventTrace: "discard",
       mls: [
         { mi: 21, bti: 1, gp: 1, marketTrace: "discard", ws: [
-          { wsi: 31, si: 1, hdp: 0.5, dih: "0.5", o: 0.91, selectionTrace: "discard" },
-          { wsi: 32, si: 2, hdp: -0.5, dih: "-0.5", o: -0.99, selectionTrace: "discard" }
+          { wsi: 31, si: 1, hdp: 0.5, dih: "0.5", o: 0.91, ot: 2, selectionTrace: "discard" },
+          { wsi: 32, si: 2, hdp: -0.5, dih: "-0.5", o: -0.99, ot: 1, selectionTrace: "discard" }
         ] },
-        { mi: 22, bti: 5, gp: 1, ws: [], unsupportedTrace: "discard" }
+        { mi: 22, bti: 5, gp: 1, ws: [], unsupportedTrace: "discard" },
+        { mi: 23, bti: 24, gp: 1, ws: [
+          { wsi: 33, si: 101, o: 3.2, ot: 3, s: "total=1.5", selectionTrace: "discard" },
+          { wsi: 34, si: 102, o: 1.3, ot: 3, s: "total=1.5", selectionTrace: "discard" }
+        ] }
       ]
     }] };
 
@@ -3226,10 +3319,14 @@ describe("NetworkObserver", () => {
       eid: 11, edt: "2026-09-05T01:00:00Z", htn: "Home", atn: "Away", cn: "League",
       isrbt: false, iscyb: false, hs: 0, as: 0, rbt: "", mls: [{
         mi: 21, bti: 1, gp: 1, fieldlineObservedAtMs: expect.any(Number), ws: [
-          { wsi: 31, si: 1, hdp: 0.5, dih: "0.5", o: 0.91 },
-          { wsi: 32, si: 2, hdp: -0.5, dih: "-0.5", o: -0.99 }
+          { wsi: 31, si: 1, hdp: 0.5, dih: "0.5", o: 0.91, ot: 2 },
+          { wsi: 32, si: 2, hdp: -0.5, dih: "-0.5", o: -0.99, ot: 1 }
         ]
-      }, { mi: 22, bti: 5, gp: 1, fieldlineObservedAtMs: expect.any(Number), ws: [] }]
+      }, { mi: 22, bti: 5, gp: 1, fieldlineObservedAtMs: expect.any(Number), ws: [] },
+      { mi: 23, bti: 24, gp: 1, fieldlineObservedAtMs: expect.any(Number), ws: [
+        { wsi: 33, si: 101, o: 3.2, ot: 3, s: "total=1.5" },
+        { wsi: 34, si: 102, o: 1.3, ot: 3, s: "total=1.5" }
+      ] }]
     }] });
   });
 
@@ -4092,6 +4189,7 @@ describe("NetworkObserver", () => {
     const fetcher = async (path: string) => {
       requested.push(path);
       if (path.startsWith("/api/eventpage/")) return { ok: true, text: async () => '{"data":[]}' };
+      if (path.includes("/early/initial?")) return { ok: true, text: async () => '{"serializedData":[]}' };
       if (path === "/api/eventlist/asia/leagues/v2/1/live/initial?regionCode=VN&leagueIds=01") {
         const leagues = liveLeagueIds.map((leagueId) => league(leagueId));
         (leagues[0]![12] as unknown[]) = [["live-event-live-league-1", "richer-initial-market-data"]];
@@ -4168,12 +4266,12 @@ describe("NetworkObserver", () => {
     const location = { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" };
 
     const first = evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
-    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    await vi.waitFor(() => expect(releases).toHaveLength(3));
     root.dataset.fieldlineBtiCatalogRefreshAt = "0";
     const second = evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(requested).toHaveLength(2);
+    expect(requested).toHaveLength(3);
     for (const release of releases) release();
     const [firstResult, secondResult] = await Promise.all([first, second]);
     expect(secondResult.generation).toBe(firstResult.generation);
@@ -4272,7 +4370,7 @@ describe("NetworkObserver", () => {
       await vi.advanceTimersByTimeAsync(10_002);
       await expect(refresh).resolves.toMatchObject({ status: "catalog-failed", responses: [] });
       const listRequests = requests.filter(({ path }) => path.startsWith("/api/eventlist/"));
-      expect(listRequests).toHaveLength(3);
+      expect(listRequests).toHaveLength(4);
       expect(listRequests.filter(({ path }) => path.includes("/live/initial?"))).toHaveLength(2);
       expect(listRequests.filter(({ path }) => path.includes("/prematch/initial?"))).toHaveLength(1);
       expect(new Set(listRequests.map(({ generation }) => generation)).size).toBe(1);
@@ -4538,7 +4636,7 @@ describe("NetworkObserver", () => {
       pathname: "/sports", hostname: "bti.test", origin: "https://bti.test"
     }, fetcher, { getItem: () => null });
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined(), { timeout: 4_000 });
 
     expect(requested).toEqual(eventIds);
   });
@@ -4641,8 +4739,8 @@ describe("NetworkObserver", () => {
         : key === "CT_APP_SERVICE_CONTEXT" ? "opaque-service-context" : null
     });
 
-    expect(listHeaders).toHaveLength(2);
-    expect(listHeaders).toEqual(Array.from({ length: 2 }, () => expect.objectContaining({
+    expect(listHeaders).toHaveLength(3);
+    expect(listHeaders).toEqual(Array.from({ length: 3 }, () => expect.objectContaining({
       authorization: "opaque-session-token",
       "service-context": "opaque-service-context"
     })));
@@ -4685,7 +4783,7 @@ describe("NetworkObserver", () => {
     delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV10;
       await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
         { getItem: () => null });
-      await vi.waitFor(() => expect(requestCounts[round]).toBe(7));
+      await vi.waitFor(() => expect(requestCounts[round]).toBe(7), { timeout: 2_000 });
     }
 
     expect([...requested].sort()).toEqual(["a", "b", "c", "d", "e", "f", "g"]);
@@ -4726,7 +4824,7 @@ describe("NetworkObserver", () => {
       await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
         { getItem: () => null });
       await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined(), { timeout: 2_000 });
     }
 
     expect([...requested].sort()).toEqual(["a", "b", "c", "d", "e", "f", "g",
@@ -5245,7 +5343,7 @@ describe("NetworkObserver", () => {
         return { result: { value: records } };
       }
       if (method === "Runtime.evaluate" &&
-        expression === "window.io && window.io.Socket && window.io.Socket.prototype") {
+        expression === "globalThis.io && globalThis.io.Socket && globalThis.io.Socket.prototype") {
         recoveryEntered = true;
         return heldRecovery;
       }
@@ -5262,6 +5360,7 @@ describe("NetworkObserver", () => {
         if (envelope.transport === "DOM_SNAPSHOT" && now === 5_000) now = 25_001;
       }), workScheduler: scheduler, now: () => now, monotonicNow: () => now });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    await attachSabaRecoveryWorker(observer, saba);
     try {
       if (order === "RECOVERY_FIRST") {
         await observer.refreshCatalog(saba);
@@ -5292,7 +5391,7 @@ describe("NetworkObserver", () => {
     }
     await vi.waitFor(() => expect(sendCommand.mock.calls.some(([, method, params]) =>
       method === "Runtime.releaseObjectGroup" &&
-      params?.objectGroup === "fieldline-baseline-recovery-10")).toBe(true));
+      String(params?.objectGroup).startsWith("fieldline-baseline-recovery-10-"))).toBe(true));
     await settleObserverBackgroundTasks();
     if (order === "RECOVERY_FIRST") {
       now = 55_003;
@@ -5305,7 +5404,7 @@ describe("NetworkObserver", () => {
     await vi.waitFor(() => expect(forwarded.some(({ request }) =>
       request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true));
     expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
-      params?.expression === "window.io && window.io.Socket && window.io.Socket.prototype")).toHaveLength(1);
+      params?.expression === "globalThis.io && globalThis.io.Socket && globalThis.io.Socket.prototype")).toHaveLength(1);
   });
 
   it("does not probe from old usable DOM after a failed renewal capture", async () => {
@@ -7101,10 +7200,10 @@ describe("NetworkObserver", () => {
     const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
 
     const maintenance = observer.maintainKsportFeed(ksport);
-    await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1));
     const refresh = observer.refreshCatalog(ksport);
     await Promise.resolve();
-    expect(sendCommand).toHaveBeenCalledTimes(1);
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
     releaseFirst();
     await Promise.all([maintenance, refresh]);
   });
@@ -8487,11 +8586,13 @@ describe("NetworkObserver", () => {
     }
   });
 
-  it("rediscovers an existing KSPORT worker before attempting HTTP recovery in the page context", async () => {
+  it.each([500, null])("keeps an existing KSPORT worker as fallback while honoring a page refusal: %s", async pageFailure => {
     const forwarded: ChromeBridgeEnvelope[] = [];
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>,
       sessionId?: string) => {
       const expression = String(params?.expression ?? "");
+      if (method === "Page.getFrameTree") return { frameTree: { frame: {
+        id: "provider-page", loaderId: "provider-document", url: "https://zenandfe.com/" } } };
       if (method === "Target.getTargets") return { targetInfos: [{
         targetId: "sportsbook-worker-target", type: "worker",
         url: "https://zenandfe.com/js/wk.js", attached: false
@@ -8501,10 +8602,10 @@ describe("NetworkObserver", () => {
       }
       if (method === "Runtime.evaluate" && expression.includes("fieldline-ksport-catalog-refresh")) {
         if (sessionId !== "sportsbook-worker") {
-          return { result: { value: { status: "fieldline-ksport-catalog-refresh-failed",
-            timeRange: "live", code: 500 } } };
+          return { result: { value: pageFailure === null
+            ? { status: "fieldline-ksport-catalog-refresh-template-missing" }
+            : { status: "fieldline-ksport-catalog-refresh-failed", timeRange: "live", code: pageFailure } } };
         }
-        if (!expression.includes('new URL("/api/v2/getEvent", executionOrigin)')) return {};
         return { result: { value: { status: "catalog-requested", executionSurface: "WORKER",
           executionOrigin: "https://zenandfe.com", origin: "https://be.sb21.net", responses: [
             { timeRange: "live", url: "https://be.sb21.net/api/v2/getEvent?timeRange=live", body: "[]" },
@@ -8528,8 +8629,10 @@ describe("NetworkObserver", () => {
     });
     const catalogEvaluations = sendCommand.mock.calls.filter(([, method, params]) =>
       method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh"));
-    expect(catalogEvaluations.map((call) => call[3])).toEqual(["sportsbook-worker"]);
-    expect(forwarded.filter((envelope) => envelope.transport === "HTTP_RESPONSE")).toHaveLength(2);
+    expect(catalogEvaluations.map((call) => call[3])).toEqual(pageFailure === null
+      ? [undefined, "sportsbook-worker"] : [undefined]);
+    expect(forwarded.filter((envelope) => envelope.transport === "HTTP_RESPONSE")).toHaveLength(pageFailure === null ? 2 : 0);
+    expect(await observer.sbobetRequestsPaused()).toBe(pageFailure !== null);
     expect(sendCommand).not.toHaveBeenCalledWith(8, "Page.reload", expect.anything());
   });
 
@@ -8673,7 +8776,7 @@ describe("NetworkObserver", () => {
         .toBe(false);
       expect(sendCommand).toHaveBeenCalledWith(20, "Runtime.evaluate", expect.objectContaining({
         expression: "window.io && window.io.Socket && window.io.Socket.prototype",
-        objectGroup: "fieldline-baseline-recovery-20"
+        objectGroup: expect.stringMatching(/^fieldline-baseline-recovery-20-\d+$/u)
       }));
     } finally {
       vi.useRealTimers();
@@ -9307,6 +9410,7 @@ describe("NetworkObserver", () => {
 
     expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
       params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
+    await settleObserverBackgroundTasks();
     expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(true);
     expect(sendCommand.mock.calls.find(([, method]) => method === "Runtime.callFunctionOn")?.[2])
       .toMatchObject({ functionDeclaration: expect.stringContaining("socket.disconnect(); socket.connect()") });
@@ -9461,7 +9565,7 @@ describe("NetworkObserver", () => {
     await recovery;
 
     await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.releaseObjectGroup", {
-      objectGroup: "fieldline-baseline-recovery-13"
+      objectGroup: expect.stringMatching(/^fieldline-baseline-recovery-13-\d+$/u)
     }));
 
     expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.callFunctionOn")).toBe(false);
@@ -9608,10 +9712,15 @@ describe("NetworkObserver", () => {
     expect(rootMethods).not.toContain("Page.reload");
   });
 
-  it("retries a missed SABA orphan reconnect after five seconds without a frame-driven storm", async () => {
+  it("retries a missed SABA orphan reconnect after thirty seconds without a frame-driven storm", async () => {
     const now = { value: 1_000 };
     const sendCommand = vi.fn(async (_tabId: number, _method: string,
-      _params?: Record<string, unknown>, _sessionId?: string) => ({}));
+      _params?: Record<string, unknown>, _sessionId?: string) => {
+      if (_method === "Runtime.evaluate" && String(_params?.expression).includes("Socket.prototype")) {
+        return { result: { objectId: "socket-prototype" } };
+      }
+      return {};
+    });
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
       now: () => now.value, monotonicNow: () => now.value });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
@@ -9630,6 +9739,9 @@ describe("NetworkObserver", () => {
     expect(attempts()).toBe(1);
 
     now.value = 6_000;
+    await orphan();
+    expect(attempts()).toBe(1);
+    now.value = 31_000;
     await orphan();
     expect(attempts()).toBe(2);
   });
@@ -9870,6 +9982,7 @@ describe("NetworkObserver", () => {
 
     await observer.refreshCatalog(saba);
     expect(selections).toBeGreaterThan(0);
+    await settleObserverBackgroundTasks();
     expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(true);
 
     // The control was reached once; a later refresh must not click it again.
@@ -10505,10 +10618,9 @@ describe("NetworkObserver", () => {
       const forwarded: ChromeBridgeEnvelope[] = [];
       const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>,
         sessionId?: string) => {
-        if (method === "Runtime.evaluate" && sessionId === "sportsbook-worker-old" &&
+        if (method === "Runtime.evaluate" && (sessionId === "sportsbook-worker-old" || sessionId === "sportsbook-worker-new") &&
           String(params?.expression).includes("fieldline-ksport-catalog-refresh")) {
-          sawFetch();
-          await blockedFetch;
+          if (sessionId === "sportsbook-worker-old") { sawFetch(); await blockedFetch; }
           return { result: { value: { status: "catalog-requested", executionSurface: "WORKER",
             origin: "https://api.sb21.net", responses: [
               { timeRange: "live", url: "https://api.sb21.net/api/v2/getEvent?timeRange=live", body: "[]" },
@@ -10539,7 +10651,9 @@ describe("NetworkObserver", () => {
 
       expect(forwarded.filter((envelope) => envelope.transport === "HTTP_RESPONSE")).toHaveLength(0);
       expect(forwarded.some((envelope) => envelope.request.pathnameClass ===
-        "/__fieldline_ksport_refresh__")).toBe(true);
+        "/__fieldline_ksport_refresh__")).toBe(false);
+      await observer.refreshCatalog(ksport);
+      expect(forwarded.filter((envelope) => envelope.transport === "HTTP_RESPONSE")).toHaveLength(2);
     });
 
     it("leaves a healthy complete sportsbook feed untouched", async () => {
@@ -10999,7 +11113,7 @@ describe("NetworkObserver", () => {
       ]);
     });
 
-    it("keeps four-second HTTP authority and bounded WS recovery while the catalog socket is missing", async () => {
+    it("keeps four-second HTTP authority without socket recovery while the catalog socket is missing", async () => {
       const now = { value: 1_000 };
       const { sendCommand, forwarded, observer } = setupHttpFallback(now);
 
@@ -11018,10 +11132,10 @@ describe("NetworkObserver", () => {
         "KSPORT_LIVE", "KSPORT_TODAY", "KSPORT_LIVE", "KSPORT_TODAY",
         "KSPORT_LIVE", "KSPORT_TODAY", "KSPORT_LIVE", "KSPORT_TODAY"
       ]);
-      expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.callFunctionOn")).toHaveLength(2);
+      expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.callFunctionOn")).toHaveLength(0);
     });
 
-    it("keeps four-second HTTP authority and bounded WS recovery after the socket turns silent", async () => {
+    it("keeps four-second HTTP authority without socket recovery after the socket turns silent", async () => {
       const now = { value: 1_000 };
       const { sendCommand, forwarded, observer } = setupHttpFallback(now);
       await openSocket(observer, [liveFrame, todayFrame]);
@@ -11043,7 +11157,7 @@ describe("NetworkObserver", () => {
         "KSPORT_LIVE", "KSPORT_TODAY", "KSPORT_LIVE", "KSPORT_TODAY",
         "KSPORT_LIVE", "KSPORT_TODAY", "KSPORT_LIVE", "KSPORT_TODAY"
       ]);
-      expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.callFunctionOn")).toHaveLength(2);
+      expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.callFunctionOn")).toHaveLength(0);
     });
 
     it("retries a failed paired HTTP fallback after four seconds", async () => {
@@ -11774,8 +11888,12 @@ describe("NetworkObserver", () => {
 
     observer.beginSourceEpoch(ksport.sourceId);
     await observer.handleEvent(ksport, "Network.webSocketCreated", { requestId: "sports", url });
-    await observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "sports",
+    const replacementLive = observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "sports",
       response: { opcode: 1, payloadData: live } });
+    // Replacement work shares the bounded physical lane with the retiring
+    // forward. Release that head before waiting for the new baseline.
+    releaseClosed();
+    await Promise.all([retiredClose, replacementLive]);
     await observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "sports",
       response: { opcode: 1, payloadData: today } });
     expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(true);
@@ -11903,6 +12021,10 @@ describe("NetworkObserver", () => {
       observer.beginSourceEpoch(ksport.sourceId);
       await observer.handleEvent(ksport, "Network.webSocketCreated", { requestId: "replacement", url },
         "replacement-session");
+      // A new epoch cannot allocate another physical forwarding lane behind
+      // the deliberately blocked old session.
+      releaseClosed();
+      await detached;
       for (const payloadData of [ksportFullReceipt("live", 200), ksportFullReceipt("today", 204)]) {
         await observer.handleEvent(ksport, "Network.webSocketFrameReceived", {
           requestId: "replacement", response: { opcode: 1, payloadData }
@@ -12077,6 +12199,11 @@ describe("KSPORT football group label", () => {
   it("does not accept a different tab that merely starts with the label", () => {
     expect(evaluate(["Bóng đá"], "truc tiep sau").status).toBe("time-tab-not-found");
   });
+
+  it.each(["Bóng đá GS", "Football GS LIVE 12", "Bóng đá điện tử", "Football Virtual"])(
+    "rejects another football product before selecting its period: %s", label => {
+      expect(evaluate([label]).status).toBe("time-tab-not-found");
+    });
 
   it("re-selects an already-active tab so the page re-emits its table", () => {
     // Measured 2026-08-26: the selector reached time-tab-active, meaning the

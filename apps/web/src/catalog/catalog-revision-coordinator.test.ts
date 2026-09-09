@@ -20,6 +20,27 @@ function result(accountId: string, revision: string, observedAtMs = 100): Catalo
 }
 
 describe("CatalogRevisionCoordinator", () => {
+  it("invalidates accepted stale metadata immediately even when its account is not selected", () => {
+    const invalidated: CatalogRevisionEntry[] = [];
+    const accountId = "catalog-source:IM:FOOTBALL";
+    const stale = { ...entry(accountId, "stale"), snapshotState: "STALE" as const };
+    const coordinator = new CatalogRevisionCoordinator({
+      read: async () => new Promise<never>(() => undefined), onCatalog: () => undefined,
+      onStale: (value: CatalogRevisionEntry) => invalidated.push(value)
+    });
+    coordinator.acceptBaseline([stale], 10);
+    expect(invalidated).toEqual([stale]);
+    coordinator.acceptRevision({ ...stale, revision: "old" }, 9);
+    coordinator.acceptRevision(entry(accountId, "fresh"), 11);
+    expect(invalidated).toEqual([stale]);
+    const next = { ...stale, revision: "next-stale" };
+    coordinator.acceptRevision(next, 12);
+    expect(invalidated).toEqual([stale, next]);
+    coordinator.stop();
+    coordinator.acceptRevision(stale, 13);
+    expect(invalidated).toEqual([stale, next]);
+  });
+
   it("fetches and emits only the selected account whose revision changed", async () => {
     vi.useFakeTimers();
     const accepted: CatalogReadResult[] = [];
@@ -84,11 +105,181 @@ describe("CatalogRevisionCoordinator", () => {
     pending[0]!(result(accountId, "r3", 103));
     await vi.advanceTimersByTimeAsync(50);
     expect(pending).toHaveLength(2);
-    expect(accepted).toEqual([]);
+    expect(accepted).toEqual([result(accountId, "r3", 103)]);
     pending[1]!(result(accountId, "r4", 104));
     await Promise.resolve();
 
-    expect(accepted).toEqual([result(accountId, "r4", 104)]);
+    expect(accepted).toEqual([result(accountId, "r3", 103), result(accountId, "r4", 104)]);
+    coordinator.stop();
+  });
+
+  it("publishes progress from slow reads while newer revisions keep arriving", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const accepted: CatalogReadResult[] = [];
+    const pending: Array<(value: CatalogReadResult) => void> = [];
+    const coordinator = new CatalogRevisionCoordinator({
+      read: () => new Promise((resolve) => pending.push(resolve)),
+      onCatalog: (value) => accepted.push(value),
+      minimumPublishIntervalMs: 3_000
+    });
+    coordinator.setSelected([accountId]);
+    coordinator.acceptBaseline([entry(accountId, "r1", 101)], 1);
+    await vi.advanceTimersByTimeAsync(50);
+    for (let revision = 2; revision <= 7; revision += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      coordinator.acceptRevision(entry(accountId, `r${revision}`, 100 + revision), revision);
+    }
+    expect(pending).toHaveLength(1);
+    pending[0]!(result(accountId, "r1", 101));
+    await Promise.resolve();
+    expect(accepted.map((value) => value.revision)).toEqual(["r1"]);
+
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(pending).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pending).toHaveLength(2);
+    coordinator.acceptRevision(entry(accountId, "r8", 108), 8);
+    pending[1]!(result(accountId, "r7", 107));
+    await Promise.resolve();
+    expect(accepted.map((value) => value.revision)).toEqual(["r1", "r7"]);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(pending).toHaveLength(3);
+    pending[2]!(result(accountId, "r8", 108));
+    await Promise.resolve();
+    expect(accepted.map((value) => value.revision)).toEqual(["r1", "r7", "r8"]);
+    coordinator.stop();
+  });
+
+  it("does not overwrite an externally held revision advanced during the read", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const accepted: CatalogReadResult[] = [];
+    const pending: Array<(value: CatalogReadResult) => void> = [];
+    const coordinator = new CatalogRevisionCoordinator({
+      read: () => new Promise((resolve) => pending.push(resolve)),
+      onCatalog: (value) => accepted.push(value)
+    });
+    coordinator.setSelected([accountId]);
+    coordinator.setHeldRevision(accountId, "r1");
+    coordinator.acceptBaseline([entry(accountId, "r2", 102)], 2);
+    await vi.advanceTimersByTimeAsync(50);
+    coordinator.setHeldRevision(accountId, "external-r3");
+    pending[0]!(result(accountId, "r2", 102));
+    await Promise.resolve();
+    expect(accepted).toEqual([]);
+    await vi.advanceTimersByTimeAsync(50);
+    pending[1]!(result(accountId, "r2", 102));
+    await Promise.resolve();
+    expect(accepted).toEqual([]);
+    coordinator.acceptRevision(entry(accountId, "r4", 104), 4);
+    await vi.advanceTimersByTimeAsync(50);
+    pending[2]!(result(accountId, "r4", 104));
+    await Promise.resolve();
+    expect(accepted.map((value) => value.revision)).toEqual(["r4"]);
+    coordinator.stop();
+  });
+
+  it("allows the newly announced latest revision after an external held update", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const accepted: CatalogReadResult[] = [];
+    let complete!: (value: CatalogReadResult) => void;
+    const coordinator = new CatalogRevisionCoordinator({
+      read: () => new Promise((resolve) => { complete = resolve; }),
+      onCatalog: (value) => accepted.push(value)
+    });
+    coordinator.setSelected([accountId]);
+    coordinator.acceptBaseline([entry(accountId, "r1", 101)], 1);
+    await vi.advanceTimersByTimeAsync(50);
+    coordinator.setHeldRevision(accountId, "r2");
+    coordinator.acceptRevision(entry(accountId, "r3", 103), 3);
+    complete(result(accountId, "r3", 103));
+    await Promise.resolve();
+    expect(accepted.map((value) => value.revision)).toEqual(["r3"]);
+    coordinator.stop();
+  });
+
+  it("does not promote an in-flight fresh response after the target becomes stale", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const accepted: CatalogReadResult[] = [];
+    const pending: Array<(value: CatalogReadResult) => void> = [];
+    const coordinator = new CatalogRevisionCoordinator({
+      read: () => new Promise((resolve) => pending.push(resolve)),
+      onCatalog: (value) => accepted.push(value)
+    });
+    coordinator.setSelected([accountId]);
+    coordinator.acceptBaseline([entry(accountId, "fresh", 101)], 1);
+    await vi.advanceTimersByTimeAsync(50);
+    coordinator.acceptRevision({ ...entry(accountId, "stale", 101), snapshotState: "STALE" }, 2);
+    pending[0]!(result(accountId, "fresh", 101));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(accepted).toEqual([]);
+    const stale = result(accountId, "stale", 101);
+    pending[1]!({ ...stale, catalog: { ...stale.catalog, snapshotState: "STALE" } });
+    await Promise.resolve();
+    expect(accepted.map((value) => value.catalog.snapshotState)).toEqual(["STALE"]);
+    coordinator.stop();
+  });
+
+  it("rejects a fallback response older than the last published observation", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const accepted: CatalogReadResult[] = [];
+    const read = vi.fn()
+      .mockResolvedValueOnce(result(accountId, "newer", 200))
+      .mockResolvedValueOnce(result(accountId, "older", 100));
+    const coordinator = new CatalogRevisionCoordinator({ read, onCatalog: (value) => accepted.push(value) });
+    coordinator.setSelected([accountId]);
+    coordinator.setRealtimeUnavailable();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(accepted.map((value) => value.revision)).toEqual(["newer"]);
+    coordinator.stop();
+  });
+
+  it("rejects a response for another account and retries the requested account", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const accepted: CatalogReadResult[] = [];
+    const onError = vi.fn();
+    const read = vi.fn()
+      .mockResolvedValueOnce(result("catalog-source:SBOBET:FOOTBALL", "r1"))
+      .mockResolvedValueOnce(result(accountId, "r1"));
+    const coordinator = new CatalogRevisionCoordinator({ read, onError,
+      onCatalog: (value) => accepted.push(value) });
+    coordinator.setSelected([accountId]);
+    coordinator.acceptBaseline([entry(accountId, "r1")], 1);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(accepted).toEqual([]);
+    expect(onError).toHaveBeenCalledWith(accountId, expect.any(Error));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(accepted).toEqual([result(accountId, "r1")]);
+    coordinator.stop();
+  });
+
+  it("discards a pending response across a baseline reset even if its revision is reused", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const accepted: CatalogReadResult[] = [];
+    const pending: Array<(value: CatalogReadResult) => void> = [];
+    const coordinator = new CatalogRevisionCoordinator({
+      read: () => new Promise((resolve) => pending.push(resolve)),
+      onCatalog: (value) => accepted.push(value)
+    });
+    coordinator.setSelected([accountId]);
+    coordinator.acceptBaseline([entry(accountId, "same-revision", 100)], 500);
+    await vi.advanceTimersByTimeAsync(50);
+    coordinator.acceptBaseline([entry(accountId, "same-revision", 200)], 1);
+    pending[0]!(result(accountId, "same-revision", 100));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(accepted).toEqual([]);
+    expect(pending).toHaveLength(2);
+    pending[1]!(result(accountId, "same-revision", 200));
+    await Promise.resolve();
+    expect(accepted).toEqual([result(accountId, "same-revision", 200)]);
     coordinator.stop();
   });
 

@@ -1,6 +1,7 @@
 import type { CatalogSourceStatus } from "@tool-chenh/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderSourceRecoveryCoordinator } from "./provider-source-recovery.js";
+import { ProviderSourceRecoveryApi } from "../api/provider-source-recovery.js";
 
 const providers = ["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"] as const;
 
@@ -100,6 +101,32 @@ describe("ProviderSourceRecoveryCoordinator", () => {
     await expect(coordinator.manual("SBOBET")).resolves.toBe(true);
     expect(recover).toHaveBeenNthCalledWith(3, "SBOBET", "MANUAL");
     coordinator.dispose();
+  });
+
+  it("never escalates late automatic failures from two dashboards after their source has recovered", async () => {
+    const pending: Array<(response: Response) => void> = [], calls: string[] = [];
+    const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status });
+    const coordinators = ["local", "public"].map(tab => {
+      const api = new ProviderSourceRecoveryApi(async url => {
+        calls.push(`${tab}:${String(url)}`);
+        if (url === "/api/chrome-bridge/sources") return json({ sources: [{ lobby: "IM",
+          sourceId: "chrome:IM:7", state: "LIVE", lastAcceptedAtMs: Date.now(), authorityDisposition: "ACTIVE" }] });
+        if (url === "/api/chrome-bridge/request-snapshot") return new Promise(resolve => pending.push(resolve));
+        return json({ provider: "IM", requested: 1 }, 202);
+      });
+      return new ProviderSourceRecoveryCoordinator({ recover: (provider, mode) => api.recover(provider, mode) });
+    });
+    try {
+      for (const coordinator of coordinators) coordinator.update([source("IM", false)]);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(pending).toHaveLength(2);
+      for (const coordinator of coordinators) coordinator.update([source("IM", true)]);
+      for (const resolve of pending) resolve(json({ error: "PROVIDER_FEED_BASELINE_TIMEOUT" }, 504));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls.filter(call => call.includes("/api/maintenance/"))).toEqual([]);
+      expect(coordinators.map(coordinator => coordinator.snapshot("IM").phase)).toEqual(["IDLE", "IDLE"]);
+      expect(calls).toHaveLength(4);
+    } finally { for (const coordinator of coordinators) coordinator.dispose(); }
   });
 
   it("waits ninety seconds for a fresh baseline and retries a still-off provider at the five-minute boundary", async () => {

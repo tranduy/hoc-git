@@ -11,7 +11,9 @@ import type { ChromeBridgeSourceSnapshot } from "../chrome-bridge/chrome-bridge-
 import type { AuthoritySlotSnapshot } from "../chrome-bridge/provider-authority-types.js";
 import { providerFeedPolicies } from "../chrome-bridge/provider-feed-policies.js";
 import type { ProviderFeedSnapshot } from "../chrome-bridge/provider-feed-types.js";
+import type { NetworkBodyAssemblyDiagnostic } from "../chrome-bridge/network-body-assembler.js";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
+import { parseImRefreshDiagnostic, type ImRefreshDiagnostic } from "./im-refresh-diagnostic.js";
 
 export const PIPELINE_TELEMETRY_LIMITS = Object.freeze({
   windowMs: 300_000,
@@ -51,6 +53,7 @@ export interface PipelineTelemetryReaders {
   readonly listFeeds: () => readonly ProviderFeedSnapshot[];
   readonly listCatalogStatuses: () => Promise<readonly CatalogSourceStatus[]>;
   readonly catalogRevision: (accountId: string) => StoredCatalogRevision | undefined;
+  readonly networkBodyAssembly?: (accountId: string) => NetworkBodyAssemblyDiagnostic | null;
 }
 
 interface SemanticChange {
@@ -99,6 +102,7 @@ interface AccountState {
    *  at the source. A provider that lives on those refreshes is otherwise silent
    *  about why one produced nothing. */
   readonly refreshOutcomes: Map<string, number>;
+  imRefresh: ImRefreshDiagnostic | null;
   wsAttach: {
     readonly sourceGeneration: number;
     readonly webSocketCreated: number;
@@ -149,6 +153,7 @@ interface AccountState {
     readonly reconnectAttempts: number;
     readonly reconnectOutcomes: string;
     readonly apsportDetail?: ApsportDetailDiagnostic;
+    readonly sabaCollector?: SabaCollectorDiagnostic;
   } | null;
   pageHealth: {
     readonly status: "HEALTHY" | "AUTH_ERROR" | "UNKNOWN";
@@ -264,7 +269,7 @@ function createState(): AccountState {
     attachedAtMs: null, lastEnvelopeAtMs: null, lastSequence: null, lastDecodedAtMs: null,
     lastEvidenceAtMs: null, lastSemanticChangeAtMs: null, forcedUnlocks: 0,
     ignoredEndpoints: new Map(), lastIgnoredEndpoint: null,
-    refreshOutcomes: new Map(), ingestRejections: new Map(),
+    refreshOutcomes: new Map(), ingestRejections: new Map(), imRefresh: null,
     wsAttach: null, pageHealth: null,
     recovery: { consecutiveFailures: 0, nextAttemptAtMs: null, lastFailureCode: null }
   };
@@ -294,10 +299,13 @@ export class PipelineTelemetry {
       state.attachedAtMs = atMs;
       state.wsAttach = null;
       state.pageHealth = null;
+      state.imRefresh = null;
     }
     state.lastEnvelopeAtMs = atMs;
     state.lastSequence = envelope.sequence;
-    if (envelope.transport === "TAB_STATE") this.#recordWorkHealth(state, envelope.payload.body, atMs);
+    if (envelope.transport === "TAB_STATE") this.#recordWorkHealth(state, envelope.payload.body, atMs,
+      envelope.lobby === "IM" && envelope.request.hostname === "imsports.directsb.net" &&
+      envelope.request.pathnameClass === "/__fieldline_im_catalog_refresh__");
   }
 
   recordEnvelopeRejected(accountId: ChromeBridgeProviderAccountId, reason: EnvelopeRejectReason,
@@ -396,7 +404,8 @@ export class PipelineTelemetry {
     const authorities = readers.listAuthorities();
     const feeds = readers.listFeeds();
     return CHROME_BRIDGE_PROVIDER_ACCOUNT_IDS.map((accountId) => this.#diagnostic(accountId, {
-      sources, authorities, feeds, statuses, revision: readers.catalogRevision(accountId)
+      sources, authorities, feeds, statuses, revision: readers.catalogRevision(accountId),
+      networkBodyAssembly: readers.networkBodyAssembly?.(accountId) ?? null
     }));
   }
 
@@ -420,6 +429,7 @@ export class PipelineTelemetry {
     readonly feeds: readonly ProviderFeedSnapshot[];
     readonly statuses: readonly CatalogSourceStatus[];
     readonly revision: StoredCatalogRevision | undefined;
+    readonly networkBodyAssembly: NetworkBodyAssemblyDiagnostic | null;
   }): PipelineDiagnostic {
     const nowMs = this.#now();
     const state = this.#state(accountId);
@@ -436,8 +446,8 @@ export class PipelineTelemetry {
     const sums = sumBuckets(state.buckets);
     const requiredEnvelopeTransports: readonly ("HTTP_RESPONSE" | "WS_FRAME" | "DOM_SNAPSHOT" | "TAB_STATE")[] =
       accountId === "catalog-source:SABA:FOOTBALL" ? ["WS_FRAME", "DOM_SNAPSHOT"]
-      : accountId === "catalog-source:SBOBET:FOOTBALL" ||
-        accountId === "catalog-source:APSPORT:FOOTBALL" ? ["WS_FRAME"] : ["HTTP_RESPONSE"];
+      : accountId === "catalog-source:SBOBET:FOOTBALL" ? ["WS_FRAME", "HTTP_RESPONSE"]
+      : accountId === "catalog-source:APSPORT:FOOTBALL" ? ["WS_FRAME"] : ["HTTP_RESPONSE"];
     const evidence = state.buckets.flatMap((bucket) => bucket.evidenceAtMs).sort((left, right) => left - right);
     const cadence = percentileCadence(evidence);
     const quoteChanges60s = state.buckets.filter((bucket) => bucket.startedAtMs >= nowMs - 60_000)
@@ -463,6 +473,7 @@ export class PipelineTelemetry {
       { hop: "HOP4_ADAPTER", ok: state.lastDecodedAtMs !== null &&
         nowMs - state.lastDecodedAtMs <= PIPELINE_TELEMETRY_LIMITS.windowMs, detail: {
         decoded: sums.decoded, ignored: sums.ignored, rejectReasons: sums.adapterRejectReasons,
+        ...(current.networkBodyAssembly === null ? {} : { networkBodyAssembly: current.networkBodyAssembly }),
         // Why frames that reached an adapter were not recognised as its
         // provider's records. Shape names only; no frame value is kept.
         // Each map is provider-owned; APSPORT's is the fallback for the
@@ -482,6 +493,7 @@ export class PipelineTelemetry {
           pathnameClass: state.lastIgnoredEndpoint.pathnameClass,
           ageMs: age(nowMs, state.lastIgnoredEndpoint.atMs)
         },
+        imRefresh: state.imRefresh,
         refreshOutcomes: [...state.refreshOutcomes.entries()]
           .sort((left, right) => right[1] - left[1]).slice(0, 6)
           .map(([status, count]) => ({ status, count }))
@@ -518,9 +530,9 @@ export class PipelineTelemetry {
       firstFailingHop: hops.find((hop) => !hop.ok)?.hop ?? null, hops };
   }
 
-  #recordWorkHealth(state: AccountState, body: string, observedAtMs: number): void {
+  #recordWorkHealth(state: AccountState, body: string, observedAtMs: number, includeImRefresh = false): void {
     try {
-      const value = JSON.parse(body) as { kind?: unknown; results?: unknown;
+      const value = JSON.parse(body) as { kind?: unknown; results?: unknown; imRefresh?: unknown;
         status?: unknown; code?: unknown; rosterCoverage?: unknown;
         counters?: { forcedUnlocks?: unknown };
         sourceGeneration?: unknown; webSocketCreated?: unknown; webSockets?: unknown;
@@ -540,12 +552,18 @@ export class PipelineTelemetry {
         baselineTabTargets?: unknown; baselineTabStep?: unknown; baselineTabGroups?: unknown;
         baselineTabScopes?: unknown; baselineTabPeriods?: unknown; baselineTabLabels?: unknown;
         catalogShape?: unknown; reconnectAttempts?: unknown; reconnectOutcomes?: unknown;
-        apsportDetail?: unknown };
+        apsportDetail?: unknown; sabaCollector?: unknown };
+      if (includeImRefresh && value.imRefresh !== undefined) {
+        const diagnostic = parseImRefreshDiagnostic(value.imRefresh, observedAtMs);
+        if (diagnostic !== null && diagnostic.observedAtMs >= (state.imRefresh?.observedAtMs ?? 0)) {
+          state.imRefresh = diagnostic;
+        }
+      }
       if (Array.isArray((value as { results?: unknown }).results)) {
         for (const entry of (value as { results: readonly unknown[] }).results) {
           if (typeof entry !== "string") continue;
           const status = entry.slice(entry.lastIndexOf(":") + 1);
-          if (!refreshOutcomes.has(status) && !/^(?:native-status-[0-9]{1,6}|http-status-429)$/u.test(status)) continue;
+          if (!refreshOutcomes.has(status) && !/^(?:native-status-[0-9]{1,6}|http-status-(?:401|403|429)|gate-(?:lock-held|cooldown)|failure-(?:signature|network|body-read|invalid-json|roster-shape|request-timeout|request-failed|native-auth-changed|native-auth-not-ready))$/u.test(status)) continue;
           const seen = state.refreshOutcomes.get(status) ?? 0;
           if (seen === 0 && state.refreshOutcomes.size >= 8) continue;
           state.refreshOutcomes.set(status, seen + 1);
@@ -571,6 +589,7 @@ export class PipelineTelemetry {
         // be paired with; absent ones read as zero rather than dropping the
         // whole diagnostic.
         const detailCoverage = apsportDetailDiagnostic(value.apsportDetail);
+        const sabaCollector = sabaCollectorDiagnostic(value.sabaCollector);
         state.wsAttach = {
           sourceGeneration: Number(value.sourceGeneration), webSocketCreated: Number(value.webSocketCreated),
           webSockets: Number(value.webSockets), ksportTargets: Number(value.ksportTargets),
@@ -618,7 +637,8 @@ export class PipelineTelemetry {
           baselineTabPeriods: boundedCounter(value.baselineTabPeriods),
           baselineTabLabels: tabLabels(value.baselineTabLabels),
           catalogShape: catalogShape(value.catalogShape),
-          ...(detailCoverage === undefined ? {} : { apsportDetail: detailCoverage })
+          ...(detailCoverage === undefined ? {} : { apsportDetail: detailCoverage }),
+          ...(sabaCollector === undefined ? {} : { sabaCollector })
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }
@@ -650,6 +670,39 @@ export class PipelineTelemetry {
     const cutoff = nowMs - PIPELINE_TELEMETRY_LIMITS.windowMs;
     while (state.buckets[0] !== undefined && state.buckets[0].startedAtMs < cutoff) state.buckets.shift();
   }
+}
+
+interface SabaCollectorDiagnostic {
+  readonly nativeReady: boolean;
+  readonly schemaContextReady: boolean;
+  readonly catalogUsable: boolean;
+  readonly discoveryPending: boolean;
+  readonly discoveryAttempted: boolean;
+  readonly collectorState: "NONE" | "RUNNING" | "FINISHED";
+  readonly mainRosterComplete?: boolean;
+  readonly hiddenMarketsComplete?: boolean;
+  readonly domBlocked: boolean;
+  readonly probeBlocked: boolean;
+  readonly currentPeriod: "TODAY" | "EARLY" | null;
+  readonly lastErrorCode: string | null;
+}
+
+function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const entry = value as Record<string, unknown>;
+  if (["nativeReady", "schemaContextReady", "catalogUsable", "discoveryPending",
+    "discoveryAttempted", "domBlocked", "probeBlocked"].some(key => typeof entry[key] !== "boolean") ||
+    !["NONE", "RUNNING", "FINISHED"].includes(String(entry.collectorState))) return undefined;
+  return { nativeReady: entry.nativeReady as boolean, schemaContextReady: entry.schemaContextReady as boolean,
+    catalogUsable: entry.catalogUsable as boolean, discoveryPending: entry.discoveryPending as boolean,
+    discoveryAttempted: entry.discoveryAttempted as boolean,
+    collectorState: entry.collectorState as SabaCollectorDiagnostic["collectorState"],
+    ...(typeof entry.mainRosterComplete === "boolean" ? { mainRosterComplete: entry.mainRosterComplete } : {}),
+    ...(typeof entry.hiddenMarketsComplete === "boolean" ? { hiddenMarketsComplete: entry.hiddenMarketsComplete } : {}),
+    domBlocked: entry.domBlocked as boolean, probeBlocked: entry.probeBlocked as boolean,
+    currentPeriod: entry.currentPeriod === "TODAY" || entry.currentPeriod === "EARLY" ? entry.currentPeriod : null,
+    lastErrorCode: typeof entry.lastErrorCode === "string" && /^SABA_COLLECTOR_[A-Z_]{1,70}$/u.test(entry.lastErrorCode)
+      ? entry.lastErrorCode : null };
 }
 
 function age(nowMs: number, atMs: number | null): number | null {

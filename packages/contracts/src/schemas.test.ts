@@ -107,6 +107,18 @@ describe("expanded exact two-way Football market taxonomy", () => {
 });
 
 describe("NativeMarketObservationSchema", () => {
+  it("retains all 762 selections in the observed BTI price table with a bounded schema", () => {
+    const outcomeLabels = Array.from({ length: 762 }, (_, index) => `Outcome ${index}`);
+    const nativeSelections = outcomeLabels.map((_, index) => ({ selectionId: String(index),
+      outcomeId: String(index), line: "0.5", price: "0.9", rawFormat: "MALAY" }));
+    const input = { provider: "BTI", category: "FOOTBALL", providerEventId: "1", providerMarketId: "2",
+      nativeType: "UNKNOWN", nativeLabel: null, nativeScope: null, outcomeLabels, nativeSelections,
+      observedAtMs: 1234, disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED", nativeRow: "source,offer,price" };
+    expect(NativeMarketObservationSchema.parse(input).nativeSelections).toHaveLength(762);
+    expect(NativeMarketObservationSchema.safeParse({ ...input,
+      nativeSelections: Array.from({ length: 1025 }, () => nativeSelections[0]) }).success).toBe(false);
+    expect(NativeMarketObservationSchema.safeParse({ ...input, nativeRow: "x".repeat(4097) }).success).toBe(false);
+  });
   const observation = {
     provider: "APSPORT",
     category: "FOOTBALL",

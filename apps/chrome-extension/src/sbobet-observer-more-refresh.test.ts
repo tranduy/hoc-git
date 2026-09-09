@@ -124,6 +124,17 @@ function harness() {
 }
 
 describe("active More via the observed HTTP publication path", () => {
+  it.each(["transport", "malformed"])("keeps a %s More failure from pausing main refresh", async kind => {
+    const h = harness(); await h.context(); await h.pair();
+    if (kind === "transport") h.setStatus(0);
+    else h.setPrice("invalid");
+    await h.tick(); await flush(); await flush();
+    expect(h.requests).toHaveLength(1);
+    expect(h.more()).toHaveLength(0);
+    expect(await h.observer.sbobetRequestsPaused()).toBe(false);
+    h.setNow(wall + 1_999); await h.tick(); expect(h.requests).toHaveLength(1);
+    h.setNow(wall + 2_001); await h.tick(); await flush(); expect(h.requests).toHaveLength(2);
+  });
   it("bootstraps the exact backend from a bound main pair and emits exactly one actual More receipt", async () => {
     const h = harness(); await h.context(); await h.pair(); await h.tick();
     await vi.waitFor(() => expect(h.more()).toHaveLength(1), { timeout: 1000 });
@@ -159,14 +170,18 @@ describe("active More via the observed HTTP publication path", () => {
     await h.tick(); expect(h.requests).toHaveLength(0);
   });
 
-  it.each(["bridge", "context", "owner", "remove"])("retires pending active receipts on %s change", async kind => {
+  it.each(["bridge", "context", "owner", "remove", "document"].flatMap(kind => [200, 403].map(status => ({ kind, status }))))(
+    "retires pending active responses on $kind change (HTTP $status)", async ({ kind, status }) => {
     const h = harness(); await h.context(); await h.pair(); const held = h.holdFetch(); await h.tick();
     await vi.waitFor(() => expect(h.requests).toHaveLength(1), { timeout: 1000 });
     if (kind === "bridge") h.observer.beginBridgeSourceEpoch(source.sourceId);
     if (kind === "context") await h.observer.handleEvent(source, "Runtime.executionContextDestroyed", { executionContextId: 91 });
     if (kind === "owner") await h.pair([league(482, [event("101", "Changed Home")])], [], 2, 1);
     if (kind === "remove") await h.pair([], [], 2, 1);
+    if (kind === "document") h.setLoader("document-2");
+    h.setStatus(status);
     held.resolve(); await flush(); await flush(); expect(h.more()).toHaveLength(0);
+    expect(await h.observer.sbobetRequestsPaused()).toBe(false);
   });
 
   it("keeps physical capacity while publication is pending and cancels the acknowledgement on context loss", async () => {
@@ -190,7 +205,9 @@ describe("active More via the observed HTTP publication path", () => {
     expect(h.requests).toHaveLength(1); expect(h.more()).toHaveLength(0);
     h.setNow(wall + 8001); await vi.advanceTimersByTimeAsync(8001); await flush();
     h.setNetwork(true); await h.tick(); expect(h.requests).toHaveLength(1);
-    h.setNow(wall + 10_001); await h.tick(); await flush();
+    expect(await h.observer.sbobetRequestsPaused()).toBe(false);
+    h.setNow(wall + 10_000); await h.tick(); expect(h.requests).toHaveLength(1);
+    h.setNow(wall + 10_002); await h.tick(); await flush();
     expect(h.requests).toHaveLength(2); expect(h.more()).toHaveLength(1);
     await h.tick(); expect(h.requests).toHaveLength(2);
   });
@@ -199,20 +216,24 @@ describe("active More via the observed HTTP publication path", () => {
     const h = harness(); await h.context(); await h.pair(); const held = h.holdForward(); await h.tick();
     await vi.waitFor(() => expect(h.more()).toHaveLength(1), { timeout: 1000 });
     h.observer.beginBridgeSourceEpoch(source.sourceId);
-    await h.pair(); h.setNow(wall + 500); await h.tick();
-    await vi.waitFor(() => expect(h.more()).toHaveLength(2), { timeout: 1000 });
+    const pendingPair = h.pair(); h.setNow(wall + 500); await h.tick();
+    expect(h.more()).toHaveLength(1);
     h.observer.beginBridgeSourceEpoch(source.sourceId);
-    await h.pair(); h.setNow(wall + 1000); await h.tick(); await flush();
-    expect(h.requests).toHaveLength(2);
-    held.resolve(); await flush(); await h.tick();
-    await vi.waitFor(() => expect(h.more()).toHaveLength(3), { timeout: 1000 });
+    h.setNow(wall + 1000); await h.tick(); await flush();
+    // Resets cancel pending work, but cannot allocate a second physical
+    // forwarding lane while the old publication still owns its capacity.
+    expect(h.requests).toHaveLength(1);
+    held.resolve(); await pendingPair; await flush();
+    await h.pair(); await h.tick();
+    await vi.waitFor(() => expect(h.more()).toHaveLength(2), { timeout: 1000 });
   });
 
   it("backs off on provider 429 before another active request", async () => {
     const h = harness(); await h.context(); await h.pair(); h.setStatus(429); await h.tick(); await flush();
     expect(h.requests).toHaveLength(1); expect(h.more()).toHaveLength(0);
     h.setStatus(200); h.setNow(wall + 1000); await h.tick(); expect(h.requests).toHaveLength(1);
-    h.setNow(wall + 2500); await h.tick();
+    h.setNow(wall + 2500); await h.tick(); expect(h.requests).toHaveLength(1);
+    h.setNow(wall + 30_001); await h.tick();
     await vi.waitFor(() => expect(h.more()).toHaveLength(1), { timeout: 1000 });
   });
 

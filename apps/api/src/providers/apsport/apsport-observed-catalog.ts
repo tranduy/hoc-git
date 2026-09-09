@@ -56,6 +56,7 @@ export class ApsportObservedCatalogReader {
     return {
       dataMode: "LIVE", accountId, provider: "APSPORT", category: "FOOTBALL",
       comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: snapshot.observedAtMs,
+      observedMonotonicMs: snapshot.receivedMonotonicMs,
       rejectedMarketCount, events, markets, quotes
     };
   }

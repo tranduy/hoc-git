@@ -14,7 +14,14 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const authValue = readAuth();
   const contextValue = readContext();
   const previousState = root[detailStateKey];
-  if (previousState && (previousState.collectorVersion !== 11 || !previousState.sameSession?.(authValue, contextValue))) {
+  const retainedBackpressure = previousState?.sameSession?.(authValue, contextValue) ? {
+    requestRetryAtMs: previousState.requestRetryAtMs || 0,
+    requestStatus: previousState.requestStatus || 0,
+    requestFailures: previousState.requestFailures || 0,
+    lastRequestFailureAtMs: previousState.lastRequestFailureAtMs || 0,
+    authBlocked: previousState.authBlocked === true
+  } : {};
+  if (previousState && (previousState.collectorVersion !== 13 || !previousState.sameSession?.(authValue, contextValue))) {
     const retainedBodies = previousState.sameSession?.(authValue, contextValue) &&
       Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
     for (const controller of previousState.listControllers || []) controller.abort();
@@ -40,12 +47,41 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     for (const controller of legacyWorker.controllers?.values?.() || []) controller.abort();
     delete root.__fieldlineBtiDetailWorkerV9;
   }
-  const detailState = root[detailStateKey] || { collectorVersion: 11, desired: new Set(), failures: new Map(), evicted: new Set(),
+  const detailState = root[detailStateKey] || { collectorVersion: 13, desired: new Set(), failures: new Map(), evicted: new Set(),
     starts: new Map(), listControllers: new Set(), committed: null, rosterRetryAtMs: 0, rosterRefreshFailed: false,
+    requestRetryAtMs: 0, requestStatus: 0, requestFailures: 0, lastRequestFailureAtMs: 0, authBlocked: false,
+    ...retainedBackpressure,
     sameSession: (auth, context) => auth === authValue && context === contextValue };
   root[detailStateKey] = detailState;
   const ownsSession = () => root[detailStateKey] === detailState && detailState.sameSession(readAuth(), readContext());
   const cancelled = () => ({ status: 'catalog-failed', responses: [] });
+  const publishResult = (result) => ownsSession() && result?.status === 'catalog-requested' &&
+    detailState.committed?.generation === result.generation
+      ? detailState.committed.snapshot() : result;
+  const requestsPaused = () => detailState.authBlocked || Date.now() < detailState.requestRetryAtMs;
+  const recordBackpressure = (response) => {
+    if (!ownsSession()) return;
+    const status = Number(response?.status || 0);
+    if (status !== 401 && status !== 403 && status !== 429 && !(status >= 500 && status <= 599)) return;
+    const failedAtMs = Date.now();
+    if (!requestsPaused()) {
+      detailState.requestFailures = failedAtMs - detailState.lastRequestFailureAtMs > 5 * 60_000
+        ? 1 : detailState.requestFailures + 1;
+    }
+    detailState.lastRequestFailureAtMs = failedAtMs;
+    detailState.requestStatus = status;
+    if (status === 401 || status === 403) detailState.authBlocked = true;
+    const retryAfter = response?.headers?.get?.('Retry-After');
+    const retryMs = typeof retryAfter === 'string' && /^\d+(?:\.\d+)?$/u.test(retryAfter.trim())
+      ? Number(retryAfter) * 1000 : Date.parse(retryAfter || '') - failedAtMs;
+    const backoffMs = Math.min(5 * 60_000, 30_000 * 2 ** Math.min(4, detailState.requestFailures - 1));
+    detailState.requestRetryAtMs = Math.max(detailState.requestRetryAtMs, failedAtMs + backoffMs,
+      Number.isFinite(retryMs) && retryMs > 0 ? Math.min(Number.MAX_SAFE_INTEGER, failedAtMs + retryMs) : 0);
+    // One provider refusal stops the shared queue, including already-owned
+    // requests. Never walk every event or retry a rejected session on each tick.
+    for (const controller of detailState.listControllers) controller.abort();
+    for (const controller of root[detailWorkerKey]?.controllers?.values?.() || []) controller.abort();
+  };
   const deadline = (eventId, cached) => {
     const start = detailState.starts.get(eventId);
     const ttl = Number.isFinite(start) && start - Date.now() > nearWindowMs ? distantTtlMs : nearTtlMs;
@@ -62,6 +98,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     root[detailBodiesKey] = cache;
   };
   const existingRosterWorker = root[rosterWorkerKey];
+  if (requestsPaused()) return detailState.committed?.snapshot?.() || cancelled();
   if (!detailState.committed && now < detailState.rosterRetryAtMs) return cancelled();
   if (existingRosterWorker && existingRosterWorker.result &&
     (now - Number(existingRosterWorker.completedAt || 0) <= 12000 || now < detailState.rosterRetryAtMs)) {
@@ -70,7 +107,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   }
   detailState.committed?.pump?.();
   if (existingRosterWorker && existingRosterWorker.promise && !existingRosterWorker.result) {
-    return await existingRosterWorker.promise;
+    if (detailState.committed?.snapshot) return detailState.committed.snapshot();
+    return publishResult(await existingRosterWorker.promise);
   }
   const generation = 'bti:' + now + ':' + Math.floor(Math.random() * 1000000000);
   const rosterWorker = { generation, completedAt: 0, result: null, promise: null,
@@ -100,6 +138,9 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       detailRetainedEventCap: retainedEventCap, detailQueueCap: queueCap,
       detailOverCapEvents: Math.max(0, detailState.desired.size - retainedEventCap),
       rosterRefreshFailed: detailState.rosterRefreshFailed,
+      requestPaused: requestsPaused(), requestStatus: detailState.requestStatus,
+      requestRetryInMs: Math.max(0, detailState.requestRetryAtMs - Date.now()),
+      authBlocked: detailState.authBlocked,
       detailCoverageComplete: rosterWorker.coverage.phase === 'COMPLETE' &&
         !detailState.rosterRefreshFailed && detailState.desired.size <= retainedEventCap &&
         cached.length === detailState.desired.size && detailState.failures.size === 0 && detailState.evicted.size === 0,
@@ -119,7 +160,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const listBase = '/api/eventlist/asia/leagues/v2/1/';
   const fetchList = async (path) => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (!ownsSession()) return null;
+      if (!ownsSession() || requestsPaused()) return null;
       const controller = new AbortController();
       detailState.listControllers.add(controller);
       const requestedAtMs = Date.now();
@@ -127,6 +168,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       const request = (async () => {
         const response = await fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
           headers: listHeaders, signal: controller.signal });
+        recordBackpressure(response);
         if (!response || !response.ok) return null;
         const body = typeof response.text === 'function'
           ? await response.text()
@@ -231,7 +273,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         publishCoverage();
       }
     };
-    await Promise.all(Array.from({ length: Math.min(8, batches.length) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(2, batches.length) }, () => worker()));
     if (failed || pages.some((page) => !page)) return null;
     const merged = new Map();
     const leagueClocks = new Map();
@@ -332,7 +374,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     if (committed) {
       root[rosterWorkerKey] = committed;
       committed.pump();
-      return committed.snapshot();
+      return committed.result;
     }
     throw new Error('ROSTER_UNAVAILABLE');
   }
@@ -469,7 +511,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     }
     root.dataset.fieldlineBtiDetailVisits = JSON.stringify(nextVisits);
     const pump = () => {
-    if (!ownsSession() || detailState.committed !== rosterWorker) return;
+    if (!ownsSession() || requestsPaused() || detailState.committed !== rosterWorker) return;
     trimCache();
     const cachedById = new Map(root[detailBodiesKey].map((item) => [item.eventId, item]));
     const dueIds = selected.filter((eventId) => deadline(eventId, cachedById.get(eventId)) <= Date.now())
@@ -523,7 +565,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       detailWorker.update(nextJob);
       root[detailWorkerKey] = detailWorker;
       const runDetailLane = async () => {
-        while (ownsSession() && root[detailWorkerKey] === detailWorker && detailWorker.queue.length > 0) {
+        while (ownsSession() && !requestsPaused() && root[detailWorkerKey] === detailWorker && detailWorker.queue.length > 0) {
           const eventId = detailWorker.queue.shift();
           if (!eventId || !detailWorker.desired.has(eventId)) continue;
           detailWorker.activeEventIds.add(eventId);
@@ -540,6 +582,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
               '?hideX25X75Selections=false',
             { method: 'GET', credentials: 'include', cache: 'no-store', headers,
               signal: controller.signal });
+            recordBackpressure(response);
             let body = '';
             if (typeof response?.text === 'function') body = await response.text();
             else if (typeof response?.json === 'function') body = JSON.stringify(await response.json());
@@ -719,7 +762,9 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
             if (detailWorker.controllers.get(eventId) === controller) detailWorker.controllers.delete(eventId);
             detailWorker.activeEventIds.delete(eventId);
             detailWorker.publishCoverage();
-            if (detailWorker.queue.length > 0) await new Promise((resolve) => setTimeout(resolve, 100));
+            // Three lanes, at most six detail starts per second even when
+            // responses are immediate. Real response latency slows this further.
+            if (detailWorker.queue.length > 0) await new Promise((resolve) => setTimeout(resolve, 500));
           }
         }
       };
@@ -758,6 +803,24 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     const queued = new Set(deliveryOrder);
     for (const eventId of cachedById.keys()) if (!queued.has(eventId)) deliveryOrder.push(eventId);
     detailState.deliveryOrder = deliveryOrder;
+    const deliveredClocks = detailState.deliveredClocks || new Map();
+    detailState.deliveredClocks = deliveredClocks;
+    for (const eventId of deliveredClocks.keys()) if (!cachedById.has(eventId)) deliveredClocks.delete(eventId);
+    // New receipts must not wait a full 1500-owner replay cycle. Spend at most
+    // four MiB on newest receipts, leaving room in the eight-batch limit for
+    // fair replay after a lost forward or an API restart. These clocks only
+    // schedule delivery; they never replace the provider receipt timestamps.
+    const priorityIds = [];
+    let priorityBytes = 0;
+    for (const eventId of deliveryOrder.filter((id) => cachedById.get(id).observedAtMs >
+      (deliveredClocks.get(id) || 0)).sort((a, b) => cachedById.get(b).observedAtMs - cachedById.get(a).observedAtMs)) {
+      const size = cachedById.get(eventId).body.length;
+      if (priorityBytes + size > 4 * 1024 * 1024) break;
+      priorityIds.push(eventId);
+      priorityBytes += size;
+    }
+    const prioritySet = new Set(priorityIds);
+    const scheduledOrder = [...priorityIds, ...deliveryOrder.filter((id) => !prioritySet.has(id))];
     let batch = [];
     let batchMetadata = [];
     let batchBytes = 0;
@@ -771,15 +834,14 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       batchMetadata = [];
       batchBytes = 0;
     };
-    const pendingCount = deliveryOrder.length;
-    for (let visited = 0; visited < pendingCount; visited += 1) {
-      const eventId = deliveryOrder[0];
+    for (const eventId of scheduledOrder) {
       const item = cachedById.get(eventId);
       // The collector admits at most two MiB per event. Eight bounded batches
       // leave the three authoritative list responses available on every tick.
       if (batchMetadata.length > 0 && batchBytes + item.body.length > 1536 * 1024) flushBatch();
       if (cachedDetails.length >= 8) break;
-      deliveryOrder.push(deliveryOrder.shift());
+      deliveryOrder.splice(deliveryOrder.indexOf(eventId), 1);
+      deliveryOrder.push(eventId);
       try {
         if (item.body.length > 2 * 1024 * 1024) continue;
         const payload = JSON.parse(item.body);
@@ -788,6 +850,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         batch.push(...payload.data);
         batchMetadata.push(...payload.fieldlineBtiDetails);
         batchBytes += item.body.length;
+        deliveredClocks.set(eventId, item.observedAtMs);
       } catch { /* Ignore a stale malformed page-cache entry. */ }
     }
     flushBatch();
@@ -809,7 +872,11 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   };
   };
   rosterWorker.snapshot = snapshot;
-  return snapshot();
+  // Background completion retains the roster for inventory inspection but
+  // must not consume delivery priority for detail that nobody has forwarded.
+  return { status: 'catalog-requested', generation,
+    origin: location.origin || ('https://' + location.hostname),
+    responses: listResponses.map((item) => ({ url: item.path, body: item.body })) };
   })().then((result) => {
     if (!ownsSession()) return cancelled();
     if (root[rosterWorkerKey] === rosterWorker) {
@@ -828,5 +895,17 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       origin: location.origin || ('https://' + location.hostname), responses: []
     };
   });
-  return await rosterWorker.promise;
+  // After bootstrap, a slow All Early walk must not hold detail publication
+  // behind its network requests. Reuse only receipts with their original clocks
+  // and let the one existing roster worker finish in the background.
+  if (detailState.committed?.snapshot && detailState.committed !== rosterWorker) {
+    let publicationTimer;
+    try {
+      const result = await Promise.race([rosterWorker.promise, new Promise((resolve) => {
+        publicationTimer = setTimeout(() => resolve(null), 250);
+      })]);
+      return result === null ? detailState.committed.snapshot() : publishResult(result);
+    } finally { clearTimeout(publicationTimer); }
+  }
+  return publishResult(await rosterWorker.promise);
 })()`;

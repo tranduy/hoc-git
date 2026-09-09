@@ -11,7 +11,8 @@ import { SabaQuoteClockMapper } from "./saba-quote-clock.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
 import { BtiHttpCatalogAdapter } from "./bti-http-adapter.js";
 import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
-import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
+import { NetworkBodyAssembler, NetworkBodyAssemblyBudget, type NetworkBodyPromotion,
+  type NetworkBodyAssemblyDiagnostic } from "./network-body-assembler.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
 import type { FeedDecision, FeedProvenance, ProviderFeedEvidence } from "./provider-feed-types.js";
 import { chromeBridgeProviderAccountIdForLobby,
@@ -217,7 +218,9 @@ export class ChromeCatalogDataPlane {
       : this.#candidatePipeline(identity, admission.token, admission.laneToken, envelope.observedAtMs);
     if (pipeline === null) return this.#reject(envelope, "DECODE_PIPELINE_UNAVAILABLE");
     const assembled = pipeline.networkBodies.ingest(envelope);
-    if (assembled === null) return this.#reject(envelope, "NETWORK_BODY_INCOMPLETE");
+    if (assembled === null) return this.#reject(envelope,
+      pipeline.networkBodies.isSourceEpochFaulted(envelope.sourceId, envelope.sourceEpoch)
+        ? "NETWORK_BODY_UNAVAILABLE" : "NETWORK_BODY_INCOMPLETE");
     if (assembled.transport === "HTTP_RESPONSE" && !hasBoundHttpDocument(assembled)) {
       return this.#reject(envelope, "HTTP_DOCUMENT_NOT_BOUND");
     }
@@ -333,6 +336,9 @@ export class ChromeCatalogDataPlane {
       // forever. Only a DOM DELTA needs the retained socket/hidden-market view.
       if (retained !== undefined && mode !== "BASELINE") {
         nextCatalog = overlaySabaDomCatalog(retained, nextCatalog);
+        // A viewport price overlay cannot replace the socket's authority.
+        // Otherwise its next real stream failure is hidden as a DOM-only fault.
+        catalogBasis = this.#catalogBases.get(nextCatalog.accountId) ?? provenance;
       }
     }
     if (nextCatalog.category !== "FOOTBALL" || nextCatalog.accountId !== transportAccountId) {
@@ -405,15 +411,14 @@ export class ChromeCatalogDataPlane {
       return this.#reject(envelope, "APSPORT_REPLACEMENT_COVERAGE_INCOMPLETE");
     }
     if (envelope.lobby === "SABA" && admission.disposition === "CANDIDATE" &&
-      provenance === "WS" && this.#catalogBases.get(nextCatalog.accountId) === "DOM_FALLBACK" &&
+      provenance === "WS" &&
       retainedAuthorityIsLive && currentCatalog !== undefined &&
       !retainsSabaReplacementCoverage(currentCatalog, nextCatalog)) {
       // SABA's socket baseline can contain only the small live partition while
-      // the completed DOM sweep also carries the full pre-match card. A source
-      // epoch rotation creates a fresh lane-local coverage guard, so without a
-      // cross-authority check that 15-event socket baseline can replace a
-      // 190-event catalog. Keep the old authority until the new epoch's DOM
-      // sweep proves comparable coverage; that sweep remains eligible below.
+      // the retained catalog also carries other partitions. A later socket
+      // price can change its provenance without changing that coverage. Across
+      // epochs, protect the actual retained roster regardless of provenance;
+      // a complete collector remains eligible to prove a smaller replacement.
       return this.#reject(envelope, "SABA_REPLACEMENT_COVERAGE_INCOMPLETE");
     }
     const explicitDomSweep = envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
@@ -492,6 +497,18 @@ export class ChromeCatalogDataPlane {
   #reject(envelope: ChromeBridgeEnvelope, reason: string): false {
     this.#onIngestRejected?.(envelope, reason);
     return false;
+  }
+
+  networkBodyAssembly(accountId: string): NetworkBodyAssemblyDiagnostic {
+    const key = accountId as ChromeBridgeProviderAccountId;
+    const counts = (assembler: NetworkBodyAssembler | undefined) => {
+      if (assembler === undefined) return null;
+      const { pendingBodies, pendingBytes, blockedSourceEpochs, lastFault } = assembler.stats();
+      return { pendingBodies, pendingBytes, blockedSourceEpochs,
+        ...(lastFault === undefined ? {} : { lastFault }) };
+    };
+    return { active: counts(this.#activePipelines.get(key)?.pipeline.networkBodies),
+      candidate: counts(this.#candidatePipelines.get(key)?.pipeline.networkBodies) };
   }
 
   async read(accountId: string): Promise<ObservedProviderCatalog> {
@@ -646,20 +663,20 @@ export class ChromeCatalogDataPlane {
     }
     let stagedDecision: FeedDecision | null = null;
     let committed = false;
+    const bodyPromotion: { current: NetworkBodyPromotion | null } = { current: null };
     try {
       this.#feeds.transaction(identity.accountId, () => {
         const promotion = this.#authorityCoordinator.promote(token, proof, (transaction) => {
           // Construct all potentially fallible state before changing any visible
           // catalog, pipeline, coverage, or ownership pointer.
+          const transfer = pipeline.networkBodies.preparePromotion(transaction.activeLaneToken);
+          bodyPromotion.current = transfer;
           const activePipeline: DecodePipeline = {
             router: pipeline.router,
             sabaAdapter: pipeline.sabaAdapter,
             coverage: pipeline.coverage,
             laneToken: transaction.activeLaneToken,
-            networkBodies: new NetworkBodyAssembler({
-              budget: this.#networkBodyBudget,
-              laneToken: transaction.activeLaneToken
-            })
+            networkBodies: transfer.assembler
           };
           if (invalidation !== null) {
             const invalidated = this.#feeds.accept(invalidation);
@@ -672,6 +689,7 @@ export class ChromeCatalogDataPlane {
 
           // No fallible work follows this point. The coordinator remains inside
           // its CAS callback until every data-plane pointer agrees on B.
+          transfer.commit();
           pipeline.coverage.commit(identity.accountId, coverage);
           this.#catalogBases.set(identity.accountId, catalogBasis);
           this.#catalogs.set(stagedDecision.publish.catalog.accountId, stagedDecision.publish.catalog);
@@ -683,8 +701,9 @@ export class ChromeCatalogDataPlane {
           }
           this.#lastEnvelopeAtMsBySource.set(identity.sourceId, promotedAtMs);
 
-          // The proof-triggering candidate body has completed. Disposing both
-          // retired lanes removes every other pending multipart reservation.
+          // Concurrent bodies belong to this exact promoted candidate identity.
+          // Its empty former assembler can retire without losing their prefixes.
+          // A different former incumbent still loses all of its pending bodies.
           pipeline.networkBodies.dispose();
           oldActive?.pipeline.networkBodies.dispose();
           committed = true;
@@ -692,6 +711,7 @@ export class ChromeCatalogDataPlane {
         if (!promotion.promoted || !committed) throw new Error("AUTHORITY_PROMOTION_REJECTED");
       });
     } catch {
+      bodyPromotion.current?.rollback();
       pipeline.coverage.restoreCheckpoint(coverageCheckpoint);
       restoreMapEntry(this.#catalogs, identity.accountId, catalogCheckpoint);
       restoreMapEntry(this.#catalogBases, identity.accountId, basisCheckpoint);
@@ -786,9 +806,10 @@ function canonicalSourceEpoch(sourceEpoch: string): { readonly lineage: string; 
 
 function createDecodePipeline(budget: NetworkBodyAssemblyBudget, laneToken: AuthorityLaneToken,
   sabaQuoteClocks: SabaQuoteClockMapper): DecodePipeline {
-  const sabaAdapter = new SabaWsCatalogAdapter({ quoteClockMapper: sabaQuoteClocks });
+  const sabaAdapter = new SabaWsCatalogAdapter({ quoteClockMapper: sabaQuoteClocks, requireSocketBaseline: true,
+    allowValidatedDomFallback: true });
   return { router: new AdapterRouter([new CmdHttpCatalogAdapter(), new CmdDomCatalogAdapter(),
-    new ImHttpCatalogAdapter(), sabaAdapter, new KsportWsCatalogAdapter(),
+    new ImHttpCatalogAdapter(), sabaAdapter, new KsportWsCatalogAdapter({ requireEarlyRoster: true }),
     new TsportWsCatalogAdapter(), new BtiHttpCatalogAdapter()], { confirmationsRequired: 1 }),
   sabaAdapter, coverage: new CatalogCoverageGuard(), laneToken,
   networkBodies: new NetworkBodyAssembler({ budget, laneToken }) };

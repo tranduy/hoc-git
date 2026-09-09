@@ -4,6 +4,20 @@ import { normalizeSabaFootballRecords } from "./saba-football-normalizer.js";
 const options = { observedAtMs: 1_786_449_540_000, receivedMonotonicMs: 40, sequence: 3 };
 
 describe("normalizeSabaFootballRecords", () => {
+  it("retains original SABA price fields and lines for a native market awaiting semantic mapping", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "o", oddsid: 3, matchid: 2, bettype: 777, parenttypeid: 777,
+        odds1a: 0.82, odds2a: -0.94, hdp1: 0.5, hdp2: 0, oddsstatus: "running" }
+    ], options);
+    expect(normalized.markets).toEqual([]);
+    expect(normalized.nativeMarketObservations[0]?.nativeSelections).toEqual([
+      { selectionId: null, outcomeId: "odds1a", line: "0.5", price: "0.82" },
+      { selectionId: null, outcomeId: "odds2a", line: "0", price: "-0.94" }
+    ]);
+  });
   it("accounts for every native odds row instead of silently dropping unknown SABA bet types", () => {
     const normalized = normalizeSabaFootballRecords([
       { type: "l", leagueid: 1, leaguenameen: "Premier League", sporttype: 1 },

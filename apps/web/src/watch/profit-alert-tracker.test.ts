@@ -25,6 +25,20 @@ function memoryStorage(seed: string | null = null) {
 }
 
 describe("ProfitAlertTracker", () => {
+  it("never records a nonpositive worst-case profit even with a positive ROI field", () => {
+    const tracker = new ProfitAlertTracker();
+    expect(tracker.update([ranked("0", "OBSERVATION", "zero", "0.1"),
+      ranked("-0.000001", "OBSERVATION", "negative", "0.1")], 100).added).toEqual([]);
+    expect(tracker.history()).toEqual([]);
+  });
+  it("removes nonpositive legacy history while retaining real positive history", () => {
+    const tracker = new ProfitAlertTracker();
+    const valid = tracker.update([ranked("1", "OBSERVATION")], 100).history[0]!;
+    const invalid = { ...valid, id: "old-zero", identity: "old-zero", worstCaseProfit: "0" };
+    const loaded = loadProfitAlerts(memoryStorage(JSON.stringify([invalid, valid])));
+    expect(loaded).toEqual([valid]);
+    expect(new ProfitAlertTracker([invalid, valid]).history()).toEqual([valid]);
+  });
   it("records fresh two-book opportunities only when ROI is strictly above five percent", () => {
     const tracker = new ProfitAlertTracker();
     expect(tracker.update([ranked("50000", "OBSERVATION", undefined, "0.05")], 100).history).toEqual([]);

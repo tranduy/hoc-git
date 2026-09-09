@@ -23,6 +23,8 @@ describe("football binary market registry", () => {
     ["FH_BTTS", "GOALS", "FIRST_HALF", "YES_NO", ["YES", "NO"], "NONE"],
     ["SH_BTTS", "GOALS", "SECOND_HALF", "YES_NO", ["YES", "NO"], "NONE"],
     ["HOME_FT_TOTAL", "GOALS", "FULL_TIME", "TOTAL", ["OVER", "UNDER"], "HALF_UNIT"],
+    ["HOME_FH_TOTAL", "GOALS", "FIRST_HALF", "TOTAL", ["OVER", "UNDER"], "HALF_UNIT"],
+    ["AWAY_FH_TOTAL", "GOALS", "FIRST_HALF", "TOTAL", ["OVER", "UNDER"], "HALF_UNIT"],
     ["HOME_CORNER_FH_TOTAL", "CORNERS", "FIRST_HALF", "TOTAL", ["OVER", "UNDER"], "HALF_UNIT"],
     ["HOME_FT_WIN_TO_NIL", "GOALS", "FULL_TIME", "YES_NO", ["YES", "NO"], "NONE"],
     ["FT_BOTH_HALVES_OVER_TOTAL", "GOALS", "FULL_TIME", "YES_NO", ["YES", "NO"], "HALF_UNIT"]

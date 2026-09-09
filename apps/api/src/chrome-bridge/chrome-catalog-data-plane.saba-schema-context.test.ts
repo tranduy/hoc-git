@@ -75,8 +75,22 @@ function fieldlessBaseline(sequence: number, matchId = 2, bridgeId = "b1"): Chro
   return fieldlessFrame(sequence, [[0, "reset"], ...catalogRows(matchId), [0, "done"]], bridgeId);
 }
 
+function completeCollector(sequence: number): ChromeBridgeEnvelope {
+  const generation = `saba:collector:schema-${sequence}`;
+  const periods = ["TODAY", "EARLY"].map((period) => ({ period, rosterMatchIds: [], rosterCount: 0 }));
+  return { ...socketEnvelope(sequence, ""), transport: "DOM_SNAPSHOT",
+    request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+      snapshotId: `saba:collector:schema-${sequence}`, chunkIndex: 0, chunkCount: 1,
+      sweepId: generation, sweepComplete: true, sweepFrameKey: "sports", sweepDocumentKey: "document",
+      records: [...periods.map((period) => ({ kind: "PERIOD_COMPLETE", collectorGeneration: generation, ...period })),
+        { kind: "TERMINAL", collectorGeneration: generation, periods, owners: [],
+          todayRestoration: { selected: true, rosterMatchIds: [], rosterCount: 0 },
+          unresolvedOwners: [], failedOwners: [] }] }) } };
+}
+
 describe("ChromeCatalogDataPlane SABA schema context", () => {
-  it("seeds only an existing candidate lane and publishes only the later fieldless reset/done baseline", async () => {
+  it("seeds only an existing candidate lane and publishes a verified fieldless reset/done before collector proof", async () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const feeds = new ProviderFeedRegistry({ now: () => NOW });
     const publish = vi.fn();
@@ -105,6 +119,8 @@ describe("ChromeCatalogDataPlane SABA schema context", () => {
     observe.mockRestore();
     expect(plane.ingest(fieldlessBaseline(3), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
     expect(publish).toHaveBeenCalledTimes(1);
+    expect(plane.ingest(completeCollector(4), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
+    expect(publish).toHaveBeenCalledTimes(2);
     await expect(plane.read(ACCOUNT_ID)).resolves.toMatchObject({ provider: "SABA",
       events: [expect.objectContaining({ providerEventId: "2" })] });
   });
@@ -121,7 +137,8 @@ describe("ChromeCatalogDataPlane SABA schema context", () => {
     await expect(plane.read(ACCOUNT_ID)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
 
     expect(plane.ingest(fieldlessBaseline(4), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
-    expect(publish).toHaveBeenCalledTimes(1);
+    expect(plane.ingest(completeCollector(5), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
+    expect(publish).toHaveBeenCalledTimes(2);
   });
 
   it("retains the seeded adapter reference when the candidate pipeline is promoted", () => {
@@ -132,15 +149,16 @@ describe("ChromeCatalogDataPlane SABA schema context", () => {
     plane.ingest(openEnvelope(), context(coordinator, "TRANSPORT"));
     plane.ingest(schemaEnvelope(2), context(coordinator, "TRANSPORT"));
     expect(plane.ingest(fieldlessBaseline(3), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
+    expect(plane.ingest(completeCollector(4), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
     expect(coordinator.snapshot(ACCOUNT_ID)).toMatchObject({ active: identity(), candidate: null });
 
     const activeContext = context(coordinator, "TRANSPORT");
-    const secondSchema = { ...schemaEnvelope(4), payload: { encoding: "UTF8" as const,
+    const secondSchema = { ...schemaEnvelope(5), payload: { encoding: "UTF8" as const,
       body: JSON.stringify({ kind: "SABA_SCHEMA_CONTEXT", bridgeId: "b2",
         rows: [["f", 0, fields]], revision: null }) } };
     expect(plane.ingest(secondSchema, activeContext)).toBe(false);
-    expect(plane.ingest(fieldlessBaseline(5, 4, "b2"), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
-    expect(publish).toHaveBeenCalledTimes(2);
+    expect(plane.ingest(fieldlessBaseline(6, 4, "b2"), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
+    expect(publish).toHaveBeenCalledTimes(3);
   });
 
   it("does not allocate or poison a pipeline from unknown, replayed, mismatched, or malformed context", async () => {
@@ -177,6 +195,7 @@ describe("ChromeCatalogDataPlane SABA schema context", () => {
     // Atomic rejection left the current decoder seedable and usable.
     expect(plane.ingest(schemaEnvelope(10), context(coordinator, "TRANSPORT"))).toBe(false);
     expect(plane.ingest(fieldlessBaseline(11), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
+    expect(plane.ingest(completeCollector(12), context(coordinator, "CANDIDATE_DATA"))).toBe(true);
     await expect(plane.read(ACCOUNT_ID)).resolves.toMatchObject({ events: expect.any(Array) });
   });
 });

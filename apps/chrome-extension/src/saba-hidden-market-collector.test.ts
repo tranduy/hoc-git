@@ -55,6 +55,112 @@ function refreshed(value: SabaCollectorRosterOwner, clock: number,
 }
 
 describe("SabaHiddenMarketCollector", () => {
+  it("publishes both reconciled main rosters before any More action and keeps that proof after More fails", async () => {
+    const today = [{ ...owner("today-main", "ELIGIBLE_MORE", 1),
+      record: { ...record("today-main"), providerTimezoneOffsetMinutes: 420 } }];
+    const early = [{ ...owner("early-main", "ELIGIBLE_MORE", 10),
+      record: { ...record("early-main"), providerTimezoneOffsetMinutes: 420 } }];
+    const page = adapter(today, early);
+    const captureOwner = vi.spyOn(page, "captureOwner").mockRejectedValue(new Error("SABA_COLLECTOR_MORE_OPEN_NOT_STABLE"));
+    const readRoster = vi.spyOn(page, "readRoster");
+    const restoreToday = vi.spyOn(page, "restoreToday");
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true });
+    const main = await collector.advance(4, () => true);
+    expect(captureOwner).not.toHaveBeenCalled();
+    expect(readRoster.mock.calls.map(([period]) => period)).toEqual(["TODAY", "TODAY", "EARLY", "EARLY"]);
+    expect(restoreToday).toHaveBeenCalledOnce();
+    expect(main.mainRosterItems?.map(({ kind }) => kind)).toEqual(["CAPTURE", "CAPTURE", "MAIN_ROSTER_TERMINAL"]);
+    expect(main.mainRosterItems?.filter((item) => item.kind === "CAPTURE")
+      .map(({ capturedMonotonicMs }) => capturedMonotonicMs)).toEqual([1, 10]);
+    expect(main.mainRosterItems?.at(-1)).toMatchObject({ collectorGeneration: `${GENERATION}:main`,
+      hiddenMarketsComplete: false, owners: [{ period: "TODAY", ownerMatchId: "today-main" },
+        { period: "EARLY", ownerMatchId: "early-main" }] });
+    const failed = await collector.advance(4, () => true);
+    expect(failed.status).toBe("SAFE_ERROR");
+    expect(failed.mainRosterItems).toEqual(main.mainRosterItems);
+    expect(terminals(failed.candidateItems)).toEqual([]);
+  });
+
+  it("emits an explicit complete empty main roster and refuses an unknown timezone", async () => {
+    const empty = await new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: adapter([], []), publishMainRosterFirst: true }).advance(4, () => true);
+    expect(empty.mainRosterItems).toEqual([expect.objectContaining({ kind: "MAIN_ROSTER_TERMINAL",
+      periods: [{ period: "TODAY", rosterMatchIds: [], rosterCount: 0 },
+        { period: "EARLY", rosterMatchIds: [], rosterCount: 0 }] })]);
+    const unproven = { ...owner("unproven", "NO_ELIGIBLE_CONTROL", 1),
+      record: { ...record("unproven"), providerTimezoneOffsetMinutes: null } };
+    const rejected = await new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: adapter([unproven], []), publishMainRosterFirst: true }).advance(4, () => true);
+    expect(rejected.status).toBe("SAFE_ERROR");
+    expect(rejected.mainRosterItems).toBeUndefined();
+  });
+
+  it("keeps main and hidden terminals separate while reusing original roster clocks", async () => {
+    const today = [{ ...owner("today", "NO_ELIGIBLE_CONTROL", 1),
+      record: { ...record("today"), providerTimezoneOffsetMinutes: 480 } }];
+    const early = [{ ...owner("early", "NO_ELIGIBLE_CONTROL", 10),
+      record: { ...record("early"), providerTimezoneOffsetMinutes: 480 } }];
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: adapter(today, early), publishMainRosterFirst: true });
+    const main = await collector.advance(4, () => true);
+    expect(collector.mainRosterComplete).toBe(true);
+    expect(collector.hiddenMarketsComplete).toBe(false);
+    const hidden = await collector.advance(4, () => true);
+    expect(hidden.status).toBe("COMPLETE");
+    expect(collector.hiddenMarketsComplete).toBe(true);
+    expect(hidden.candidateItems.every((item) => item.collectorGeneration === GENERATION)).toBe(true);
+    expect(hidden.candidateItems.map(({ kind }) => kind)).not.toContain("MAIN_ROSTER_TERMINAL");
+    expect(hidden.candidateItems.filter((item) => item.kind === "CAPTURE")).toEqual(
+      main.mainRosterItems!.filter((item) => item.kind === "CAPTURE")
+        .map((item) => ({ ...item, collectorGeneration: GENERATION })));
+  });
+
+  it.each(["binding", "membership"] as const)("refuses main authority on changed %s during Today restoration", async (change) => {
+    const today = [{ ...owner("today", "ELIGIBLE_MORE", 1),
+      record: { ...record("today"), providerTimezoneOffsetMinutes: 420 } }];
+    const page = adapter(today, [], { restoreToday: async () => ({
+      binding: change === "binding" ? { ...BINDING, documentKey: "replacement" } : BINDING,
+      selectedPrematch: true, rosterMatchIds: change === "membership" ? [] : ["today"] }) });
+    const captureOwner = vi.spyOn(page, "captureOwner");
+    const result = await new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true }).advance(4, () => true);
+    expect(result.status).toBe(change === "binding" ? "STALE_BINDING" : "SAFE_ERROR");
+    expect(result.mainRosterItems).toBeUndefined();
+    expect(captureOwner).not.toHaveBeenCalled();
+  });
+  it("completes 650 proven passive owners in two bounded slices with unchanged terminal membership and clocks", async () => {
+    const early = Array.from({ length: 650 }, (_, index) => owner(`early-${index}`, "NO_ELIGIBLE_CONTROL", index + 1));
+    const page = adapter([], early);
+    const readRoster = vi.spyOn(page, "readRoster");
+    const captureOwner = vi.spyOn(page, "captureOwner");
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION, binding: BINDING, adapter: page });
+    const first = await collector.advance(4, () => true, { maxPassiveOwnersPerSlice: 512 });
+    expect(first.status).toBe("INCOMPLETE");
+    expect(first.items.filter(({ kind }) => kind === "OWNER_COMPLETE")).toHaveLength(512);
+    const final = await collector.advance(4, () => true, { maxPassiveOwnersPerSlice: 512 });
+    expect(final.status).toBe("COMPLETE");
+    expect(readRoster).toHaveBeenCalledTimes(4);
+    expect(captureOwner).not.toHaveBeenCalled();
+    const reference = await new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: adapter([], early) }).advance(1000);
+    expect(final.candidateItems).toEqual(reference.candidateItems);
+  });
+
+  it("keeps the four actual More actions cap while bulk-completing mixed passive owners", async () => {
+    const early = Array.from({ length: 100 }, (_, index) => owner(`early-${index}`,
+      [1, 20, 40, 60, 80].includes(index) ? "ELIGIBLE_MORE" : "NO_ELIGIBLE_CONTROL", index + 1));
+    const page = adapter([], early);
+    const captureOwner = vi.spyOn(page, "captureOwner");
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION, binding: BINDING, adapter: page });
+    const first = await collector.advance(4, () => true, { maxPassiveOwnersPerSlice: 512 });
+    expect(first.status).toBe("INCOMPLETE");
+    expect(captureOwner).toHaveBeenCalledTimes(4);
+    expect(first.items.filter((item) => item.kind === "OWNER_COMPLETE" &&
+      item.safeControlOutcome === "NO_ELIGIBLE_CONTROL")).toHaveLength(76);
+    expect((await collector.advance(4, () => true, { maxPassiveOwnersPerSlice: 512 })).status).toBe("COMPLETE");
+    expect(captureOwner).toHaveBeenCalledTimes(5);
+  });
   it("reconciles the actual 20-to-253 Early growth before completing the period", async () => {
     const initial = Array.from({ length: 20 }, (_, index) =>
       owner(`early-${index}`, "NO_ELIGIBLE_CONTROL", 100));

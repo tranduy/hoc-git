@@ -37,7 +37,8 @@ function harness() {
     }) };
   globals.window = globals;
   const context = vm.createContext(globals);
-  const tick = (generation = "source:1:document:1") => vm.runInContext(buildImCatalogRefreshExpression(generation), context);
+  const tick = (generation = "source:1:document:1", options: { readonly allowDetails?: boolean } = {}) =>
+    vm.runInContext(buildImCatalogRefreshExpression(generation, options), context);
   const mains = () => requests.filter(r => r.path.endsWith("GetSE"));
   const details = () => requests.filter(r => r.path.includes("GetEBI/"));
   const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
@@ -61,6 +62,16 @@ function harness() {
 describe("IM native detail acquisition", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it.each([true, false, undefined, null, "false", 0])(
+    "preserves native IM market lock evidence through compact publication: %j", async il => {
+      const h = harness();
+      const run = h.tick("source:lock:document:1", { allowDetails: false });
+      await h.commit([event(1, [{ ...market(1), ...(il === undefined ? {} : { il }) }])]);
+      const published = h.parsed(await run).sel[0].mls[0];
+      expect(published.il).toBe(typeof il === "boolean" ? il : il === undefined ? undefined : null);
+      expect(published.ws[0].wsi).toBe(10);
+    });
 
   it.each([undefined, { StatusCode: 500, im: true, t: "PRIVATE_STALE_TOKEN" },
     { StatusCode: 100, im: false, t: "PRIVATE_STALE_TOKEN" },
@@ -122,7 +133,39 @@ describe("IM native detail acquisition", () => {
     expect(new Set(actual.map((m: any) => m.bti)).size).toBe(68);
     expect(actual.map((m: any) => ({ mi: m.mi, bti: m.bti, gp: m.gp, ws: m.ws }))).toEqual(
       fullNative.e.mls.map((m: any) => ({ mi: m.mi, bti: m.bti, gp: m.gp,
-        ws: m.ws.map((s: any) => ({ wsi: s.wsi, si: s.si, hdp: s.hdp, dih: s.dih, o: s.o })) })));
+        ws: m.ws.map((s: any) => ({ wsi: s.wsi, si: s.si, hdp: s.hdp, dih: s.dih, o: s.o,
+          ot: s.ot, s: s.s })) })));
+    expect(actual.find((m: any) => m.bti === 24).ws).toMatchObject([
+      { si: 101, ot: 3, s: "total=1.5", o: 5.4 }, { si: 102, ot: 3, s: "total=1.5", o: 1.11 }
+    ]);
+  });
+
+  it("preserves native odds types and specifiers in main-only responses", async () => {
+    const h = harness(), run = h.tick(undefined, { allowDetails: false });
+    const rows = fullNative.e.mls.filter((m: any) => m.bti === 24 || m.bti === 25);
+    await h.commit([{ ...fullNative.e, mls: rows }]);
+    const actual = h.parsed(await run).sel[0].mls;
+    expect(h.details()).toHaveLength(0);
+    expect(actual.map((m: any) => m.ws)).toEqual(rows.map((m: any) => m.ws.map((s: any) => ({
+      wsi: s.wsi, si: s.si, o: s.o, ot: s.ot, s: s.s
+    }))));
+  });
+
+  it("bounds specifiers and preserves invalid explicit odds types as rejection markers", async () => {
+    const h = harness(), run = h.tick(undefined, { allowDetails: false });
+    const values = [
+      { ot: 3, s: "x".repeat(512) }, { ot: 999, s: "x".repeat(513) },
+      { ot: "3", s: { private: "discard" } }, { ot: null, s: ["discard"] },
+      { ot: 3.5, s: 1.5 }, {}
+    ];
+    await h.commit([event(1, [{ ...market(1), ws: values.map((value, i) => ({
+      wsi: 10 + i, si: i, hdp: 0.5, dih: "0.5", o: 1.9, ...value
+    })) }])]);
+    const actual = h.parsed(await run).sel[0].mls[0].ws;
+    expect(actual.map((s: any) => s.ot)).toEqual([3, 999, null, null, null, undefined]);
+    expect(actual.map((s: any) => s.s)).toEqual(["x".repeat(512), undefined, undefined,
+      undefined, undefined, undefined]);
+    expect(JSON.stringify(actual)).not.toContain("discard");
   });
 
   it("drains all admitted owners with two physical unfiltered requests", async () => {

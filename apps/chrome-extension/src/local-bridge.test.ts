@@ -111,6 +111,111 @@ class FakeSocket implements BridgeSocket {
 }
 
 describe("LocalBridge", () => {
+  it("releases a hung resync after the recovery deadline while replacement traffic continues", async () => {
+    const socket = new FakeSocket();
+    const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const onSnapshotRequest = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key",
+      onSourceResync: async () => held, onSnapshotRequest,
+      setTimer: (callback, delayMs) => { scheduled.push({ callback, delayMs }); return scheduled.length; },
+      clearTimer: () => undefined });
+    bridge.connect(); socket.open();
+    await bridge.enqueue(envelope(0, "old"));
+    bridge.requestSourceResync("chrome:SABA:7");
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:7" }) });
+    await bridge.enqueue(envelope(0, "replacement", "chrome:SABA:7", "worker-a:1"));
+    expect(onSnapshotRequest).not.toHaveBeenCalled();
+    expect(socket.sent.map((item) => JSON.parse(item).payload.body)).toEqual(["old", "replacement"]);
+    const bound = scheduled.find((item) => item.delayMs === 90_000);
+    expect(bound).toBeDefined();
+    bound!.callback();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onSnapshotRequest).toHaveBeenCalledExactlyOnceWith({ sourceId: "chrome:SABA:7", prematchWindowHours: undefined });
+    await bridge.enqueue(envelope(1, "retired"));
+    expect(socket.sent.map((item) => JSON.parse(item).payload.body)).toEqual(["old", "replacement"]);
+    release(); await held;
+    bridge.close();
+  });
+
+  it("allows a failed resync to retry while retaining the unknown-epoch admission fence", async () => {
+    const socket = new FakeSocket();
+    const onSourceResync = vi.fn(async () => { throw new Error("source temporarily unavailable"); });
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceResync });
+    bridge.connect(); socket.open();
+    bridge.requestSourceResync("chrome:SABA:7");
+    bridge.requestSourceResync("chrome:SABA:7");
+    expect(onSourceResync).toHaveBeenCalledTimes(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const { sourceEpoch: _sourceEpoch, ...legacy } = envelope(0, "unknown old epoch");
+    await bridge.enqueue(legacy);
+    expect(socket.sent).toHaveLength(0);
+    bridge.requestSourceResync("chrome:SABA:7");
+    expect(onSourceResync).toHaveBeenCalledTimes(2);
+    await bridge.enqueue(envelope(0, "replacement", "chrome:SABA:7", "worker-new:1"));
+    expect(socket.sent.map((item) => JSON.parse(item).payload.body)).toEqual(["replacement"]);
+    bridge.close();
+  });
+
+  it("does not clear a newer resync attempt when the previous epoch recovery times out", async () => {
+    const socket = new FakeSocket();
+    const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+    const onSourceResync = vi.fn(async () => new Promise<void>(() => undefined));
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceResync,
+      setTimer: (callback, delayMs) => { scheduled.push({ callback, delayMs }); return scheduled.length; },
+      clearTimer: () => undefined });
+    bridge.connect(); socket.open();
+    await bridge.enqueue(envelope(0));
+    bridge.requestSourceResync("chrome:SABA:7");
+    await bridge.enqueue(envelope(0, "replacement", "chrome:SABA:7", "worker-a:1"));
+    bridge.requestSourceResync("chrome:SABA:7");
+    const first = scheduled.find((item) => item.delayMs === 90_000);
+    expect(first).toBeDefined();
+    first!.callback();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onSourceResync).toHaveBeenCalledTimes(2);
+    bridge.requestSourceResync("chrome:SABA:7");
+    const second = scheduled.filter((item) => item.delayMs === 90_000)[1];
+    expect(second).toBeDefined();
+    second!.callback();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onSourceResync).toHaveBeenCalledTimes(2);
+    await bridge.enqueue(envelope(1, "retired first", "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(1, "retired second", "chrome:SABA:7", "worker-a:1"));
+    expect(bridge.pendingSequences()).toEqual([]);
+    bridge.requestSourceResync("chrome:SABA:7");
+    expect(onSourceResync).toHaveBeenCalledTimes(3);
+    bridge.close();
+  });
+
+  it("retires a locally overflowing source, releases blocked admission, and keeps other sources connected", async () => {
+    const socket = new FakeSocket();
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key",
+      maxQueueBytes: 1_200, onSourceResync });
+    bridge.connect();
+    socket.open();
+    await bridge.enqueue(envelope(0, "x".repeat(500)));
+    let settled = false;
+    const blocked = bridge.enqueue(envelope(1, "y".repeat(500))).then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    bridge.requestSourceResync("chrome:SABA:7");
+    bridge.requestSourceResync("chrome:SABA:7");
+    await blocked;
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+    expect(bridge.queueBytes).toBe(0);
+    await bridge.enqueue(envelope(2, "old delta"));
+    expect(bridge.queueBytes).toBe(0);
+    await bridge.enqueue(envelope(0, "healthy", "chrome:IM:8"));
+    expect(socket.readyState).toBe(1);
+    await bridge.enqueue(envelope(0, "replacement", "chrome:SABA:7", "worker-a:1"));
+    expect(socket.sent.map((item) => JSON.parse(item).payload.body)).toEqual([
+      "x".repeat(500), "healthy", "replacement"
+    ]);
+  });
+
   it("waits for loopback health before constructing a WebSocket", () => {
     const socket = new FakeSocket();
     const factory = vi.fn(() => socket);
@@ -230,6 +335,37 @@ describe("LocalBridge", () => {
     expect(socketIndex).toBe(2);
     sockets[1]!.open();
     expect(sockets[1]!.sent.map((value) => JSON.parse(value).sequence)).toEqual([0]);
+  });
+
+  it("resyncs only the exact faulted multipart source and ignores late rejects after its replacement", async () => {
+    const socket = new FakeSocket();
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceResync });
+    void bridge.enqueue(ksportCatalogChunk(12, "KSPORT_LIVE", 0, 2));
+    void bridge.enqueue(envelope(4, "healthy", "chrome:IM:8"));
+    bridge.connect();
+    socket.open();
+    const reject = { version: 1, kind: "REJECT", sourceId: "chrome:KSPORT:14", sourceEpoch: "worker-a:0",
+      sequence: 12, reason: "NETWORK_BODY_UNAVAILABLE" };
+    socket.onmessage?.({ data: JSON.stringify({ ...reject, sourceEpoch: "worker-old:0" }) });
+    expect(onSourceResync).not.toHaveBeenCalled();
+    socket.onmessage?.({ data: JSON.stringify(reject) });
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:KSPORT:14");
+    expect(bridge.pendingSequences()).toEqual([4]);
+    expect(socket.readyState).toBe(1);
+    // The route ACK follows the synchronous fatal rejection. It cannot cancel
+    // the already requested source resync or consume a healthy sibling entry.
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "ACK", sourceId: reject.sourceId,
+      sourceEpoch: reject.sourceEpoch, sequence: reject.sequence }) });
+    expect(onSourceResync).toHaveBeenCalledOnce();
+    expect(bridge.pendingSequences()).toEqual([4]);
+    void bridge.enqueue({ ...ksportCatalogChunk(0, "KSPORT_LIVE", 0, 2), sourceEpoch: "worker-a:1" });
+    socket.onmessage?.({ data: JSON.stringify(reject) });
+    expect(onSourceResync).toHaveBeenCalledOnce();
+    expect(bridge.pendingSequences()).toEqual([4, 0]);
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "ACK", sourceId: "chrome:IM:8",
+      sourceEpoch: "worker-a:0", sequence: 4 }) });
+    expect(bridge.pendingSequences()).toEqual([0]);
   });
 
   it("keeps healthy providers connected while a gapped source waits for its replacement epoch", async () => {

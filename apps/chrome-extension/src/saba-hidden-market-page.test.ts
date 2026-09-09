@@ -39,6 +39,7 @@ async function installRoster(page: Page, ownerCount: number): Promise<void> {
       ${index === 0 ? '<a class="c-btn c-btn--more c-is-close">2</a>' : ""}
     </div>`).join("");
   await page.setContent(`
+    <span id="systemTime" class="c-header__time">04:29:28AM Sep09,2026GMT+8</span>
     <style>
       .c-side-nav,.c-side-nav__header,.c-side-nav__tab,.c-odds-table--sport1,
       .c-match,.c-match-time,.c-team-name,.c-btn { display:block; width:120px; min-height:12px }
@@ -1264,30 +1265,32 @@ describe("SABA hidden-market page adapter", () => {
     await page.close();
   });
 
-  it("normalizes zoned kickoff timestamps to the provider UTC+8 calendar", async () => {
+  it.each([7, 8])("normalizes zoned kickoff timestamps to the explicit provider GMT+%i calendar", async (offset) => {
     const page = await browser.newPage();
     await installRoster(page, 4);
-    await page.evaluate(() => {
+    await page.evaluate((offset) => {
+      document.querySelector('#systemTime')!.textContent = `04:29:28AM Sep09,2026GMT+${offset}`;
       document.querySelector('.c-odds-table--sport1')!.removeAttribute('data-date');
       document.querySelector('[data-matchid="match-0"] .c-match-time')!
-        .setAttribute('datetime', '2026-09-07T18:30:00Z');
+        .setAttribute('datetime', '2026-09-07T16:30:00Z');
       document.querySelector('[data-matchid="match-1"]')!
         .setAttribute('data-start-time', '2026-09-08T00:30:00+09:00');
       document.querySelector('[data-matchid="match-2"]')!
         .setAttribute('data-kickoff', '2026-09-08T03:00:00');
       document.querySelector('[data-matchid="match-3"]')!
         .setAttribute('data-kickoff', '2026-02-29T03:00:00Z');
-    });
+    }, offset);
     const adapter = createSabaHiddenMarketPageAdapter({ binding: BINDING,
       evaluate: (expression) => page.evaluate(expression), isCurrent: () => true });
 
     const owners = (await adapter.readRoster("TODAY")).owners;
     expect(owners.map(({ kickoffDate }) => kickoffDate)).toEqual([
-      { kind: "EXPLICIT", isoDate: "2026-09-08" },
+      { kind: "EXPLICIT", isoDate: offset === 7 ? "2026-09-07" : "2026-09-08" },
       { kind: "EXPLICIT", isoDate: "2026-09-07" },
       { kind: "UNKNOWN" },
       { kind: "UNKNOWN" }
     ]);
+    expect(owners[0]?.record.providerTimezoneOffsetMinutes).toBe(offset * 60);
     await page.close();
   });
 

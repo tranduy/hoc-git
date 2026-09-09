@@ -67,6 +67,12 @@ function validDecimal(value: unknown): value is string {
   try { return new Decimal(value).isFinite(); } catch { return false; }
 }
 
+/** Preserve the configured >5% alert threshold and require actual profit too. */
+export function isNotifiableProfit(value: Pick<ProfitAlert, "roi" | "worstCaseProfit">): boolean {
+  return validDecimal(value.roi) && validDecimal(value.worstCaseProfit) &&
+    new Decimal(value.worstCaseProfit).gt(0) && new Decimal(value.roi).gt("0.05");
+}
+
 function parseProfitAlert(value: unknown): ProfitAlert | null {
   if (typeof value !== "object" || value === null) return null;
   const input = value as Partial<ProfitAlert>;
@@ -84,6 +90,7 @@ function parseProfitAlert(value: unknown): ProfitAlert | null {
 function normalized(values: readonly ProfitAlert[]): readonly ProfitAlert[] {
   const byIdentity = new Map<string, ProfitAlert>();
   for (const value of values) {
+    if (!isNotifiableProfit(value)) continue;
     const current = byIdentity.get(value.identity);
     if (current === undefined || isBetter(value, current)) byIdentity.set(value.identity, value);
   }
@@ -148,7 +155,7 @@ export class ProfitAlertTracker {
     for (const rankedEvent of events) {
       for (const ticket of rankedEvent.tickets) {
         if (ticket.state === "VERIFIED_NO_PROFIT" || ticket.plan === null ||
-          !new Decimal(ticket.plan.roi).gt("0.05")) continue;
+          !isNotifiableProfit(ticket.plan)) continue;
         const identity = identityOf(ticket);
         if (identity === null) continue;
         const fresh = freshAccountIds === undefined || ticket.plan.legs.every((leg) =>

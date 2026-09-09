@@ -44,6 +44,7 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
   const [connectionState, setConnectionState] = useState<ConnectionState>(initialSnapshot === undefined ? "CONNECTING" : "LIVE");
   const [catalogBaseline, setCatalogBaseline] = useState<CatalogRealtimeFeed["baseline"]>(null);
   const [catalogRevision, setCatalogRevision] = useState<CatalogRealtimeFeed["revision"]>(null);
+  const [catalogRevisions, setCatalogRevisions] = useState<NonNullable<CatalogRealtimeFeed["revisions"]>>([]);
   const [route, setRoute] = useState<Route>(() => routeFor(window.location.pathname));
   const mainRef = useRef<HTMLElement>(null);
   const routeLabel = routes.find((item) => item.path === route)?.label ?? "Dashboard";
@@ -56,19 +57,35 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
         if (state !== "LIVE") {
           setCatalogBaseline(null);
           setCatalogRevision(null);
+          setCatalogRevisions([]);
         }
       },
       onCatalogBaseline: (entries, sequence) => {
         setCatalogRevision(null);
+        setCatalogRevisions([]);
         setCatalogBaseline({ entries, sequence });
       },
-      onCatalogRevision: (entry, sequence) => setCatalogRevision({ entry, sequence }) });
+      onCatalogRevision: (entry, sequence) => {
+        setCatalogRevision({ entry, sequence });
+        // React can batch messages from different books into one render. Keep
+        // each book's latest entry plus its strongest invalidation until reconnect;
+        // a following FRESH announcement alone cannot revive older held prices.
+        setCatalogRevisions((current) => {
+          const latest = { entry, sequence };
+          const stale = [...current, latest].filter((item) => item.entry.accountId === entry.accountId &&
+            item.entry.snapshotState === "STALE").sort((left, right) =>
+            right.entry.observedAtMs - left.entry.observedAtMs || right.sequence - left.sequence)[0];
+          const next = current.filter((item) => item.entry.accountId !== entry.accountId);
+          if (stale !== undefined && stale.sequence !== sequence) next.push(stale);
+          return [...next, latest].sort((left, right) => left.sequence - right.sequence);
+        });
+      } });
     void client.start();
     return () => client.stop();
   }, [initialSnapshot]);
 
   const catalogRealtime: CatalogRealtimeFeed = {
-    connectionState, baseline: catalogBaseline, revision: catalogRevision
+    connectionState, baseline: catalogBaseline, revision: catalogRevision, revisions: catalogRevisions
   };
 
   useEffect(() => {

@@ -88,7 +88,15 @@ export class TicketPreflightCoordinator {
         !providersWithoutExactPreflightIdentity.has(account.provider)) accountByProvider.set(account.provider, account);
     }
 
+    if (accountByProvider.size < 2) {
+      this.#verified = new Map();
+      return new Map(this.#verified);
+    }
+
     const candidates = await Promise.all(input.events.flatMap((event) => event.rows.map(async (row) => {
+      // The existing request contract describes one shared market type. Never
+      // certify a mixed 1X2/DC ticket through that protocol.
+      if (row.opposition !== undefined) return null;
       const verifiedPairs = await Promise.all(enumerateOpposingLegPairs(row, input.selectedProviders)
         .map(async (pair) => this.#verifyPair(row, pair, accountByProvider, input.policy)));
       const plan = verifiedPairs.flatMap((value) => value === null ? [] : [value]).sort((left, right) =>

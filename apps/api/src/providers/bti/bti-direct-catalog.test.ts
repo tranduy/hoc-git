@@ -110,7 +110,8 @@ describe("BTI direct catalog", () => {
         expect.objectContaining({ marketId: "home-clean-sheet", marketType: "HOME_FT_CLEAN_SHEET", lineText: null }),
         expect.objectContaining({ marketId: "away-win-both-halves", marketType: "AWAY_FT_WIN_BOTH_HALVES", lineText: null }),
         expect.objectContaining({ marketId: "home-win-to-nil", marketType: "HOME_FT_WIN_TO_NIL", lineText: null }),
-        expect.objectContaining({ marketId: "away-to-win", marketType: "AWAY_FT_TO_WIN", lineText: null })]
+        expect.objectContaining({ marketId: "away-to-win", marketType: "AWAY_FT_TO_WIN", lineText: null }),
+        expect.objectContaining({ marketId: "detail-1x2", marketType: "FT_1X2", lineText: null })]
     })]);
     const extracted = extractBtiCatalogRecords({ data: [event] })[0]!.markets;
     expect(extractBtiNativeMarketObservations({ data: [event] }, 123)).toContainEqual(
@@ -213,12 +214,10 @@ describe("BTI direct catalog", () => {
     const markets = extractBtiCatalogRecords({ data: [event] })[0]!.markets;
     expect(markets).toEqual(expect.arrayContaining([
       expect.objectContaining({ marketId: "goal-total:2.5", marketType: "FT_TOTAL" }),
-      expect.objectContaining({ marketId: "team-goal:1.5", marketType: "HOME_FT_TOTAL" })
+      expect.objectContaining({ marketId: "team-goal:1.5", marketType: "HOME_FT_TOTAL" }),
+      expect.objectContaining({ marketId: "team-fh-goal:0.5", marketType: "HOME_FH_TOTAL" })
     ]));
-    expect(markets.map(({ marketId }) => marketId)).not.toEqual(expect.arrayContaining([
-      expect.stringMatching(/^three-way-ah:/u), expect.stringMatching(/^three-way-corner:/u),
-      expect.stringMatching(/^team-fh-goal:/u), expect.stringMatching(/^shots:/u)
-    ]));
+    expect(markets.filter(({ marketId }) => /^(?:three-way-ah|three-way-corner|shots):/u.test(marketId))).toEqual([]);
 
     const observations = extractBtiNativeMarketObservations({ data: [event] }, 123);
     expect(observations).toEqual(expect.arrayContaining([
@@ -226,7 +225,7 @@ describe("BTI direct catalog", () => {
         reason: "THREE_WAY_OUTCOME_DOMAIN" }),
       expect.objectContaining({ providerMarketId: "three-way-corner", disposition: "EXCLUDED",
         reason: "THREE_WAY_OUTCOME_DOMAIN" }),
-      expect.objectContaining({ providerMarketId: "team-fh-goal", disposition: "UNMAPPED" }),
+      expect.objectContaining({ providerMarketId: "team-fh-goal:0.5", disposition: "NORMALIZED", nativeScope: "FIRST_HALF" }),
       expect.objectContaining({ providerMarketId: "shots", disposition: "UNMAPPED" })
     ]));
   });

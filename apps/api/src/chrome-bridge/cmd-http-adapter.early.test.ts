@@ -33,7 +33,9 @@ describe("CMD authenticated Early partition", () => {
   it("keeps a newer matching Early row when an older Today request finishes after migration", () => {
     const adapter = new CmdHttpCatalogAdapter();
     adapter.decode(envelope(main(), 1));
-    const newer = [...fixture.early.row]; newer[42] = 0.61;
+    // This ordering test uses the characterized ordinary Malay mode. The
+    // actual archived Early row is MR and is separately retained raw below.
+    const newer = [...fixture.early.row]; newer[42] = 0.61; newer[79] = 0;
     adapter.decode(envelope(early([newer]), 3, 6));
     const update = adapter.decode(envelope({ ...main(fixture.main.t + 1), today: [fixture.early.row] }, 4, 1,
       { reconcileCutoffSequence: 1 }));
@@ -50,12 +52,14 @@ describe("CMD authenticated Early partition", () => {
     const acquired = catalog(update);
     expect(acquired.events.map(row => row.providerEventId)).toEqual(expect.arrayContaining(["25403104", "1099097157"]));
     const originalQuotes = acquired.quotes.filter(row => row.providerEventId === "1099097157");
-    expect(originalQuotes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ marketType: "FT_TOTAL", line: "2", selection: "OVER", rawOdds: "0.93" }),
-      expect.objectContaining({ marketType: "FT_TOTAL", line: "2", selection: "UNDER", rawOdds: "0.93" })
-    ]));
+    expect(originalQuotes).toEqual([]);
+    const native = acquired.nativeMarketObservations!.filter(row => row.providerEventId === "1099097157");
+    expect(native).toContainEqual(expect.objectContaining({ nativeType: "3", reason: "NATIVE_MR_ODDS_UNPROVEN",
+      observedAtMs: fixture.early.observedAtMs + 2,
+      nativeSelections: [expect.objectContaining({ price: "0.93" }), expect.objectContaining({ price: "0.93" })] }));
     const next = catalog(adapter.decode(envelope(main(fixture.main.t + 1), 3)));
     expect(next.quotes.filter(row => row.providerEventId === "1099097157")).toEqual(originalQuotes);
+    expect(next.nativeMarketObservations!.filter(row => row.providerEventId === "1099097157")).toEqual(native);
     expect(next.events).toHaveLength(2);
   });
 

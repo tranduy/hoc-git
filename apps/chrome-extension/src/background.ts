@@ -12,16 +12,17 @@ import { TabBootstrapper } from "./tab-bootstrapper.js";
 import { recoverAttachedSource } from "./snapshot-recovery.js";
 import { tabsNeedingContentScriptRefresh } from "./extension-update.js";
 import { SourceTabKeepAlive } from "./source-tab-keepalive.js";
+import { SbobetRequestBackoff } from "./sbobet-request-backoff.js";
+import { SabaRecoveryBudget } from "./saba-recovery-budget.js";
 import { CmdSnapshotPoller } from "./cmd-snapshot-poller.js";
 import { SABA_DIRECT_LOBBY_URL, SourceTabRecovery } from "./source-tab-recovery.js";
 import { SabaBlankHandoffJournal } from "./saba-blank-handoff.js";
-import { retryImBootstrapRefresh } from "./im-bootstrap-refresh.js";
-import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
 import { bootstrapCatalogSources, refreshBootstrapCatalogSources } from "./bootstrap-catalog-refresh.js";
 import { SabaSnapshotStorage } from "./saba-snapshot-storage.js";
 import { SourceLaunchMemory } from "./source-launch-memory.js";
 import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
 import { extensionLobbyScope, lobbyIsInExtensionScope } from "./extension-lobby-scope.js";
+import { stopSuspendedImCollector } from "./im-collector-suspension.js";
 import { runDebuggerEventTask } from "./debugger-event-task.js";
 import { ApsportPageRecoveryWatchdog } from "./apsport-page-recovery.js";
 import { BtiPageRecoveryWatchdog, btiSourceControlAction } from "./bti-page-health.js";
@@ -64,6 +65,7 @@ const providerPageLeaseStorageKey = "providerPageLeaseV1";
 const sabaBlankHandoffStorageKey = "sabaBlankHandoffV1";
 const sourceLaunchMemory = new SourceLaunchMemory();
 const bootstrappingSourceTabs = new Set<number>();
+const suspendedImTabs = new Set<number>();
 const cmdPageActivity = new SourceActivityGuard();
 
 // Earlier versions persisted signed provider launches. Purge that opaque
@@ -121,6 +123,14 @@ const btiPageRecovery = new BtiPageRecoveryWatchdog({
   }
 });
 observer = new NetworkObserver({
+  sabaRecoveryBudget: new SabaRecoveryBudget({
+    load: async () => (await chrome.storage.local.get("sabaRecoveryBudgetV1")).sabaRecoveryBudgetV1,
+    save: async (state) => { await chrome.storage.local.set({ sabaRecoveryBudgetV1: state }); }
+  }),
+  sbobetRequestBackoff: new SbobetRequestBackoff({
+    load: async () => (await chrome.storage.local.get("sbobetRequestBackoffV1")).sbobetRequestBackoffV1,
+    save: async (state) => { await chrome.storage.local.set({ sbobetRequestBackoffV1: state }); }
+  }),
   sendCommand: async (tabId, method, params, sessionId) => chrome.debugger.sendCommand(
     sessionId === undefined ? { tabId } : { tabId, sessionId }, method, params),
   loadSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.load(sourceId),
@@ -161,6 +171,10 @@ observer = new NetworkObserver({
   forward: async (envelope) => {
     if (!bridge) throw new Error("BRIDGE_NOT_CONFIGURED");
     await bridge.enqueue(envelope, envelope.transport === "TAB_STATE" ? "DIAGNOSTIC" : "QUOTE");
+  },
+  onForwardOverflow: (source) => {
+    console.warn("[fieldline] pending forwarding limit reached; resyncing source", source.sourceId);
+    bridge?.requestSourceResync(source.sourceId);
   }
 });
 
@@ -214,15 +228,11 @@ async function recoverSourceSnapshot(request: { readonly sourceId: string;
 
 async function refreshAttachedSaba(tabId: number): Promise<void> {
   const source: ObservedSource = { lobby: "SABA", sourceId: `chrome:SABA:${tabId}`, tabId };
-  await observer.refreshCatalog(source).catch(() => undefined);
   // Keep any delayed child-frame/socket bootstrap inside the current document.
   // The retry is intentionally detached from the bridge command: an API
   // restart must not leave a long-running control operation that can later
   // navigate or rotate this source epoch.
-  void retrySabaBootstrapRefresh(
-    () => observer.refreshCatalog(source),
-    () => observer.hasCompleteSabaBaseline(source.sourceId)
-  );
+  void observer.bootstrapSabaCatalog(source).catch(() => undefined);
 }
 
 const tabBootstrapper = new TabBootstrapper({
@@ -255,21 +265,12 @@ async function startAttachedSource(attached: { readonly lobby: ChromeLobbyId; re
     sourceId: `chrome:${attached.lobby}:${attached.tabId}`
   };
   await observer.start(source);
-  if (source.lobby === "IM") {
-    // The authenticated IM page can need several seconds before both signed
-    // GetSE partitions become callable. Retry in-page capture during this
-    // bounded bootstrap window; never navigate or reload the provider tab.
-    void retryImBootstrapRefresh(() => observer.refreshCatalog(source));
-  }
   if (source.lobby === "SABA") {
     // A Manifest V3 worker can restart while SABA's Socket.IO connection and
     // provider tab stay alive. CDP then misses the original socket creation
     // and baseline frames. Retry a same-tab lightweight baseline request while
     // the owning main-world/OOPIF contexts finish attaching; never reload the tab.
-    void retrySabaBootstrapRefresh(
-      () => observer.refreshCatalog(source),
-      () => observer.hasCompleteSabaBaseline(source.sourceId)
-    );
+    void observer.bootstrapSabaCatalog(source).catch(() => undefined);
   }
   // A recovered provider launch can be one-time. Reloading it here consumes
   // the restored navigation and can make the provider close the tab again.
@@ -320,6 +321,9 @@ const imPortalLauncher = new FabetPortalLauncher({
 });
 
 const sourceTabRecovery = new SourceTabRecovery({
+  // IM's provider rejection must never trigger session launches or navigation.
+  // Its existing tab can only issue requests through the persistent safe gate.
+  canRecover: lobby => lobby !== "IM" && (lobby !== "KSPORT" || observer.canRequestSbobet()),
   launchFromPortal: async lobby => {
     if (lobby !== "IM") throw new Error("FABET_PORTAL_TAB_UNAVAILABLE");
     return imPortalLauncher.launchIm();
@@ -410,6 +414,7 @@ providerPageLeaseCoordinator = new ProviderPageLeaseCoordinator({
     await chrome.storage.local.set({ [providerPageLeaseStorageKey]: state });
   },
   renew: (source) => renewExactProviderTab(source, {
+    canRenew: candidate => candidate.lobby !== "KSPORT" || observer.canRequestSbobet(),
     isAttached: (candidate) => registry.list().some((entry) => entry.lobby === candidate.lobby &&
       entry.tabId === candidate.tabId && candidate.sourceId === `chrome:${entry.lobby}:${entry.tabId}`),
     get: async (tabId) => chrome.tabs.get(tabId),
@@ -463,6 +468,9 @@ async function waitForFreshCmdBaseline(tabId: number, recoveryStartedAtMs: numbe
 }
 
 const cmdPageKeepalive = new CmdPageKeepalive({
+  startupGraceMs: 90_000,
+  shouldDeferReload: (source) => observer.hasCompleteCmdBaselineSince(source.sourceId, Date.now() - 30_000) ||
+    observer.cmdRequestsPaused(source.sourceId),
   listAttached: () => registry.list().flatMap((entry) => entry.lobby === "CMD"
     ? [{ lobby: "CMD" as const, sourceId: `chrome:CMD:${entry.tabId}`, tabId: entry.tabId }]
     : []),
@@ -477,7 +485,8 @@ const cmdPageKeepalive = new CmdPageKeepalive({
   saveState: async (state) => {
     await chrome.storage.local.set({ [cmdPageKeepaliveStorageKey]: state });
   },
-  reload: (source) => {
+  reload: async (source) => {
+    if (await observer.probeCmdRequestsPaused(source)) throw new Error("CMD_REQUEST_BACKOFF");
     const recoveryStartedAtMs = Date.now();
     const isExactAttached = (candidate: typeof source): boolean => registry.list().some((entry) =>
       entry.lobby === "CMD" && entry.tabId === candidate.tabId &&
@@ -486,12 +495,17 @@ const cmdPageKeepalive = new CmdPageKeepalive({
       isAttached: isExactAttached,
       get: async (tabId) => chrome.tabs.get(tabId),
       isExpected: (tab) => recognizeExpectedLobbyTab(tab, "CMD")?.lobby === "CMD",
-      attachBootstrap: (tab) => attachRecoveredTabAsExpected(tab, "CMD"),
+      attachBootstrap: async (tab) => {
+        await attachRecoveredTabAsExpected(tab, "CMD");
+        if (await observer.probeCmdRequestsPaused(source)) throw new Error("CMD_REQUEST_BACKOFF");
+      },
       reload: async (tabId, url) => {
         if (url === undefined) await chrome.tabs.reload(tabId);
         else await chrome.tabs.update(tabId, { url });
       },
-      replace: (failedTabId) => replaceExactCmdTab(source, {
+      replace: async (failedTabId) => {
+        if (await observer.probeCmdRequestsPaused(source)) throw new Error("CMD_REQUEST_BACKOFF");
+        return replaceExactCmdTab(source, {
         // A reload can briefly detach the dead target before replacement. It
         // remains safe to remove only while no different CMD source took over.
         isAttached: (candidate) => {
@@ -515,7 +529,8 @@ const cmdPageKeepalive = new CmdPageKeepalive({
           if (!tab) throw new Error("CMD_SOURCE_RECOVERY_FAILED");
           return tab;
         }
-      }),
+        });
+      },
       waitForFreshBaseline: (tabId) => waitForFreshCmdBaseline(tabId, recoveryStartedAtMs)
     });
   }
@@ -602,6 +617,12 @@ async function configureBridgeOnce(): Promise<boolean> {
         for (const attached of registry.list()) {
           if (attached.lobby === "TSPORT") {
             observer.resetApsportRefreshCooldown(`chrome:${attached.lobby}:${attached.tabId}`);
+          } else if (attached.lobby === "KSPORT") {
+            // The replacement API has no Main/All Dates authority. Retire the
+            // old bridge's completion and pending publications before bootstrap
+            // so the worker supplies a current pair and roster again. This
+            // preserves the provider request backoff and the existing page.
+            observer.beginBridgeSourceEpoch(`chrome:${attached.lobby}:${attached.tabId}`);
           }
         }
         void refreshBootstrapCatalogs();
@@ -620,6 +641,7 @@ async function configureBridgeOnce(): Promise<boolean> {
       // "reload extension" does, so a deployment no longer needs a human.
       onExtensionReload: () => { chrome.runtime.reload(); },
       onSourceReload: async (sourceId) => {
+        if (sourceId.startsWith("chrome:KSPORT:") && await observer.sbobetRequestsPaused()) return;
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
         if (attached) {
           if (attached.lobby === "CMD") {
@@ -645,7 +667,6 @@ async function configureBridgeOnce(): Promise<boolean> {
             // outage/recovery loop.
             const source: ObservedSource = { lobby: "IM", sourceId, tabId: attached.tabId };
             await observer.refreshCatalog(source).catch(() => undefined);
-            await retryImBootstrapRefresh(() => observer.refreshCatalog(source));
           } else if (attached.lobby === "SABA") {
             const hasResponsiveDocument = observer.hasResponsiveSabaDocument(sourceId);
             if (sabaSourceControlAction("RELOAD", hasResponsiveDocument) === "REFRESH_CURRENT") {
@@ -669,6 +690,8 @@ async function configureBridgeOnce(): Promise<boolean> {
         }
       },
       onSourceNavigate: async (sourceId, url) => {
+        if (sourceId.startsWith("chrome:IM:")) throw new Error("IM_AUTOMATIC_NAVIGATION_DISABLED");
+        if (sourceId.startsWith("chrome:KSPORT:") && await observer.sbobetRequestsPaused()) return;
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
         if (!attached) throw new Error("SOURCE_NOT_ATTACHED");
         const parsed = new URL(url);
@@ -679,6 +702,7 @@ async function configureBridgeOnce(): Promise<boolean> {
       },
       onSourceEnsure: async (lobby, url) => {
         if (!lobbyIsAllowed(lobby)) return;
+        if (lobby === "KSPORT" && await observer.sbobetRequestsPaused()) return;
         if (lobby === "SABA") {
           const attached = registry.list().find((entry) => entry.lobby === "SABA");
           if (attached !== undefined) {
@@ -703,9 +727,8 @@ async function configureBridgeOnce(): Promise<boolean> {
             const source: ObservedSource = { lobby: "IM", tabId: attached.tabId,
               sourceId: `chrome:IM:${attached.tabId}` };
             await observer.refreshCatalog(source).catch(() => undefined);
-            void retryImBootstrapRefresh(() => observer.refreshCatalog(source));
-            return;
           }
+          return;
         }
         if (lobby === "BTI") {
           const attached = registry.list().find((entry) => entry.lobby === "BTI");
@@ -723,6 +746,7 @@ async function configureBridgeOnce(): Promise<boolean> {
       },
       onSourceRestore: async (lobby) => {
         if (!lobbyIsAllowed(lobby)) return;
+        if (lobby === "KSPORT" && await observer.sbobetRequestsPaused()) return;
         if (lobby === "SABA") {
           const attached = registry.list().find((entry) => entry.lobby === "SABA");
           if (attached !== undefined) {
@@ -822,7 +846,19 @@ async function reconcilePreferredTabs(): Promise<void> {
   await sabaBlankHandoffJournal.resume().catch((error) => {
     console.warn("SABA blank handoff resume failed", error instanceof Error ? error.name : "UNKNOWN");
   });
-  const tabs = (await chrome.tabs.query({})).filter((tab) => {
+  const openTabs = await chrome.tabs.query({});
+  if (!lobbyIsAllowed("IM")) {
+    for (const tab of openTabs) {
+      if (tab.id === undefined || suspendedImTabs.has(tab.id) || recognizeLobbyTab(tab)?.lobby !== "IM") continue;
+      const tabId = tab.id;
+      suspendedImTabs.add(tabId);
+      // An unresponsive suspended renderer must not hold BTI restoration.
+      // Deduplicate pending retirement and retry rejected injection on a later wake.
+      void chrome.scripting.executeScript({ target: { tabId, allFrames: true },
+        world: "MAIN", func: stopSuspendedImCollector }).catch(() => suspendedImTabs.delete(tabId));
+    }
+  }
+  const tabs = openTabs.filter((tab) => {
     const recognized = recognizeLobbyTab(tab);
     return recognized !== null && lobbyIsAllowed(recognized.lobby);
   });
@@ -907,6 +943,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  suspendedImTabs.delete(tabId);
   bootstrappingSourceTabs.delete(tabId);
   const source = sourceForTab(tabId);
   if (source !== null) bridge?.releaseSource(source.sourceId);
@@ -1003,6 +1040,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       return sendResponse({ ok: true, attached });
     }
     if (request.kind === "ENSURE_KSPORT") {
+      if (await observer.sbobetRequestsPaused()) return sendResponse({ ok: false, reason: "SOURCE_REQUEST_BACKOFF" });
       const url = sourceLaunchMemory.load("KSPORT");
       if (url === null) return sendResponse({ ok: false, reason: "KSPORT_LAUNCH_UNAVAILABLE" });
       await sourceTabRecovery.ensure("KSPORT", url);

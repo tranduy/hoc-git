@@ -1,10 +1,40 @@
 import { describe, expect, it } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
-import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
+import { TsportWsCatalogAdapter, extractTsportFootballRecord, observeTsportNativeMarkets } from "./tsport-ws-adapter.js";
 
 const SOURCE_ID = "chrome:TSPORT:7";
 const DEFAULT_STREAM_ID = "tsport-stream-1";
 const DEFAULT_SOURCE_EPOCH = "observer-a:1";
+
+describe("AP own result schema", () => {
+  it("retains one explicitly identified double-chance outcome without borrowing another slot's price", () => {
+    const input = { "2": 5648440, "5": "Home", "22": "Away", "53": "League", "6": false,
+      "11": "2026-09-11T02:00:00Z", "50": [{ "3": 12, "10": "Active", "9": [{
+        "3": "56484400120000000d", "6": "733990848101000", "10": { "0": "1.393" } }] }] };
+    expect(extractTsportFootballRecord(input)?.markets[0]?.selections).toEqual([
+      expect.objectContaining({ selectionId: "56484400120000000d", selection: "HOME_AWAY", priceText: "1.393" })]);
+    expect(observeTsportNativeMarkets(input, 1)[0]?.outcomeLabels).toEqual(["HOME_AWAY"]);
+  });
+  it.each([[12, "FT_DOUBLE_CHANCE"], [13, "FH_DOUBLE_CHANCE"], [89, "SH_1X2"]] as const)(
+    "maps native group%s through its own named slots and preserves a suspended offer", (groupId, marketType) => {
+      const input = { "2": 5648440, "5": "Home", "22": "Away", "53": "League", "6": false,
+        "11": "2026-09-11T02:00:00Z", "50": [{ "3": groupId, "10": "Active", "9": [{
+          "0": "56484400120000000h", "2": "56484400120000000a", "3": "56484400120000000d", "6": "733990848101000",
+          "7": "0.0", "8": { "0": "1.161608171513049" }, "9": { "0": "1.609562894475658" },
+          "10": { "0": "1.3930590972073238" }, "13": true }] }] };
+      const result = extractTsportFootballRecord(input);
+      expect(result?.markets).toEqual([expect.objectContaining({ marketId: `tsport:${groupId}:733990848101000`, marketType, lineText: null })]);
+      expect(result?.markets[0]?.selections.map((selection) => [selection.selection, selection.priceText, selection.locked])).toEqual(
+        (groupId === 89 ? ["HOME", "AWAY", "DRAW"] : ["HOME_DRAW", "DRAW_AWAY", "HOME_AWAY"])
+          .map((selection, index) => [selection, ["1.161608171513049", "1.609562894475658", "1.3930590972073238"][index], true]));
+      expect(observeTsportNativeMarkets(input, 1)[0]).toMatchObject({ disposition: "NORMALIZED", status: "SUSPENDED",
+        nativeScope: groupId === 12 ? "FULL_TIME" : groupId === 13 ? "FIRST_HALF" : "SECOND_HALF" });
+    });
+  it("reports native semantics awaiting a canonical contract as unmapped", () => {
+    const input = { "2": 1, "50": [{ "3": 98, "10": "Active", "9": [{ "0": "1h", "6": "offer", "8": { "0": "2.5" } }] }] };
+    expect(observeTsportNativeMarkets(input, 1)[0]).toMatchObject({ disposition: "UNMAPPED", reason: "CANONICAL_EQUIVALENCE_NOT_PROVEN" });
+  });
+});
 
 function envelope(
   event: unknown,
@@ -189,11 +219,11 @@ describe("TsportWsCatalogAdapter", () => {
       })) }] };
     const update = adapter.decode(apiEnvelope([raw]))[0] as AuthorityUpdate;
     expect(update.value.markets).toEqual([
-      expect.objectContaining({ marketType, providerMarketId: "signed-0", line: "0.5" }),
-      expect.objectContaining({ marketType, providerMarketId: "signed-1", line: "0.75" }),
-      expect.objectContaining({ marketType, providerMarketId: "signed-2", line: "1" }),
-      expect.objectContaining({ marketType, providerMarketId: "signed-3", line: "0" }),
-      expect.objectContaining({ marketType, providerMarketId: "signed-4", line: "-0.5" })
+      expect.objectContaining({ marketType, providerMarketId: `tsport:${groupId}:signed-0`, line: "0.5" }),
+      expect.objectContaining({ marketType, providerMarketId: `tsport:${groupId}:signed-1`, line: "0.75" }),
+      expect.objectContaining({ marketType, providerMarketId: `tsport:${groupId}:signed-2`, line: "1" }),
+      expect.objectContaining({ marketType, providerMarketId: `tsport:${groupId}:signed-3`, line: "0" }),
+      expect.objectContaining({ marketType, providerMarketId: `tsport:${groupId}:signed-4`, line: "-0.5" })
     ]);
     expect(update.value.quotes).toHaveLength(10);
     expect(update.value.nativeMarketObservations?.filter((item) => item.disposition === "NORMALIZED"))
@@ -265,10 +295,10 @@ describe("TsportWsCatalogAdapter", () => {
     expect(update).toMatchObject({ evidenceMode: "DELTA", generation: "apsport:7:1",
       provenance: "AUTHENTICATED_HTTP" });
     expect(update.value.markets).toEqual(expect.arrayContaining([
-      expect.objectContaining({ providerEventId: "102", providerMarketId: "102-sh-total",
+      expect.objectContaining({ providerEventId: "102", providerMarketId: "tsport:80:102-sh-total",
         marketType: "SH_TOTAL" })
     ]));
-    expect(update.value.quotes.filter((quote) => quote.providerMarketId === "102-sh-total"))
+    expect(update.value.quotes.filter((quote) => quote.providerMarketId === "tsport:80:102-sh-total"))
       .toEqual([expect.objectContaining({ status: "OPEN" }), expect.objectContaining({ status: "OPEN" })]);
   });
 
@@ -332,19 +362,19 @@ describe("TsportWsCatalogAdapter", () => {
     const update = adapter.decode(apiEnvelope([detailed]))[0] as AuthorityUpdate;
 
     expect(update.value.markets).toEqual(expect.arrayContaining([
-      expect.objectContaining({ providerMarketId: "130-odd-even", marketType: "FT_ODD_EVEN", line: null }),
-      expect.objectContaining({ providerMarketId: "130-card-total", marketType: "CARD_FT_TOTAL", line: "2.5" }),
-      expect.objectContaining({ providerMarketId: "130-btts", marketType: "FT_BTTS", line: null })
+      expect.objectContaining({ providerMarketId: "tsport:8:130-odd-even", marketType: "FT_ODD_EVEN", line: null }),
+      expect.objectContaining({ providerMarketId: "tsport:31:130-card-total", marketType: "CARD_FT_TOTAL", line: "2.5" }),
+      expect.objectContaining({ providerMarketId: "tsport:36:130-btts", marketType: "FT_BTTS", line: null })
     ]));
-    expect(update.value.quotes.filter((quote) => quote.providerMarketId === "130-odd-even"))
+    expect(update.value.quotes.filter((quote) => quote.providerMarketId === "tsport:8:130-odd-even"))
       .toEqual([expect.objectContaining({ rawOdds: "1.91" }), expect.objectContaining({ rawOdds: "1.77" })]);
     expect(update.value.nativeMarketObservations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ providerMarketId: "130-odd-even", nativeType: "8", disposition: "NORMALIZED" }),
-      expect.objectContaining({ providerMarketId: "130-card-total", nativeType: "31", disposition: "NORMALIZED" }),
-      expect.objectContaining({ providerMarketId: "130-btts", nativeType: "36", disposition: "NORMALIZED" }),
-      expect.objectContaining({ providerMarketId: "130-three-way", nativeType: "87", disposition: "EXCLUDED",
+      expect.objectContaining({ providerMarketId: "tsport:8:130-odd-even", nativeType: "8", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "tsport:31:130-card-total", nativeType: "31", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "tsport:36:130-btts", nativeType: "36", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "tsport:87:130-three-way", nativeType: "87", disposition: "UNMAPPED",
         reason: "THREE_WAY_OUTCOME_DOMAIN" }),
-      expect.objectContaining({ providerMarketId: "130-unknown", nativeType: "999", disposition: "UNMAPPED",
+      expect.objectContaining({ providerMarketId: "tsport:999:130-unknown", nativeType: "999", disposition: "UNMAPPED",
         reason: "NATIVE_TYPE_UNMAPPED" })
     ]));
     expect(update.value.nativeMarketObservations).toHaveLength(5);
@@ -384,7 +414,7 @@ describe("TsportWsCatalogAdapter", () => {
     expect(changed).toMatchObject({ evidenceMode: "DELTA", generation: "apsport:7:1", provenance: "WS" });
     expect(changed.value.markets).toHaveLength(5);
     expect(changed.value.markets).toEqual(expect.arrayContaining([
-      expect.objectContaining({ providerMarketId: "106-sh-total" })
+      expect.objectContaining({ providerMarketId: "tsport:80:106-sh-total" })
     ]));
     expect(adapter.decode(envelope(realtime, 5, "football-a"))).toEqual([
       expect.objectContaining({ transportAlive: true, sourceId: "chrome:TSPORT:7", sequence: 5 })
@@ -412,7 +442,7 @@ describe("TsportWsCatalogAdapter", () => {
     ))[0] as AuthorityUpdate;
 
     expect((update.value.markets as readonly { readonly providerMarketId?: string }[])
-      .some((market) => market.providerMarketId === "108-sh-total")).toBe(false);
+      .some((market) => market.providerMarketId === "tsport:80:108-sh-total")).toBe(false);
     expect(update.value.quotes.filter((quote) => quote.providerEventId === "108")
       .every((quote) => quote.sequence === 5 && quote.receivedMonotonicMs === 90)).toBe(true);
   });
@@ -431,6 +461,94 @@ describe("TsportWsCatalogAdapter", () => {
     expect(update.value.quotes.every((quote) => quote.sequence === 3 && quote.receivedMonotonicMs === 70)).toBe(true);
   });
 
+  it.each(["SWEEP", "WS"] as const)("publishes bounded %s re-observations without renewing unrelated quote clocks", (kind) => {
+    const adapter = new TsportWsCatalogAdapter();
+    const first = event(180, "Confirmed First"), other = event(181, "Unchanged Other");
+    const at = (input: ChromeBridgeEnvelope, elapsedMs: number): ChromeBridgeEnvelope => ({ ...input,
+      observedAtMs: Date.UTC(2026, 7, 16, 3) + elapsedMs, receivedMonotonicMs: 50 + elapsedMs });
+    const observation = (record: ReturnType<typeof event>, sequence: number, elapsedMs: number) => at(kind === "SWEEP"
+      ? apiEnvelope([record], sequence, "DETAIL", false, "apsport:7:1", 24, "SWEEP")
+      : envelope(record, sequence), elapsedMs);
+    adapter.decode(at(apiEnvelope([first, other]), 0));
+    const initial = adapter.decode(observation(first, 2, 100))[0] as AuthorityUpdate;
+    expect(initial.value.quotes.filter(quote => quote.providerEventId === "180")
+      .every(quote => quote.sequence === 2 && quote.receivedMonotonicMs === 150)).toBe(true);
+
+    const confirmed = adapter.decode(observation(first, 3, 1_100))[0] as AuthorityUpdate;
+    expect(confirmed?.value).toBeDefined();
+    expect(confirmed.value.quotes.filter(quote => quote.providerEventId === "180")
+      .every(quote => quote.sequence === 3 && quote.receivedMonotonicMs === 1_150)).toBe(true);
+    expect(confirmed.value.quotes.filter(quote => quote.providerEventId === "181")
+      .every(quote => quote.sequence === 1 && quote.receivedMonotonicMs === 50)).toBe(true);
+
+    // A second real confirmation is retained, but a whole catalog need not be
+    // rebuilt for every duplicate socket record in a subsecond burst.
+    expect(adapter.decode(observation(first, 4, 1_200)).some(update => "value" in update)).toBe(false);
+    // A semantic price change still publishes immediately and carries only
+    // the genuinely refreshed first-event receipt from the coalesced record.
+    const changed = adapter.decode(observation(event(181, "Unchanged Other", "0.67"), 5, 1_250))[0] as AuthorityUpdate;
+    expect(changed.value.quotes.filter(quote => quote.providerEventId === "180")
+      .every(quote => quote.sequence === 4 && quote.receivedMonotonicMs === 1_250)).toBe(true);
+    expect(changed.value.quotes.filter(quote => quote.providerEventId === "181")
+      .every(quote => quote.sequence === 5 && quote.receivedMonotonicMs === 1_300)).toBe(true);
+  });
+
+  it.each(["SWEEP", "WS"] as const)("does not publish pending %s receipts on heartbeat, empty, malformed or retired traffic", (kind) => {
+    const adapter = new TsportWsCatalogAdapter(), current = event(182, "Confirmed Only");
+    const at = (input: ChromeBridgeEnvelope, elapsedMs: number): ChromeBridgeEnvelope => ({ ...input,
+      observedAtMs: Date.UTC(2026, 7, 16, 3) + elapsedMs, receivedMonotonicMs: 50 + elapsedMs });
+    const observation = (sequence: number, elapsedMs: number) => at(kind === "SWEEP"
+      ? apiEnvelope([current], sequence, "DETAIL", false, "apsport:7:1", 24, "SWEEP")
+      : envelope(current, sequence), elapsedMs);
+    adapter.decode(at(apiEnvelope([current]), 0));
+    adapter.decode(observation(2, 100));
+    adapter.decode(observation(3, 200));
+    const invalid = [at(envelope({}, 4), 1_200),
+      at(apiEnvelope([], 5, "DETAIL", false), 1_300),
+      { ...observation(6, 1_400), payload: { encoding: "UTF8" as const, body: "{" } },
+      { ...observation(7, 1_500), sourceEpoch: "observer-a:0" },
+      { ...observation(8, 1_600), request: { ...observation(8, 1_600).request, replayed: true } }];
+    for (const input of invalid) expect(adapter.decode(input).some(update => "value" in update)).toBe(false);
+    const genuine = adapter.decode(observation(9, 1_700))[0] as AuthorityUpdate;
+    expect(genuine?.value).toBeDefined();
+    expect(genuine.value.quotes.every(quote => quote.sequence === 9 && quote.receivedMonotonicMs === 1_750)).toBe(true);
+  });
+
+  it("renews only the native markets present in an identical partial socket observation", () => {
+    const adapter = new TsportWsCatalogAdapter(), current = event(183, "Partial Confirmation");
+    const at = (input: ChromeBridgeEnvelope, elapsedMs: number): ChromeBridgeEnvelope => ({ ...input,
+      observedAtMs: Date.UTC(2026, 7, 16, 3) + elapsedMs, receivedMonotonicMs: 50 + elapsedMs });
+    adapter.decode(at(apiEnvelope([current]), 0));
+    const partial = { ...current, "50": [current["50"][0]!] };
+    adapter.decode(at(envelope(partial, 2), 100));
+    const confirmed = adapter.decode(at(envelope(partial, 3), 1_100))[0] as AuthorityUpdate;
+
+    expect(confirmed.value.quotes.filter(quote => quote.providerMarketId === "tsport:3:183-total"))
+      .toEqual([expect.objectContaining({ sequence: 3, receivedMonotonicMs: 1_150 }),
+        expect.objectContaining({ sequence: 3, receivedMonotonicMs: 1_150 })]);
+    const untouched = confirmed.value.quotes.filter(quote => quote.providerMarketId !== "tsport:3:183-total");
+    expect(untouched.length).toBeGreaterThan(0);
+    expect(untouched.every(quote => quote.sequence === 1 && quote.receivedMonotonicMs === 50)).toBe(true);
+  });
+
+  it("pairs a membership-only publication clock with its receipt without renewing surviving quotes", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const surviving = event(184, "Retained Quote"), removed = event(185, "Removed Event");
+    const baseline = adapter.decode(apiEnvelope([surviving, removed]))[0] as AuthorityUpdate;
+    const originalQuotes = baseline.value.quotes.filter(quote => quote.providerEventId === "184");
+    const removal = apiEnvelope([{ ...removed, "10": "Suspended" }], 2, "DETAIL", false,
+      "apsport:7:1", 24, "EVENT_CHANGE");
+    const observedAtMs = removal.observedAtMs + 20_000;
+    const observedMonotonicMs = removal.receivedMonotonicMs + 20_000.25;
+    const update = adapter.decode({ ...removal, observedAtMs, receivedMonotonicMs: observedMonotonicMs })[0] as AuthorityUpdate;
+
+    expect(update.value).toMatchObject({ observedAtMs, observedMonotonicMs });
+    expect(update.value.events).toHaveLength(1);
+    expect(update.value.quotes).toEqual(originalQuotes);
+    expect(Math.max(...update.value.quotes.map(quote => quote.receivedMonotonicMs)))
+      .toBeLessThan(observedMonotonicMs);
+  });
+
   it("does not resurrect a roster main market omitted by authoritative event detail", () => {
     const adapter = new TsportWsCatalogAdapter();
     const raw = event(132, "Partition Home");
@@ -438,12 +556,12 @@ describe("TsportWsCatalogAdapter", () => {
     const detailed = { ...raw, "50": [raw["50"][0]!] };
     const update = adapter.decode(apiEnvelope([detailed], 2, "DETAIL", false,
       "apsport:7:1", 24, "EVENT_CHANGE"))[0] as AuthorityUpdate;
-    expect(update.value.markets).toEqual([expect.objectContaining({ providerMarketId: "132-total" })]);
+    expect(update.value.markets).toEqual([expect.objectContaining({ providerMarketId: "tsport:3:132-total" })]);
     expect(update.value.nativeMarketObservations).toHaveLength(1);
     const repricedRoster = event(132, "Partition Home", "0.64");
     const renewed = adapter.decode(apiEnvelope([repricedRoster], 3, "ROSTER", true, "apsport:7:2"))[0] as AuthorityUpdate;
     expect(renewed.value.markets).toHaveLength(1);
-    expect(renewed.value.quotes[0]).toMatchObject({ providerMarketId: "132-total", rawOdds: "0.64", sequence: 3 });
+    expect(renewed.value.quotes[0]).toMatchObject({ providerMarketId: "tsport:3:132-total", rawOdds: "0.64", sequence: 3 });
   });
 
   it("ignores malformed active exact detail instead of deleting its event", () => {
@@ -540,7 +658,7 @@ describe("TsportWsCatalogAdapter", () => {
 
     const delayed = adapter.decode(apiEnvelope([old], 3, "DETAIL", false));
 
-    expect(exact.value.quotes.find((quote) => quote.providerMarketId === "111-total")?.rawOdds).toBe("0.66");
+    expect(exact.value.quotes.find((quote) => quote.providerMarketId === "tsport:3:111-total")?.rawOdds).toBe("0.66");
     expect(delayed).toEqual([]);
   });
 
@@ -819,7 +937,9 @@ describe("TsportWsCatalogAdapter", () => {
 
     expect(adapter.decode(domEnvelope([expectedRecord(1)], 3)))
       .toEqual([expect.objectContaining({
-        authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+        authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS",
+        value: expect.objectContaining({ observedAtMs: Date.UTC(2026, 7, 16, 3), observedMonotonicMs: 70,
+          quotes: expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 60, sequence: 2 })]) })
       })]);
   });
 

@@ -7,7 +7,7 @@ import { chromeBridgeSourceIdentity } from "./chrome-bridge-account.js";
 type FabetProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
 type RecoveryStage = "SOFT" | "HARD";
 type RecoveryFeedRegistry = Pick<ProviderFeedRegistry,
-  "snapshot" | "subscribe" | "waitForFreshBaseline">;
+  "read" | "snapshot" | "subscribe" | "waitForFreshBaseline">;
 
 interface RecoveryControlPlane {
   requestLobbySnapshot(lobby: ChromeLobbyId): number;
@@ -84,6 +84,7 @@ const ACTIONABLE_REASONS = new Set([
 ]);
 const DISPOSED = Symbol("RECOVERY_DISPOSED");
 const SBOBET_SAME_TAB_RECOVERY = Symbol("SBOBET_SAME_TAB_RECOVERY");
+const RECOVERY_ALREADY_LIVE = Symbol("RECOVERY_ALREADY_LIVE");
 const INITIAL_BACKOFF_MS = 1_000;
 // The retry ceiling is the operator's 30 s realtime contract. Measured
 // 2026-08-31: after an API restart, APSPORT's first recovery raced the
@@ -161,14 +162,22 @@ export class AutomaticSourceRecovery {
   recover(request: ProviderRecoveryRequest): Promise<RecoveryResult> {
     const existing = this.#inflight.get(request.accountId);
     if (existing !== undefined) return existing;
+    if (!this.#disposed && !this.#suppressed(request.accountId) && this.#readable(request.accountId)) {
+      const result = recovered(request.accountId, request.stage);
+      this.#recordResult(result);
+      return Promise.resolve(result);
+    }
     const backoff = this.#backoff.get(request.accountId);
     if (backoff !== undefined && this.#now() < backoff.nextAttemptAtMs) {
       return Promise.resolve({ accountId: request.accountId, stage: request.stage,
         outcome: "ACTION_REQUIRED", reason: "RECOVERY_BACKOFF" });
     }
     const operation = this.#recover(request).then((result) => {
-      this.#recordResult(result);
-      return result;
+      // A valid delta can recover without completing a newer baseline.
+      const current = !this.#disposed && !this.#suppressed(request.accountId) && this.#readable(request.accountId)
+        ? recovered(request.accountId, result.stage) : result;
+      this.#recordResult(current);
+      return current;
     }, (error: unknown) => {
       this.#recordFailure(request.accountId, recoveryFailureCode(recoveryReason(error)));
       throw error;
@@ -200,6 +209,9 @@ export class AutomaticSourceRecovery {
       const delivered = this.#options.controlPlane.requestLobbySnapshot(softLobby(current, source));
       if (delivered > 0) {
         const confirmation = await this.#confirm(request, "SOFT");
+        if (!this.#disposed && !this.#suppressed(request.accountId) && this.#readable(request.accountId)) {
+          return recovered(request.accountId, "SOFT");
+        }
         if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
           return confirmation;
         }
@@ -227,6 +239,7 @@ export class AutomaticSourceRecovery {
     if (this.#disposed) return stopped(request.accountId, "HARD");
     if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
     try {
+      this.#requireRecovery(request.accountId);
       const current = this.#options.feedRegistry.snapshot(request.accountId);
       const actionStartedAtMs = this.#now();
       if (source.provider === "SBOBET") {
@@ -241,6 +254,7 @@ export class AutomaticSourceRecovery {
             return confirmation;
           }
           const retryStartedAtMs = this.#now();
+          this.#requireRecovery(request.accountId);
           if (hasRecentSbobetTab(this.#options.feedRegistry.snapshot(request.accountId),
             retryStartedAtMs)) {
             if (this.#options.controlPlane.requestLobbySnapshot(source.hardLobby) > 0) {
@@ -260,6 +274,7 @@ export class AutomaticSourceRecovery {
         if (reloadAllowed && prior.sourceId !== null &&
           this.#options.controlPlane.reloadSource !== undefined &&
           matchesRecoverySource(prior.sourceId, request.accountId, source.hardLobby)) {
+          this.#requireRecovery(request.accountId);
           try {
             delivered = this.#options.controlPlane.reloadSource(prior.sourceId);
             if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
@@ -267,6 +282,7 @@ export class AutomaticSourceRecovery {
         }
         if (source.provider !== "SBOBET" && reloadAllowed && delivered <= 0 &&
           this.#options.controlPlane.reloadRecoverySource !== undefined) {
+          this.#requireRecovery(request.accountId);
           try {
             delivered = this.#options.controlPlane.reloadRecoverySource(request.accountId, source.hardLobby);
             if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
@@ -293,6 +309,7 @@ export class AutomaticSourceRecovery {
           }
           return this.#confirmAfter(request.accountId, "HARD", snapshotStartedAtMs);
         }
+        this.#requireRecovery(request.accountId);
         const delivered = this.#options.controlPlane.restoreLobby("CMD");
         if (delivered <= 0) return noSource(request.accountId, "HARD");
         this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
@@ -319,6 +336,7 @@ export class AutomaticSourceRecovery {
           return { accountId: request.accountId, stage: "HARD", outcome: "ACTION_REQUIRED", reason: "RECOVERY_BACKOFF" };
         }
         let delivered = 0;
+        this.#requireRecovery(request.accountId);
         try { delivered = this.#options.controlPlane.restoreLobby("IM"); }
         catch { /* an unavailable extension is an undelivered source action */ }
         if (delivered <= 0) return noSource(request.accountId, "HARD");
@@ -330,6 +348,7 @@ export class AutomaticSourceRecovery {
         const lastRestoreAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
         if (restoreStartedAtMs - lastRestoreAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS) {
           let restored = 0;
+          this.#requireRecovery(request.accountId);
           try { restored = this.#options.controlPlane.restoreLobby("BTI"); }
           catch { /* an unavailable direct source falls through to the actionable state */ }
           if (restored > 0) {
@@ -370,6 +389,7 @@ export class AutomaticSourceRecovery {
         const lastRestoreAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
         if (restoreStartedAtMs - lastRestoreAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS) {
           let restored = 0;
+          this.#requireRecovery(request.accountId);
           try { restored = this.#options.controlPlane.restoreLobby("SABA"); }
           catch { /* an unavailable visible portal falls through to the stable actionable state */ }
           if (restored > 0) {
@@ -406,13 +426,25 @@ export class AutomaticSourceRecovery {
             reason: "BROWSER_REFRESH_DISABLED" };
       }
       const recoveryStartedAtMs = this.#now();
+      this.#requireRecovery(request.accountId);
       const refresh = await this.#whileActive(this.#options.refreshFabetLaunches(this.#abortController.signal));
       if (refresh === DISPOSED) return stopped(request.accountId, "HARD");
       if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+      this.#requireRecovery(request.accountId);
       let targetedDelivery: number | typeof DISPOSED;
       try {
         targetedDelivery = await this.#whileActive(refreshBridgeProviderSources({
-            controlPlane: this.#options.controlPlane,
+            controlPlane: {
+              // beforeDelivery itself is awaited by the launch helper. Fence
+              // the final synchronous mutation too, after that last yield.
+              ensureLobby: (lobby, url) => {
+                if (this.#disposed) throw new Error("RECOVERY_DISPOSED");
+                if (this.#suppressed(request.accountId)) throw new Error("RECOVERY_SUPPRESSED");
+                this.#requireRecovery(request.accountId);
+                return this.#options.controlPlane.ensureLobby(lobby, url);
+              },
+              restoreLobby: (lobby) => this.#options.controlPlane.restoreLobby(lobby)
+            },
             withLatestFabetLaunch: this.#options.withLatestFabetLaunch,
             minAcquiredAtMs: recoveryStartedAtMs,
             signal: this.#abortController.signal,
@@ -421,6 +453,7 @@ export class AutomaticSourceRecovery {
             beforeDelivery: () => {
               if (this.#disposed) throw new Error("RECOVERY_DISPOSED");
               if (this.#suppressed(request.accountId)) throw new Error("RECOVERY_SUPPRESSED");
+              this.#requireRecovery(request.accountId);
               confirmationAfterMs = this.#now();
               // Launch-token discovery can take long enough for the existing
               // authenticated KSPORT tab to attach in the meantime. Recheck at
@@ -446,6 +479,7 @@ export class AutomaticSourceRecovery {
       return this.#confirmAfter(request.accountId, "HARD", confirmationAfterMs);
     } catch (error) {
       if (this.#disposed) return stopped(request.accountId, "HARD");
+      if (error === RECOVERY_ALREADY_LIVE) return recovered(request.accountId, "HARD");
       return this.#failure(request.accountId, "HARD", error);
     }
   }
@@ -524,6 +558,19 @@ export class AutomaticSourceRecovery {
 
   #suppressed(accountId: string): boolean {
     return this.#options.isRecoverySuppressed?.(accountId) === true;
+  }
+
+  #readable(accountId: string): boolean {
+    try {
+      const catalog = this.#options.feedRegistry.read(accountId);
+      return catalog.accountId === accountId;
+    } catch { return false; }
+  }
+
+  #requireRecovery(accountId: string): void {
+    // read() revalidates authority, cadence, semantic silence and baseline
+    // expiry. A cached LIVE snapshot cannot stop a necessary recovery.
+    if (this.#readable(accountId)) throw RECOVERY_ALREADY_LIVE;
   }
 
   #whileActive<T>(operation: Promise<T>): Promise<T | typeof DISPOSED> {
@@ -614,4 +661,8 @@ function suppressed(accountId: string, stage: RecoveryStage): RecoveryResult {
 
 function noSource(accountId: string, stage: RecoveryStage): RecoveryResult {
   return { accountId, stage, outcome: "NO_SOURCE", reason: "SOURCE_MISSING" };
+}
+
+function recovered(accountId: string, stage: RecoveryStage): RecoveryResult {
+  return { accountId, stage, outcome: "RECOVERED", reason: null };
 }

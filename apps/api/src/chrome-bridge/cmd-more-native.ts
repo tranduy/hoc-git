@@ -35,6 +35,7 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
   receipt: { readonly observedAtMs: number; readonly receivedMonotonicMs: number; readonly sequence: number }): NormalizedCatalogPart {
   const options = { ...receipt, timezoneOffsetMinutes: 480 };
   const identity = normalizeObservedFootballCatalog("CMD", [{ ...owner, groups: [] }], options);
+  const unsupportedPeriod = identity.events.length === 1 && identity.events[0]!.eventScope !== "REGULATION";
   const markets: NormalizedCatalogPart["markets"][number][] = [];
   const quotes: NormalizedCatalogPart["quotes"][number][] = [];
   const observations: NativeMarketObservation[] = [];
@@ -47,9 +48,29 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
         }
         return;
       }
+      if (path === "1" || period === "FT" && path === "2") {
+        // Saved More renderer: FT/FH[1] uses HOME/DRAW/AWAY via One/Home,
+        // X/Home, Two/Away; FT[2] uses OneX/Home, OneTwo/Home, XTwo/Away.
+        // Both call GetX12OddsFormat (decimal) and GetExtraParams's individual
+        // valid-price click gate. This does not prove main-row DC's format.
+        const doubleChance = path === "2";
+        const outcomes = doubleChance ? dcOutcomes : resultOutcomes;
+        const marketId = `${native.eventId}:more:${period}:${doubleChance ? "DoubleChance" : "1X2"}`;
+        const valid = row.length === 3 && !(doubleChance && nativeDcRowClosed(row)) ? row.flatMap((price, index) => typeof price === "number" && Number.isFinite(price) && price > 1
+          ? [{ price, index }] : []) : [];
+        const part = normalizeObservedFootballCatalog("CMD", [{ ...owner, groups: [{ betTypeIds: [doubleChance ? "DOUBLE_CHANCE" : period === "FT" ? "5" : "FH:5"],
+          labels: valid.map(({ index }) => outcomes[index]!), odds: valid.map(({ price, index }) => ({
+            marketOddsId: marketId, selectionId: resultSelectionId(native.eventId, period, doubleChance, index),
+            priceText: String(price), priceFormat: "DECIMAL", status: "OPEN", greyedOut: "false"
+          })) }] }], options);
+        markets.push(...part.markets); quotes.push(...part.quotes);
+        observe(row, path, part.markets.length > 0 ? "NORMALIZED" : "EXCLUDED",
+          part.markets.length > 0 ? "CANONICAL_MARKET_MAPPED" : row.length !== 3 ? "INVALID_RESULT_SHAPE"
+            : valid.length === 0 ? "NATIVE_MARKET_CLOSED" : "EVENT_NOT_COMPARABLE", marketId);
+        return;
+      }
       if (path !== "0") {
-        observe(row, path, path === "1" ? "EXCLUDED" : "UNMAPPED",
-          path === "1" ? "THREE_WAY_OUTCOME_DOMAIN" : "NATIVE_TYPE_UNMAPPED");
+        observe(row, path, "UNMAPPED", "NATIVE_TYPE_UNMAPPED");
         return;
       }
       // Actual MY/A account conversion and the public Odd/Even renderer are
@@ -80,16 +101,41 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
     };
     const observe = (row: readonly unknown[], path: string, disposition: NativeMarketObservation["disposition"],
       reason: string, marketId = `${native.eventId}:more:${period}:${path}`): void => {
+      const result = path === "1" || period === "FT" && path === "2";
+      const outcomes = path === "2" ? dcOutcomes : resultOutcomes;
+      const wholeRowClosed = period === "FT" && path === "2" && nativeDcRowClosed(row);
       observations.push({ provider: "CMD", category: "FOOTBALL", providerEventId: native.eventId,
+        ...(wholeRowClosed ? { status: "CLOSED" as const } : {}),
         providerMarketId: marketId, nativeType: `MORE:${period}:${path}`, nativeScope: period === "FT" ? "FULL_TIME" : "FIRST_HALF",
         nativeLabel: JSON.stringify(row).slice(0, 512), outcomeLabels: row.map((_, i) =>
-          path === "0" ? ["ODD", "EVEN"][i] ?? `OUTCOME_${i + 1}` : `OUTCOME_${i + 1}`),
-        observedAtMs: receipt.observedAtMs, disposition: identity.events.length === 0 ? "EXCLUDED" : disposition,
-        reason: identity.events.length === 0 ? "EVENT_NOT_COMPARABLE" : reason });
+          path === "0" ? ["ODD", "EVEN"][i] ?? `OUTCOME_${i + 1}`
+            : result && row.length === 3 ? outcomes[i]! : `OUTCOME_${i + 1}`),
+        ...(result ? { nativeSelections: row.map((price, index) => ({
+          selectionId: row.length === 3 ? resultSelectionId(native.eventId, period, path === "2", index) : null,
+          outcomeId: null, line: null, price: typeof price === "number" ? String(price) : null, rawFormat: "DECIMAL" as const,
+          ...(row.length !== 3 ? {} : wholeRowClosed ? { status: "CLOSED" as const }
+            : typeof price === "number" && price > 1 ? { status: "OPEN" as const }
+            : price === -999 || price === 0 || typeof price === "number" && price > 0 && price < 1 ? { status: "CLOSED" as const } : {})
+        })) } : {}),
+        observedAtMs: receipt.observedAtMs, disposition: identity.events.length === 0 || unsupportedPeriod ? "EXCLUDED" : disposition,
+        reason: identity.events.length === 0 ? "EVENT_NOT_COMPARABLE"
+          : unsupportedPeriod ? "EVENT_PERIOD_SETTLEMENT_UNSUPPORTED" : reason });
     };
     for (const [index, row] of groups.entries()) visit(row, String(index));
   }
   return { ...identity, markets, quotes, nativeMarketObservations: observations };
+}
+
+const dcOutcomes = ["HOME_DRAW", "HOME_AWAY", "DRAW_AWAY"] as const;
+const resultOutcomes = ["HOME", "DRAW", "AWAY"] as const;
+function nativeDcRowClosed(row: readonly unknown[]): boolean {
+  // onExtraBetTableLoaded's non-parlay Bi2(..., 0) clears the whole DC row.
+  return row.some(price => typeof price === "number" && price > 0 && price < 1);
+}
+function resultSelectionId(eventId: string, period: "FT" | "FH", doubleChance: boolean, index: number): string {
+  const nativeEventId = period === "FT" ? eventId : `1${eventId.padStart(11, "0")}`;
+  const selection = (doubleChance ? ["OneX:Home", "OneTwo:Home", "XTwo:Away"] : ["One:Home", "X:Home", "Two:Away"])[index];
+  return `${nativeEventId}:${selection}:0:${period === "FT" ? 0 : 1}`;
 }
 
 /** Public OddsUtil's MY/A, non-parlay path: commission A adds zero for

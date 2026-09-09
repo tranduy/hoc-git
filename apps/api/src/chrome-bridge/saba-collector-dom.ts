@@ -43,6 +43,7 @@ const recordSchema = z.strictObject({
   leagueName: text(160),
   matchId: text(128),
   timeText: z.string().trim().max(80),
+  providerTimezoneOffsetMinutes: z.number().int().min(-840).max(840).nullable().optional(),
   teamNames: z.array(text(160)).min(2).max(4),
   groups: z.array(groupSchema).max(128)
 });
@@ -103,11 +104,17 @@ export const SabaCollectorTerminalItemSchema = z.strictObject({
   unresolvedOwners: z.array(ownerReferenceSchema),
   failedOwners: z.array(ownerReferenceSchema)
 });
+export const SabaMainRosterTerminalItemSchema = SabaCollectorTerminalItemSchema
+  .omit({ unresolvedOwners: true, failedOwners: true }).extend({
+    kind: z.literal("MAIN_ROSTER_TERMINAL"),
+    hiddenMarketsComplete: z.literal(false)
+  });
 export const SabaCollectorDomItemSchema = z.discriminatedUnion("kind", [
   SabaCollectorCaptureItemSchema,
   SabaCollectorOwnerCompleteItemSchema,
   SabaCollectorPeriodCompleteItemSchema,
-  SabaCollectorTerminalItemSchema
+  SabaCollectorTerminalItemSchema,
+  SabaMainRosterTerminalItemSchema
 ]);
 
 export type SabaCollectorPeriod = z.infer<typeof periodSchema>;
@@ -118,20 +125,32 @@ export type SabaCollectorCaptureItem = z.infer<typeof SabaCollectorCaptureItemSc
 export type SabaCollectorOwnerCompleteItem = z.infer<typeof SabaCollectorOwnerCompleteItemSchema>;
 export type SabaCollectorPeriodCompleteItem = z.infer<typeof SabaCollectorPeriodCompleteItemSchema>;
 export type SabaCollectorTerminalItem = z.infer<typeof SabaCollectorTerminalItemSchema>;
+export type SabaMainRosterTerminalItem = z.infer<typeof SabaMainRosterTerminalItemSchema>;
 export type SabaCollectorDomItem = SabaCollectorCaptureItem | SabaCollectorOwnerCompleteItem |
-  SabaCollectorPeriodCompleteItem | SabaCollectorTerminalItem;
+  SabaCollectorPeriodCompleteItem | SabaCollectorTerminalItem | SabaMainRosterTerminalItem;
 
-export interface ValidatedSabaCollectorCandidate {
+interface ValidatedSabaCollectorBinding {
   readonly sourceId: string;
   readonly sourceEpoch: string;
   readonly collectorGeneration: string;
   readonly sweepFrameKey: string;
   readonly sweepDocumentKey: string;
   readonly captures: readonly SabaCollectorCaptureItem[];
+}
+
+export type ValidatedSabaCollectorCandidate = ValidatedSabaCollectorBinding & ({
+  readonly coverage: "HIDDEN_COMPLETE";
+  readonly hiddenMarketsComplete: true;
   readonly owners: readonly SabaCollectorOwnerCompleteItem[];
   readonly periods: readonly SabaCollectorPeriodCompleteItem[];
   readonly terminal: SabaCollectorTerminalItem;
-}
+} | {
+  readonly coverage: "MAIN_ROSTER";
+  readonly hiddenMarketsComplete: false;
+  readonly owners: readonly [];
+  readonly periods: readonly z.infer<typeof periodManifestSchema>[];
+  readonly terminal: SabaMainRosterTerminalItem;
+});
 
 export interface SabaCollectorChunkInput {
   readonly sourceId: string;
@@ -177,7 +196,8 @@ function validateCandidate(items: readonly unknown[], binding: {
     readonly value: SabaCollectorOwnerCompleteItem }>();
   const periods = new Map<SabaCollectorPeriod, { readonly fingerprint: string;
     readonly value: SabaCollectorPeriodCompleteItem }>();
-  let terminalEntry: { readonly fingerprint: string; readonly value: SabaCollectorTerminalItem } | undefined;
+  let terminalEntry: { readonly fingerprint: string;
+    readonly value: SabaCollectorTerminalItem | SabaMainRosterTerminalItem } | undefined;
   let priorCaptureOrdinal = -1;
   let priorCaptureMonotonicMs = -1;
 
@@ -216,6 +236,22 @@ function validateCandidate(items: readonly unknown[], binding: {
   const today = periods.get("TODAY")?.value;
   const early = periods.get("EARLY")?.value;
   const terminal = terminalEntry?.value;
+  if (terminal?.kind === "MAIN_ROSTER_TERMINAL") {
+    if (owners.size !== 0 || periods.size !== 0 || terminal.todayRestoration.selected !== true ||
+      !terminal.periods.every(validCountedRoster) || !validCountedRoster(terminal.todayRestoration) ||
+      !sameStringSet(terminal.todayRestoration.rosterMatchIds, terminal.periods[0].rosterMatchIds)) return null;
+    const rosterKeys = terminal.periods.flatMap((period) =>
+      period.rosterMatchIds.map((matchId) => ownerKey(period.period, matchId)));
+    const manifestKeys = terminal.owners.map((owner) => ownerKey(owner.period, owner.ownerMatchId));
+    const mainCaptures = [...captures.values()].map((entry) => entry.value);
+    if (mainCaptures.some((capture) => capture.captureKind !== "ROSTER" ||
+      capture.record.providerTimezoneOffsetMinutes === null ||
+      capture.record.providerTimezoneOffsetMinutes === undefined) ||
+      !sameStringSet(manifestKeys, rosterKeys) ||
+      !sameStringSet(mainCaptures.map((capture) => ownerKey(capture.period, capture.ownerMatchId)), rosterKeys)) return null;
+    return { ...binding, coverage: "MAIN_ROSTER", hiddenMarketsComplete: false,
+      captures: mainCaptures, owners: [], periods: terminal.periods, terminal };
+  }
   if (!today || !early || !terminal || terminal.todayRestoration.selected !== true ||
     terminal.unresolvedOwners.length !== 0 || terminal.failedOwners.length !== 0) return null;
   if (!validCountedRoster(terminal.periods[0]) || !validCountedRoster(terminal.periods[1]) ||
@@ -250,6 +286,7 @@ function validateCandidate(items: readonly unknown[], binding: {
 
   return {
     ...binding,
+    coverage: "HIDDEN_COMPLETE", hiddenMarketsComplete: true,
     captures: [...captures.values()].map((entry) => entry.value),
     owners: [...owners.values()].map((entry) => entry.value),
     periods: [today, early],

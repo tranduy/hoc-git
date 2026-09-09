@@ -7,10 +7,13 @@ import { build } from "esbuild";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = resolve(root, "dist");
 const repositoryRoot = resolve(root, "../..");
-const cmdSnapshotSource = await readFile(resolve(root, "src/cmd-dom-snapshot.ts"), "utf8");
-const cmdExpressionMatch = /export const CMD_PUBLIC_CATALOG_EXPRESSION = `([\s\S]*?)`;\s*$/u.exec(cmdSnapshotSource);
-if (!cmdExpressionMatch) throw new Error("CMD capture expression not found");
-const cmdExpression = Function(`"use strict"; return \`${cmdExpressionMatch[1]}\`;`)();
+// Resolve shared expression constants through the module itself. Extracting
+// just one template literal loses its timezone helper binding.
+const captureModule = await build({ entryPoints: [resolve(root, "src/cmd-dom-snapshot.ts")],
+  bundle: true, write: false, format: "esm", platform: "node" });
+const { CMD_PUBLIC_CATALOG_EXPRESSION: cmdExpression } = await import(
+  `data:text/javascript;base64,${Buffer.from(captureModule.outputFiles[0].text).toString("base64")}`);
+if (typeof cmdExpression !== "string") throw new Error("CMD capture expression not found");
 let installationKey = "";
 try {
   installationKey = (await readFile(resolve(repositoryRoot, ".auth/chrome-bridge.key"), "utf8")).trim();

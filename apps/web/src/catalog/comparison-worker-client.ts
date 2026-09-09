@@ -1,6 +1,8 @@
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import type { ComparisonEvent } from "./comparison.js";
-import type { ComparisonProjection, ComparisonWorkerCommand, ComparisonWorkerOutput } from "./comparison-worker-protocol.js";
+import { binaryOpposingCellPairs, comparisonOutcomeDomain, observedTicketAsComparisonRow,
+  resultOppositionCellPairs, type ComparisonCell, type ComparisonEvent } from "./comparison.js";
+import type { ComparisonProjection, ComparisonWorkerCommand, ComparisonWorkerDelta,
+  ComparisonWorkerOutput } from "./comparison-worker-protocol.js";
 import { ComparisonWorkerEngine } from "./comparison-worker-engine.js";
 
 export interface WorkerLike {
@@ -12,6 +14,8 @@ export interface WorkerLike {
 
 export interface HydratedComparisonWorkerOutput {
   readonly generation: number;
+  /** Intermediate projections are observations only; they must not start preflight. */
+  readonly isLatest?: boolean;
   readonly displayEvents: readonly ComparisonEvent[];
   readonly freshEvents: readonly ComparisonEvent[];
 }
@@ -45,11 +49,143 @@ function hydrate(projection: ComparisonProjection,
   }) };
 }
 
+function comparisonCatalog(catalog: LiveCatalogResponse): LiveCatalogResponse {
+  // The comparison engine reads normalized events, markets and quotes only.
+  // Native inventory accounting belongs to the provider summary on the UI.
+  const { nativeMarketObservations: _nativeMarketObservations,
+    nativeCoverageByEvent: _nativeCoverageByEvent, ...comparison } = catalog;
+  return comparison;
+}
+
 function isOutput(value: unknown): value is ComparisonWorkerOutput {
   if (typeof value !== "object" || value === null) return false;
   const output = value as Partial<ComparisonWorkerOutput>;
   return Number.isSafeInteger(output.generation) && (output.generation ?? -1) >= 0 &&
     Array.isArray(output.displayEvents) && Array.isArray(output.freshEvents);
+}
+
+type NativeMarket = LiveCatalogResponse["markets"][number];
+type NativeQuote = LiveCatalogResponse["quotes"][number];
+const marketIdentity = (market: NativeMarket | NativeQuote): string => JSON.stringify([
+  market.provider, market.providerEventId, market.providerMarketId
+]);
+
+function quoteTerms(quote: NativeQuote, projected = false): string {
+  const { sequence: _sequence, receivedMonotonicMs: _receipt, sourceTimestampMs: _timestamp,
+    isLive, ...terms } = quote;
+  return JSON.stringify(projected ? terms : { ...terms, isLive });
+}
+
+function matchingRoster(catalog: LiveCatalogResponse): string {
+  const families = new Map<string, Set<string>>();
+  for (const market of catalog.markets) {
+    const types = families.get(market.providerEventId) ?? new Set<string>();
+    types.add(`${market.marketType}:${market.scope}`);
+    families.set(market.providerEventId, types);
+  }
+  const quotedEvents = new Set(catalog.quotes.map(quote => quote.providerEventId));
+  return JSON.stringify([catalog.provider, catalog.category, catalog.events.map(event => {
+    // Running clock ticks do not affect fixture identity. Scores and periods do.
+    const liveState = Object.fromEntries(Object.entries(event.liveState ?? {}).filter(([key]) => key !== "clockMs"));
+    return [{ ...event, liveState: event.liveState === null ? null : liveState },
+      [...(families.get(event.providerEventId) ?? [])].sort(), quotedEvents.has(event.providerEventId)];
+  })]);
+}
+
+function nativeOffers(catalog: LiveCatalogResponse): Map<string, { market: NativeMarket; quotes: NativeQuote[] } | null> {
+  const offers = new Map<string, { market: NativeMarket; quotes: NativeQuote[] } | null>();
+  for (const market of catalog.markets) {
+    const key = marketIdentity(market);
+    offers.set(key, offers.has(key) ? null : { market, quotes: [] });
+  }
+  for (const quote of catalog.quotes) offers.get(marketIdentity(quote))?.quotes.push(quote);
+  return offers;
+}
+
+/** Keep admitted fixture relations and price terms, binding only the exact
+ * current native offer's receipt fields after all existing guards pass. */
+function intermediateValidator(previous: ReadonlyMap<string, LiveCatalogResponse>,
+  current: ReadonlyMap<string, LiveCatalogResponse>, stale: ReadonlySet<string>): ((cell: ComparisonCell) => ComparisonCell | null) | null {
+  if (previous.size !== current.size) return null;
+  const clock = (catalogs: ReadonlyMap<string, LiveCatalogResponse>, freshOnly: boolean): number =>
+    [...catalogs.values()].reduce((latest, catalog) => freshOnly && stale.has(catalog.accountId)
+      ? latest : Math.max(latest, catalog.observedAtMs), 0);
+  const clocks = [false, true].map(freshOnly => [clock(previous, freshOnly), clock(current, freshOnly)] as const);
+  const unchanged = new Map<string, { before: { market: NativeMarket; quotes: NativeQuote[] };
+    current: ReadonlyMap<string, NativeQuote> } | null>();
+  for (const [accountId, before] of previous) {
+    const after = current.get(accountId);
+    if (after === undefined || (after.snapshotState === "STALE" && before.snapshotState !== "STALE") ||
+        after.observedAtMs < before.observedAtMs ||
+        (before !== after && matchingRoster(before) !== matchingRoster(after))) return null;
+    // withScheduledPhase uses this five-minute boundary in both display and
+    // fresh-only projections. A clock-only update can invalidate that evidence.
+    if (before.events.some(event => event.category === "FOOTBALL" && !event.isLive && clocks.some(([oldClock, newClock]) =>
+      (event.startAtUtcMs > oldClock + 300_000) !== (event.startAtUtcMs > newClock + 300_000)))) return null;
+    const oldOffers = nativeOffers(before), newOffers = nativeOffers(after);
+    for (const [key, oldOffer] of oldOffers) {
+      const newOffer = newOffers.get(key);
+      let valid = oldOffer != null && newOffer != null &&
+        JSON.stringify(oldOffer.market) === JSON.stringify(newOffer.market) &&
+        oldOffer.quotes.length === newOffer.quotes.length && newOffer.quotes.length > 0 &&
+        new Set(newOffer.quotes.map(quote => quote.sequence)).size === 1 &&
+        newOffer.quotes.every(quote => quote.sequence !== null);
+      if (valid && oldOffer != null && newOffer != null) {
+        const bySelection = new Map(newOffer.quotes.map(quote => [quote.providerSelectionId, quote]));
+        valid = bySelection.size === newOffer.quotes.length &&
+          new Set(oldOffer.quotes.map(quote => quote.providerSelectionId)).size === oldOffer.quotes.length &&
+          oldOffer.quotes.every(quote => {
+            const next = bySelection.get(quote.providerSelectionId);
+            return next !== undefined && quoteTerms(quote) === quoteTerms(next) &&
+              next.receivedMonotonicMs >= quote.receivedMonotonicMs &&
+              next.sequence !== null && quote.sequence !== null && next.sequence >= quote.sequence &&
+              (quote.sourceTimestampMs === null || (next.sourceTimestampMs !== null && next.sourceTimestampMs >= quote.sourceTimestampMs));
+          });
+      }
+      unchanged.set(key, unchanged.has(key) || !valid ? null : { before: oldOffer!,
+        current: new Map(newOffer!.quotes.map(quote => [quote.providerSelectionId, quote])) });
+    }
+  }
+  return cell => {
+    const market = cell.sourceMarket ?? cell.market;
+    const offer = unchanged.get(marketIdentity(market));
+    if (offer == null || JSON.stringify(market) !== JSON.stringify(offer.before.market)) return null;
+    // Display fallback can refer to an older native quote even in this worker
+    // snapshot. Validate each original selection, never oriented synthetic IDs.
+    if (!(cell.sourceQuotes ?? cell.quotes).every(quote => offer.before.quotes.some(original =>
+      original.providerSelectionId === quote.providerSelectionId && quoteTerms(original, true) === quoteTerms(quote, true) &&
+      original.sequence === quote.sequence && original.receivedMonotonicMs === quote.receivedMonotonicMs &&
+      original.sourceTimestampMs === quote.sourceTimestampMs))) return null;
+    if (cell.quotes.some(quote => marketIdentity(quote) !== marketIdentity(market) ||
+      !offer.current.has(quote.providerSelectionId))) return null;
+    // Preserve oriented HOME/AWAY, handicap signs and every displayed term.
+    // Native selection IDs are unique only inside this validated native market.
+    const bindReceipt = (quote: NativeQuote): NativeQuote => {
+      const current = offer.current.get(quote.providerSelectionId)!;
+      return { ...quote, sequence: current.sequence, receivedMonotonicMs: current.receivedMonotonicMs,
+        sourceTimestampMs: current.sourceTimestampMs };
+    };
+    return { ...cell, quotes: cell.quotes.map(bindReceipt),
+      ...(cell.sourceQuotes === undefined ? {} : { sourceQuotes: cell.sourceQuotes.map(bindReceipt) }) };
+  };
+}
+
+function validatedProjection(event: ComparisonEvent, bind: (cell: ComparisonCell) => ComparisonCell | null): ComparisonEvent {
+  const rows = event.rows.flatMap(row => {
+    const cells = row.cells.flatMap(cell => { const current = bind(cell); return current === null ? [] : [current]; });
+    if (cells.length === row.cells.length) return [{ ...row, cells }];
+    const candidate = { ...row, cells };
+    const pairs = row.opposition === undefined ? binaryOpposingCellPairs(cells) : resultOppositionCellPairs(candidate);
+    return pairs.length === 0 ? [] : [observedTicketAsComparisonRow({ ...candidate,
+      settlementProfile: cells[0]!.market.settlementProfile,
+      outcomeDomain: comparisonOutcomeDomain(candidate) ?? [] })];
+  });
+  const observedRows = event.observedRows.flatMap(row => {
+    const cells = row.cells.flatMap(cell => { const current = bind(cell); return current === null ? [] : [current]; });
+    return cells.length === 0 ? [] : [{ ...row, cells }];
+  });
+  return { ...event, rows, observedRows,
+    bestMargin: rows.reduce<number | null>((best, row) => row.margin === null ? best : Math.max(best ?? -Infinity, row.margin), null) };
 }
 
 const COMPETITION_LINKS_KEY = "comparisonCompetitionLinksV1";
@@ -84,7 +220,10 @@ export class ComparisonWorkerClient {
   #worker: WorkerLike;
   #generation = 0;
   #inFlightGeneration: number | null = null;
+  #inFlightCatalogs: ReadonlyMap<string, LiveCatalogResponse> | null = null;
+  #inFlightInvalidated = false;
   #pendingReset = false;
+  readonly #pendingChanges = new Map<string, readonly ComparisonWorkerDelta[]>();
   #restartCount = 0;
   #stopped = false;
 
@@ -114,6 +253,7 @@ export class ComparisonWorkerClient {
   }
 
   upsert(catalog: LiveCatalogResponse, stale: boolean): number {
+    if (this.#inFlightGeneration !== null && this.#stale.has(catalog.accountId)) this.#inFlightInvalidated = true;
     this.#catalogs.set(catalog.accountId, catalog);
     if (stale) this.#stale.add(catalog.accountId); else this.#stale.delete(catalog.accountId);
     return this.#enqueue({ type: "UPSERT", generation: ++this.#generation, catalog, stale });
@@ -133,6 +273,8 @@ export class ComparisonWorkerClient {
   stop(): void {
     if (this.#stopped) return;
     this.#stopped = true;
+    this.#inFlightCatalogs = null;
+    this.#pendingChanges.clear();
     this.#worker.terminate();
   }
 
@@ -144,10 +286,33 @@ export class ComparisonWorkerClient {
     catch { /* quota or a blocked store; the next session simply starts over */ }
   }
 
-  #enqueue(command: ComparisonWorkerCommand): number {
+  #enqueue(command: Exclude<ComparisonWorkerCommand, { type: "BATCH_DELTA" }>): number {
     if (this.#stopped) return command.generation;
     if (this.#inFlightGeneration !== null) {
-      this.#pendingReset = true;
+      if (command.type === "RESET" || command.type === "REMOVE" ||
+          command.type === "SET_STALE" ||
+          (command.type === "UPSERT" && (command.stale || command.catalog.snapshotState === "STALE"))) {
+        this.#inFlightInvalidated = true;
+      }
+      if (command.type === "RESET") {
+        this.#pendingReset = true;
+        this.#pendingChanges.clear();
+      } else if (!this.#pendingReset) {
+        const { generation: _generation, ...delta } = command;
+        const accountId = delta.type === "UPSERT" ? delta.catalog.accountId : delta.accountId;
+        const previous = this.#pendingChanges.get(accountId) ?? [];
+        const latest = previous.at(-1);
+        if (delta.type === "SET_STALE" && latest?.type === "UPSERT") {
+          this.#pendingChanges.set(accountId, [...previous.slice(0, -1), { ...latest, stale: delta.stale }]);
+        } else if (delta.type === "SET_STALE" && latest?.type === "REMOVE") {
+          // A freshness update cannot bring a removed account back.
+        } else {
+          // Preserve removal before re-addition so old display fallback cannot
+          // survive a source being deselected and selected again.
+          this.#pendingChanges.set(accountId, delta.type === "UPSERT" && previous[0]?.type === "REMOVE"
+            ? [previous[0], delta] : [delta]);
+        }
+      }
       return command.generation;
     }
     this.#send(command);
@@ -156,30 +321,55 @@ export class ComparisonWorkerClient {
 
   #send(command: ComparisonWorkerCommand): void {
     this.#inFlightGeneration = command.generation;
-    this.#worker.postMessage(command);
+    this.#inFlightCatalogs = new Map(this.#catalogs);
+    this.#inFlightInvalidated = false;
+    this.#worker.postMessage(command.type === "RESET"
+      ? { ...command, catalogs: command.catalogs.map(comparisonCatalog) }
+      : command.type === "BATCH_DELTA" ? { ...command, changes: command.changes.map((delta) =>
+        delta.type === "UPSERT" ? { ...delta, catalog: comparisonCatalog(delta.catalog) } : delta) }
+      : command.type === "UPSERT" ? { ...command, catalog: comparisonCatalog(command.catalog) } : command);
   }
 
   #spawn(): WorkerLike {
     const worker = this.#createWorker();
     worker.onmessage = (event) => {
-      if (this.#stopped || !isOutput(event.data) || event.data.generation !== this.#inFlightGeneration) return;
-      this.#inFlightGeneration = null;
+      if (this.#stopped || worker !== this.#worker || !isOutput(event.data) || event.data.generation !== this.#inFlightGeneration) return;
+      const snapshots = this.#inFlightCatalogs!;
+      const isLatest = event.data.generation === this.#generation;
       if (Array.isArray(event.data.competitionLinks)) this.#storeLinks(event.data.competitionLinks);
-      if (event.data.generation === this.#generation) {
-        this.#onResult({ generation: event.data.generation,
-          displayEvents: event.data.displayEvents.map((item) => hydrate(item, this.#catalogs)),
-          freshEvents: event.data.freshEvents.map((item) => hydrate(item, this.#catalogs)) });
+      const validate = isLatest || this.#inFlightInvalidated ? null : intermediateValidator(snapshots, this.#catalogs, this.#stale);
+      if (isLatest || validate !== null) {
+        const project = (item: ComparisonProjection): ComparisonEvent => {
+          const hydrated = hydrate(item, validate === null ? snapshots : this.#catalogs);
+          return validate === null ? hydrated : validatedProjection(hydrated, validate);
+        };
+        this.#onResult({ generation: event.data.generation, isLatest,
+          displayEvents: event.data.displayEvents.map(project),
+          freshEvents: event.data.freshEvents.map(project) });
       }
+      this.#inFlightGeneration = null;
+      this.#inFlightCatalogs = null;
+      if (this.#stopped) return;
       if (this.#pendingReset) {
         this.#pendingReset = false;
+        this.#pendingChanges.clear();
         this.#send({ type: "RESET", generation: this.#generation,
           catalogs: [...this.#catalogs.values()], staleAccountIds: [...this.#stale],
           competitionLinks: this.#links });
+      } else if (this.#pendingChanges.size > 0) {
+        const changes = [...this.#pendingChanges.values()].flat();
+        this.#pendingChanges.clear();
+        this.#send({ type: "BATCH_DELTA", generation: this.#generation, changes });
       }
     };
     worker.onerror = () => {
-      if (this.#stopped) return;
+      if (this.#stopped || worker !== this.#worker) return;
+      this.#inFlightCatalogs = null;
       if (this.#restartCount >= 1) {
+        this.#inFlightGeneration = null;
+        this.#pendingReset = false;
+        this.#pendingChanges.clear();
+        this.stop();
         this.#onError("COMPARISON_WORKER_FAILED");
         return;
       }
@@ -187,6 +377,7 @@ export class ComparisonWorkerClient {
       worker.terminate();
       this.#inFlightGeneration = null;
       this.#pendingReset = false;
+      this.#pendingChanges.clear();
       this.#worker = this.#spawn();
       this.#send({ type: "RESET", generation: ++this.#generation,
         catalogs: [...this.#catalogs.values()], staleAccountIds: [...this.#stale],

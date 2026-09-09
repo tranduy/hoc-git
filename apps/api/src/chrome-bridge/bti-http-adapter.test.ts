@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as btiCatalog from "../providers/bti/bti-direct-catalog.js";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { BtiHttpCatalogAdapter } from "./bti-http-adapter.js";
@@ -129,6 +130,32 @@ describe("BtiHttpCatalogAdapter", () => {
     committedCatalog(adapter);
     adapter.decode(cachedDetail(detailPayload(), now + 200, now + 150));
     expect(adapter.decode(cachedDetail(detailPayload(), now + 300, now + 100))).toEqual([]);
+  });
+
+  it("does not parse already committed roster replays", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    committedCatalog(adapter);
+    const replay = generationEnvelope(listPaths[0], "bti:1000:1", 30);
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      for (let index = 0; index < 100; index += 1) expect(adapter.decode(replay)).toEqual([]);
+      expect(parse.mock.calls.length).toBe(0);
+    } finally { parse.mockRestore(); }
+  });
+
+  it("does not extract or normalize retained detail receipts on repeated delivery", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    committedCatalog(adapter);
+    const replay = cachedDetail(detailPayload(), now + 200, now + 150);
+    expect(adapter.decode(replay)).toHaveLength(1);
+    const extract = vi.spyOn(btiCatalog, "extractBtiCatalogRecords");
+    try {
+      for (let index = 0; index < 100; index += 1) expect(adapter.decode(replay)).toEqual([]);
+      expect(extract.mock.calls.length).toBe(0);
+      // A later receipt must still reach normalization and change the catalog.
+      expect(adapter.decode(cachedDetail(detailPayload(), now + 300, now + 250))).toHaveLength(1);
+      expect(extract).toHaveBeenCalledOnce();
+    } finally { extract.mockRestore(); }
   });
 
   it("honors explicit empty detail batch entries and remembers their removal clock", () => {

@@ -19,7 +19,7 @@ const source = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const
 const earlyOwnerCalls = (adapter: SabaCollectorPageAdapter) =>
   vi.mocked(adapter.captureOwner).mock.calls.filter(([period]) => period === "EARLY");
 const record = (matchId: string) => ({ sportId: "1" as const, leagueId: "league",
-  leagueName: "League", matchId, timeText: "09/08 08:00PM", teamNames: ["Home", "Away"],
+  leagueName: "League", matchId, timeText: "09/08 08:00PM", providerTimezoneOffsetMinutes: 420, teamNames: ["Home", "Away"],
   groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
     { marketOddsId: `${matchId}-odds`, priceText: "0.91", status: "running", greyedOut: null },
     { marketOddsId: `${matchId}-odds`, priceText: "-0.93", status: "running", greyedOut: null }
@@ -38,6 +38,7 @@ function harness(onSabaSocketUnavailable?: (source: ObservedSource, reason?: "UN
   let holdOwner: (() => Promise<void>) | undefined;
   let holdRestore: (() => Promise<void>) | undefined;
   let visibleRecords = initialVisibleRecords;
+  let mainForwardFailure: string | null = null;
   const adapterFactory = vi.mocked(createSabaHiddenMarketPageAdapter);
   adapterFactory.mockImplementation(({ binding }) => ({
     readRoster: vi.fn<SabaCollectorPageAdapter["readRoster"]>(async (period) => {
@@ -86,18 +87,31 @@ function harness(onSabaSocketUnavailable?: (source: ObservedSource, reason?: "UN
   const observer = new NetworkObserver({ sendCommand, observerSessionId: "collector-worker",
     now: () => clock, monotonicNow: monotonicClock,
     ...(batching.earlyBatchSize === undefined ? {} : { sabaCollectorEarlyBatchSize: batching.earlyBatchSize }),
-    forward: async (envelope) => { forwarded.push(envelope); },
+    forward: async (envelope) => {
+      if (mainForwardFailure !== null && envelope.transport === "DOM_SNAPSHOT" &&
+        JSON.parse(envelope.payload.body).snapshotId?.endsWith(":main")) throw new Error(mainForwardFailure);
+      forwarded.push(envelope);
+    },
     ...(workScheduler === undefined ? {} : { workScheduler }),
     ...(onSabaSocketUnavailable === undefined ? {} : { onSabaSocketUnavailable }) });
   const poll = async () => { clock += 3_000; await observer.pollSabaDomChanges(source, "sports.example"); };
-  const start = async () => {
+  const start = async (publishMain = true) => {
     await poll();
     await vi.waitFor(() => expect(adapterFactory).toHaveBeenCalledOnce());
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (!publishMain) return;
+    await poll(); // Publish the independently reconciled main roster before exercising More.
+    const adapter = adapterFactory.mock.results.at(-1)!.value;
+    adapter.readRoster.mockClear();
+    adapter.restoreToday.mockClear();
   };
   const collectorChunks = () => forwarded.filter(({ transport, payload }) => transport === "DOM_SNAPSHOT" &&
-    JSON.parse(payload.body).snapshotId?.startsWith("saba:collector:"));
-  return { observer, forwarded, sendCommand, start, poll, collectorChunks,
+    JSON.parse(payload.body).snapshotId?.startsWith("saba:collector:") &&
+    !JSON.parse(payload.body).snapshotId.endsWith(":main"));
+  const mainRosterChunks = () => forwarded.filter(({ transport, payload }) => transport === "DOM_SNAPSHOT" &&
+    JSON.parse(payload.body).snapshotId?.endsWith(":main"));
+  return { observer, forwarded, sendCommand, start, poll, collectorChunks, mainRosterChunks,
+    failMainForward: (failure: string | null) => { mainForwardFailure = failure; },
     advanceTime: (milliseconds: number) => { clock += milliseconds; },
     advanceMonotonic: (milliseconds: number) => { monotonicOffset += milliseconds; },
     setVisibleRecords: (value: readonly unknown[]) => { visibleRecords = value; },
@@ -124,7 +138,64 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
       .find((body) => body.kind === "WS_ATTACH");
     expect(heartbeat.sabaCollector).toEqual({ nativeReady: false, schemaContextReady: false, catalogUsable: true,
       discoveryPending: false, discoveryAttempted: true, collectorState: "RUNNING",
-      domBlocked: false, probeBlocked: false });
+      domBlocked: false, probeBlocked: false, lastErrorCode: null, currentPeriod: "TODAY",
+      mainRosterComplete: true, hiddenMarketsComplete: false });
+  });
+
+  it("publishes the main roster before More and retains it when hidden expansion fails", async () => {
+    const h = harness();
+    await h.start();
+    const adapter = vi.mocked(createSabaHiddenMarketPageAdapter).mock.results[0]!.value;
+    expect(adapter.captureOwner).not.toHaveBeenCalled();
+    expect(h.mainRosterChunks()).toHaveLength(1);
+    const main = JSON.parse(h.mainRosterChunks()[0]!.payload.body);
+    expect(main.records.at(-1)).toMatchObject({ kind: "MAIN_ROSTER_TERMINAL", hiddenMarketsComplete: false });
+    expect(main.records.filter((item: { kind: string }) => item.kind === "CAPTURE")).toHaveLength(4);
+    adapter.captureOwner.mockRejectedValueOnce(new Error("SABA_COLLECTOR_MORE_OPEN_NOT_STABLE"));
+    await h.poll();
+    expect(h.mainRosterChunks()).toHaveLength(1);
+    expect(h.collectorChunks()).toHaveLength(0);
+    await h.observer.heartbeat(source, "sports.example");
+    const heartbeat = h.forwarded.map(({ payload }) => JSON.parse(payload.body)).find((body) => body.kind === "WS_ATTACH");
+    expect(heartbeat.sabaCollector).toMatchObject({ mainRosterComplete: true, hiddenMarketsComplete: false,
+      collectorState: "FINISHED", lastErrorCode: "SABA_COLLECTOR_MORE_OPEN_NOT_STABLE" });
+    h.observer.beginSourceEpoch(source.sourceId);
+  });
+
+  it("does not start More until every main chunk is acknowledged after a rejected publication", async () => {
+    const h = harness();
+    await h.start(false);
+    const adapter = vi.mocked(createSabaHiddenMarketPageAdapter).mock.results[0]!.value;
+    h.failMainForward("BRIDGE_PAYLOAD_REJECTED");
+    await h.poll();
+    await h.poll();
+    expect(adapter.captureOwner).not.toHaveBeenCalled();
+    expect(h.mainRosterChunks()).toHaveLength(0);
+    h.failMainForward(null);
+    await h.poll();
+    expect(adapter.captureOwner).not.toHaveBeenCalled();
+    expect(h.mainRosterChunks()).toHaveLength(1);
+    await h.poll();
+    expect(adapter.captureOwner).toHaveBeenCalledOnce();
+    h.observer.beginSourceEpoch(source.sourceId);
+  });
+
+  it.each([
+    ["SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT", "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT"],
+    ["private provider exception must not escape", "SABA_COLLECTOR_PAGE_OPERATION_FAILED"]
+  ])("reports only bounded collector error codes in heartbeat: %s", async (failure, expectedCode) => {
+    const h = harness();
+    await h.start();
+    const adapter = vi.mocked(createSabaHiddenMarketPageAdapter).mock.results[0]!.value;
+    adapter.captureOwner.mockRejectedValueOnce(new Error(failure));
+    await h.poll();
+    const commands = h.sendCommand.mock.calls.length;
+    await h.observer.heartbeat(source, "sports.example");
+    expect(h.sendCommand.mock.calls).toHaveLength(commands);
+    const heartbeat = h.forwarded.map(({ payload }) => JSON.parse(payload.body))
+      .find((body) => body.kind === "WS_ATTACH");
+    expect(heartbeat.sabaCollector).toMatchObject({ lastErrorCode: expectedCode, currentPeriod: "TODAY" });
+    h.observer.beginSourceEpoch(source.sourceId);
   });
 
   it.each([
@@ -423,7 +494,7 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
     await h.start();
     await h.poll();
     const progress = h.forwarded.map(({ payload }) => JSON.parse(payload.body))
-      .find((body) => body.kind === "SABA_HIDDEN_COLLECTOR" && body.status === "IN_PROGRESS");
+      .find((body) => body.kind === "SABA_HIDDEN_COLLECTOR" && body.status === "IN_PROGRESS" && body.publicMarketSample);
     expect(progress.publicMarketSample).toMatchObject({ ownerMatchId: "TODAY-0",
       groups: [{ betTypeIds: [], labels: ["Hidden public label"], nativeIds: ["TODAY-0-hidden"],
         publicPrices: ["0.91", "-0.93"] }] });
@@ -434,7 +505,7 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
   it.each([{ betTypeIds: [] }, { betTypeIds: ["461"] }])(
     "reports cached hidden public inventory including typed noncore groups %j", async ({ betTypeIds }) => {
     const h = harness();
-    await h.start();
+    await h.start(false);
     const adapter: SabaCollectorPageAdapter = vi.mocked(createSabaHiddenMarketPageAdapter).mock.results[0]!.value;
     const readRoster = adapter.readRoster;
     adapter.readRoster = vi.fn(async (period) => {
@@ -751,7 +822,7 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
 
   it("attributes a roster deadline to its operation after successful independent Today restoration", async () => {
     const h = harness();
-    await h.start();
+    await h.start(false);
     const adapter = vi.mocked(createSabaHiddenMarketPageAdapter).mock.results[0]!.value;
     const read = adapter.readRoster.getMockImplementation()!;
     adapter.readRoster.mockImplementation(async (period: "TODAY" | "EARLY") => {

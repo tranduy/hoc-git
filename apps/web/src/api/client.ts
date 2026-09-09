@@ -12,6 +12,8 @@ export interface CatalogRealtimeFeed {
   readonly connectionState: ConnectionState;
   readonly baseline: { readonly entries: readonly CatalogRevisionEntry[]; readonly sequence: number } | null;
   readonly revision: { readonly entry: CatalogRevisionEntry; readonly sequence: number } | null;
+  /** Latest observation and stale invalidation per account, in sequence order. */
+  readonly revisions?: readonly { readonly entry: CatalogRevisionEntry; readonly sequence: number }[];
 }
 
 export interface SnapshotClientOptions {

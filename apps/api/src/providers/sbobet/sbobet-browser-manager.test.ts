@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser } from "playwright";
+import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import { extractSbobetRecords, isSbobetCatalogReady } from "./sbobet-browser-manager.js";
 
 describe("extractSbobetRecords", () => {
@@ -42,6 +43,14 @@ describe("extractSbobetRecords", () => {
     ]);
     expect(result[0]?.markets.map((market) => [market.marketType, market.lineText])).toEqual([
       ["FT_AH", "0.5"], ["FT_TOTAL", "2.5"], ["FT_1X2", null]
+    ]);
+    const normalized = normalizeSbobetCatalog(result, { provider: "SBOBET", observedAtMs: 123,
+      receivedMonotonicMs: 1, sequence: 1 });
+    expect(normalized.diagnostics).toEqual([]);
+    expect(normalized.markets).toHaveLength(3);
+    expect(normalized.quotes.filter((quote) => quote.marketType === "FT_1X2")
+      .map(({ selection, rawOdds, rawFormat }) => [selection, rawOdds, rawFormat])).toEqual([
+      ["HOME", "2.1", "DECIMAL"], ["DRAW", "3.2", "DECIMAL"], ["AWAY", "3.4", "DECIMAL"]
     ]);
     await page.close();
   });

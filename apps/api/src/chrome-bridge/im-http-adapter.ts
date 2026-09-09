@@ -1,7 +1,7 @@
 import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope, NativeMarketObservation } from "@tool-chenh/contracts";
 import { extractImFootballCatalog, isLineFieldWellFormed, isValidImFootballDelta, mergeImFootballDelta,
-  imMarketObservedAtMs, normalizeImOdds, observeNativeImFootballMarkets } from "../providers/im/im-football-catalog-source.js";
+  imMarketObservedAtMs, normalizeImSelectionPrice, observeNativeImFootballMarkets } from "../providers/im/im-football-catalog-source.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 
@@ -437,7 +437,7 @@ function isClassifiedImMarket(value: unknown): boolean {
     !Number.isSafeInteger(Number(value.gp)) || !Array.isArray(value.ws)) return false;
   const supportedDomain = [1, 2].includes(Number(value.bti)) && [1, 2, 3].includes(Number(value.gp));
   if (!supportedDomain) return true;
-  if (value.ws.length !== 2) return false;
+  if (value.ws.length < 1 || value.ws.length > 2) return false;
   const expectedSelections = Number(value.bti) === 1 ? new Set([1, 2]) : new Set([3, 4]);
   const actualSelections = new Set<number>();
   let lineAbsent = false;
@@ -446,12 +446,12 @@ function isClassifiedImMarket(value: unknown): boolean {
       !expectedSelections.has(Number(selection.si)) || actualSelections.has(Number(selection.si)) ||
       !isLineFieldWellFormed(selection.hdp) ||
       typeof selection.dih !== "string" || selection.dih.trim() === "" ||
-      normalizeImOdds(selection.o) === null) return false;
+      normalizeImSelectionPrice(selection) === null) return false;
     if (selection.hdp === undefined) lineAbsent = true;
     actualSelections.add(Number(selection.si));
   }
   if (lineAbsent) noteImContentRefusal("market-line-absent");
-  return actualSelections.size === 2;
+  return actualSelections.size === value.ws.length;
 }
 
 /**

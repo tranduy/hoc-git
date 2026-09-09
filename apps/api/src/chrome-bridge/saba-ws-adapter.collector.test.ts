@@ -1,6 +1,7 @@
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { describe, expect, it } from "vitest";
 import type { SabaCollectorDomItem } from "./saba-collector-dom.js";
+import { ChromeCatalogDataPlane } from "./chrome-catalog-data-plane.js";
 import { SabaWsCatalogAdapter } from "./saba-ws-adapter.js";
 
 const SOURCE = "chrome:SABA:7";
@@ -94,6 +95,16 @@ function collectorEnvelope(generation: string, items: readonly unknown[], sequen
     sweepFrameKey: FRAME, sweepDocumentKey: DOCUMENT, records: items }, sequence, sourceEpoch);
 }
 
+function mainItems(generation: string): SabaCollectorDomItem[] {
+  const all = completeItems(generation);
+  const terminal = all.at(-1)!;
+  if (terminal.kind !== "TERMINAL") throw new Error("terminal fixture missing");
+  const { unresolvedOwners: _unresolved, failedOwners: _failed, ...manifest } = terminal;
+  return [...all.flatMap((item) => item.kind === "CAPTURE" && item.captureKind === "ROSTER" ?
+    [{ ...item, record: { ...item.record, providerTimezoneOffsetMinutes: 480 } }] : []),
+    { ...manifest, kind: "MAIN_ROSTER_TERMINAL", hiddenMarketsComplete: false }];
+}
+
 const value = (updates: readonly { value?: unknown }[]) => updates[0]?.value as {
   events: Array<{ providerEventId: string; isLive: boolean; startAtUtcMs: number }>;
   markets: Array<{ providerEventId: string; providerMarketId: string; line: string | null;
@@ -105,6 +116,209 @@ const value = (updates: readonly { value?: unknown }[]) => updates[0]?.value as 
 };
 
 describe("SabaWsCatalogAdapter collector boundary", () => {
+  it("authorizes validated main rosters before any More result and marks hidden completion separately", () => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const generation = "saba:collector:main-authority:main";
+    const initial = adapter.decode(collectorEnvelope(generation, mainItems(generation), 1));
+    expect(initial).toEqual([expect.objectContaining({ evidenceMode: "BASELINE", authoritativeBaseline: true })]);
+    expect(value(initial).events.map(({ providerEventId }) => providerEventId).sort()).toEqual(["early-1", "today-1"]);
+    expect(adapter.collectorCoverage(SOURCE, EPOCH)).toMatchObject({ mainRosterComplete: true,
+      hiddenMarketsComplete: false, collectorGeneration: generation });
+    const failedHidden = completeItems("saba:collector:main-authority").filter((item) => item.kind !== "OWNER_COMPLETE");
+    expect(adapter.decode(collectorEnvelope("saba:collector:main-authority", failedHidden, 2))).toEqual([]);
+    const refreshed = adapter.decode(liveSnapshot(3));
+    expect(value(refreshed).quotes.filter(({ providerEventId }) => providerEventId !== "9"))
+      .toEqual(value(initial).quotes);
+    expect(adapter.collectorCoverage(SOURCE, EPOCH)?.hiddenMarketsComplete).toBe(false);
+    expect(adapter.decode(collectorEnvelope("saba:collector:main-authority",
+      completeItems("saba:collector:main-authority"), 4))).toHaveLength(1);
+    expect(adapter.collectorCoverage(SOURCE, EPOCH)?.hiddenMarketsComplete).toBe(true);
+  });
+
+  it.each([null, undefined])("rejects main timezone %s before changing prior authority or clocks", (offset) => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const generation = "saba:collector:main-proven:main";
+    const initial = adapter.decode(collectorEnvelope(generation, mainItems(generation), 1));
+    const invalidGeneration = "saba:collector:main-unknown:main";
+    const unknown = mainItems(invalidGeneration).map((item) => item.kind !== "CAPTURE" ? item : {
+      ...item, record: { ...item.record, providerTimezoneOffsetMinutes: offset }
+    });
+    expect(adapter.decode(collectorEnvelope(invalidGeneration, unknown, 2))).toEqual([]);
+    expect(adapter.collectorCoverage(SOURCE, EPOCH)?.collectorGeneration).toBe(generation);
+    expect(value(adapter.decode(liveSnapshot(3))).quotes.filter(({ providerEventId }) => providerEventId !== "9"))
+      .toEqual(value(initial).quotes);
+    adapter.resetSource(SOURCE);
+    expect(adapter.collectorCoverage(SOURCE, EPOCH)).toBeNull();
+  });
+
+  it("publishes a production main baseline with original clocks while More is incomplete and requires new epoch proof", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => WALL + 10_000, monotonicNow: () => 10_000 });
+    const generation = "saba:collector:production-main:main";
+    expect(plane.ingest(collectorEnvelope(generation, mainItems(generation), 1))).toBe(true);
+    const initial = await plane.read("catalog-source:SABA:FOOTBALL");
+    expect(initial.events).toHaveLength(2);
+    expect(plane.ingest(liveSnapshot(2))).toBe(true);
+    const updated = await plane.read("catalog-source:SABA:FOOTBALL");
+    expect(updated.quotes.filter(({ providerEventId }) => providerEventId !== "9")).toEqual(initial.quotes);
+    expect(plane.ingest({ ...liveSnapshot(3), sourceEpoch: TARGET_EPOCH })).toBe(true);
+    const replacement = await plane.read("catalog-source:SABA:FOOTBALL");
+    expect(replacement.events.map(({ providerEventId }) => providerEventId)).toEqual(["9"]);
+    expect(replacement.quotes.every(({ providerEventId }) => providerEventId === "9")).toBe(true);
+  });
+
+  it.each([420, 480])("uses public timezone %i through the complete collector and keeps acquisition clocks", (offset) => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const generation = `saba:collector:timezone-${offset}`;
+    const items = completeItems(generation).map((item) => item.kind !== "CAPTURE" ? item : {
+      ...item, record: { ...item.record, providerTimezoneOffsetMinutes: offset }
+    });
+    const catalog = value(adapter.decode(collectorEnvelope(generation, items)));
+    expect(catalog.events.find(({ providerEventId }) => providerEventId === "today-1")?.startAtUtcMs)
+      .toBe(Date.UTC(2026, 8, 8, 20) - offset * 60_000);
+    expect(catalog.quotes.find(({ providerEventId }) => providerEventId === "today-1"))
+      .toMatchObject({ receivedMonotonicMs: 10.5, sequence: 0 });
+  });
+
+  it.each([420, 480])("retains public timezone %i through the visible DOM decoder", (offset) => {
+    const records = Array.from({ length: 50 }, (_, index) => ({ ...record(String(index + 2)),
+      providerTimezoneOffsetMinutes: offset }));
+    const catalog = value(new SabaWsCatalogAdapter().decode(domEnvelope({ schemaVersion: 2,
+      snapshotId: "saba:7:timezone-visible", chunkIndex: 0, chunkCount: 1, records })));
+    expect(catalog.events[0]?.startAtUtcMs).toBe(Date.UTC(2026, 8, 8, 20) - offset * 60_000);
+  });
+
+  it("refuses a complete collector with explicitly unproven timezone while retaining the prior full catalog", () => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const priorGeneration = "saba:collector:proven-timezone";
+    const before = value(adapter.decode(collectorEnvelope(priorGeneration, completeItems(priorGeneration))));
+    const nextGeneration = "saba:collector:unproven-timezone";
+    const unknown = completeItems(nextGeneration).map((item) => item.kind !== "CAPTURE" ? item : {
+      ...item, record: { ...item.record, providerTimezoneOffsetMinutes: null }
+    });
+    expect(adapter.decode(collectorEnvelope(nextGeneration, unknown, 2))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("collector-timezone-unproven");
+    const after = value(adapter.decode(liveSnapshot(3)));
+    expect(after.quotes.filter(({ providerEventId }) => providerEventId !== "9")).toEqual(before.quotes);
+  });
+  const liveSnapshot = (sequence: number) => wsEnvelope([["f", 0, WS_FIELDS], [0, "reset"],
+    encodedWsRow({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+    encodedWsRow({ type: "m", matchid: 9, leagueid: 1, hteamnameen: "Live home",
+      ateamnameen: "Live away", kickofftime: WALL / 1_000, marketid: "L", sporttype: 1 }),
+    encodedWsRow({ type: "o", oddsid: 90, matchid: 9, bettype: 1, parenttypeid: 1,
+      oddsstatus: "running", enable: 1, odds1a: 0.91, odds2a: -0.97, hdp1: 0.5, hdp2: 0 }),
+    [0, "done"]], `strict-${sequence}`, sequence, 100 + sequence);
+
+  it("publishes a validated socket partition while collector coverage is still incomplete", () => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const native = adapter.decode(liveSnapshot(1));
+    expect(native).toEqual([expect.objectContaining({ authoritativeBaseline: true,
+      evidenceMode: "BASELINE", provenance: "WS" })]);
+    expect(value(native).events.map(({ providerEventId }) => providerEventId)).toEqual(["9"]);
+    expect(adapter.collectorCoverage(SOURCE, EPOCH)).toBeNull();
+    const generation = "saba:collector:strict-complete";
+    const items = completeItems(generation);
+    expect(adapter.decode(collectorEnvelope(generation, items.slice(0, -1), 2))).toEqual([]);
+    const updates = adapter.decode(collectorEnvelope(generation, items, 3));
+    expect(updates).toEqual([expect.objectContaining({ authoritativeBaseline: true,
+      evidenceMode: "BASELINE", generation })]);
+    expect(value(updates).events.map(({ providerEventId }) => providerEventId).sort())
+      .toEqual(["9", "early-1", "today-1"]);
+  });
+
+  it("authorizes a complete production collector without socket or large viewport and retains capture clocks", () => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const generation = "saba:collector:strict-independent";
+    const initial = adapter.decode(collectorEnvelope(generation, completeItems(generation), 1));
+    expect(initial).toEqual([expect.objectContaining({ authoritativeBaseline: true,
+      evidenceMode: "BASELINE", generation })]);
+    const updated = adapter.decode(domEnvelope({ schemaVersion: 2, snapshotId: "strict-small-dom",
+      chunkIndex: 0, chunkCount: 1, records: [record("today-1")] }, 2, EPOCH, 2_000));
+    expect(updated).toEqual([expect.objectContaining({ evidenceMode: "DELTA", generation })]);
+    expect(updated[0]).not.toHaveProperty("authoritativeBaseline", true);
+    expect(value(updated).quotes.filter(({ providerEventId }) => providerEventId === "early-1"))
+      .toEqual(value(initial).quotes.filter(({ providerEventId }) => providerEventId === "early-1"));
+  });
+
+  it("keeps a completed prematch collector when one production socket partition becomes empty", () => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const generation = "saba:collector:strict-empty-partition";
+    const initial = adapter.decode(collectorEnvelope(generation, completeItems(generation), 1));
+    const socket = adapter.decode(liveSnapshot(2));
+    expect(socket).toEqual([expect.objectContaining({ evidenceMode: "BASELINE",
+      authoritativeBaseline: true, generation: `${EPOCH}:saba:1:2` })]);
+    const emptied = adapter.decode(wsEnvelope([[0, "empty"], [0, "done"]], "strict-empty", 3, 103));
+    expect(emptied).toEqual([expect.objectContaining({ evidenceMode: "BASELINE",
+      authoritativeBaseline: true, generation: `${EPOCH}:saba:1:3` })]);
+    expect(value(emptied).events.map(({ providerEventId }) => providerEventId).sort())
+      .toEqual(["early-1", "today-1"]);
+    expect(value(emptied).quotes).toEqual(value(initial).quotes);
+  });
+
+  it("accepts a newly validated socket snapshot after collector expiry without reviving old collector quotes", () => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const generation = "saba:collector:strict-expiry";
+    expect(adapter.decode(collectorEnvelope(generation, completeItems(generation), 1))).toHaveLength(1);
+    const updated = adapter.decode({ ...liveSnapshot(2), observedAtMs: WALL + 3_601_002 });
+    expect(value(updated).events.map(({ providerEventId }) => providerEventId)).toEqual(["9"]);
+    expect(adapter.collectorCoverage(SOURCE, EPOCH)).toBeNull();
+    adapter.resetSource(SOURCE);
+    expect(adapter.decode(liveSnapshot(3))).toEqual([expect.objectContaining({
+      evidenceMode: "BASELINE", provenance: "WS" })]);
+  });
+
+  it("requires native reset/done before production publication and then accepts fresh price deltas", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => WALL + 10_000, monotonicNow: () => 10_000 });
+    const premature = wsEnvelope([["f", 0, WS_FIELDS],
+      encodedWsRow({ type: "o", oddsid: 90, matchid: 9, odds1a: 0.8 })], "premature", 1, 101);
+    expect(plane.ingest(premature)).toBe(false);
+    expect(plane.ingest(liveSnapshot(2))).toBe(true);
+    const before = await plane.read("catalog-source:SABA:FOOTBALL");
+    expect(before.events.map(({ providerEventId }) => providerEventId)).toEqual(["9"]);
+    const delta = wsEnvelope([encodedWsRow({ type: "o", oddsid: 90, matchid: 9,
+      odds1a: 0.82, odds2a: -0.94 })], "native-delta", 3, 103);
+    expect(plane.ingest(delta)).toBe(true);
+    expect((await plane.read("catalog-source:SABA:FOOTBALL")).quotes)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ rawOdds: "0.82" })]));
+  });
+
+  it("restores same-epoch socket authority from retained complete periods without another collector or renewed quote clocks", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => WALL + 10_000, monotonicNow: () => 10_000 });
+    const generation = "saba:collector:socket-reconnect";
+    expect(plane.ingest(collectorEnvelope(generation, completeItems(generation), 1))).toBe(true);
+    const original = await plane.read("catalog-source:SABA:FOOTBALL");
+    expect(plane.ingest(liveSnapshot(2))).toBe(true);
+    const state = (status: "OPEN" | "CLOSED", sequence: number, streamId: string): ChromeBridgeEnvelope => ({
+      ...wsEnvelope([], "state", sequence, 100 + sequence), transport: "WS_STATE",
+      request: { ...wsEnvelope([], "state", sequence, 100 + sequence).request, streamId },
+      payload: { encoding: "UTF8", body: JSON.stringify({ state: status }) }
+    });
+    expect(plane.ingest(state("CLOSED", 3, "1"))).toBe(true);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(plane.ingest(state("OPEN", 4, "2"))).toBe(false);
+    const replacement = liveSnapshot(5);
+    expect(plane.ingest({ ...replacement, request: { ...replacement.request, streamId: "2" } })).toBe(true);
+    const restored = await plane.read("catalog-source:SABA:FOOTBALL");
+    expect(restored.events.map(({ providerEventId }) => providerEventId).sort())
+      .toEqual(["9", "early-1", "today-1"]);
+    expect(restored.quotes.filter(({ providerEventId }) => providerEventId !== "9")).toEqual(original.quotes);
+    const delta = wsEnvelope([encodedWsRow({ type: "o", oddsid: 90, matchid: 9,
+      odds1a: 0.72, odds2a: -0.82 })], "strict-6", 6, 106);
+    expect(plane.ingest({ ...delta, request: { ...delta.request, streamId: "2" } })).toBe(true);
+    expect((await plane.read("catalog-source:SABA:FOOTBALL")).quotes
+      .filter(({ providerEventId }) => providerEventId !== "9")).toEqual(original.quotes);
+  });
+
+  it("accepts validated empty periods and then admits socket deltas through the production data plane", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => WALL + 3_000,
+      monotonicNow: () => 3_000 });
+    const generation = "saba:collector:strict-empty-periods";
+    const complete = collectorEnvelope(generation, completeItems(generation, "", ""), 1);
+    expect(plane.ingest(complete)).toBe(true);
+    expect((await plane.read("catalog-source:SABA:FOOTBALL")).events).toHaveLength(0);
+    expect(plane.ingest(liveSnapshot(2))).toBe(true);
+    expect((await plane.read("catalog-source:SABA:FOOTBALL")).events).toHaveLength(1);
+  });
+
   it("publishes one atomic terminal candidate with capture clocks and expanded detail", () => {
     const generation = "saba:collector:generation-detail";
     const items = completeItems(generation, "today-detail", "");

@@ -1,5 +1,5 @@
 import { normalizeSbobetCatalog, type SbobetCatalogInputRecord } from "@tool-chenh/adapters";
-import { footballBinaryMarketSpec, CmdSnapshotChunkSchema,
+import { footballBinaryMarketSpec, footballResultMarketSpec, CmdSnapshotChunkSchema,
   type ChromeBridgeEnvelope, type MarketType, type NativeMarketObservation, type OddsFormat } from "@tool-chenh/contracts";
 import { z } from "zod";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
@@ -17,6 +17,7 @@ const MAX_PENDING_PRE_PROOF_RECORDS = 5_000;
 // misbehaving stream grow the map without end.
 const MAX_SOCKET_ADOPTED_EVENTS = 512;
 const AUTHORITATIVE_BASELINE_REFRESH_MS = 20_000;
+const RECEIPT_ONLY_PUBLICATION_INTERVAL_MS = 1_000;
 interface RetainedRecord {
   readonly record: SbobetCatalogInputRecord;
   readonly nativeMarketObservations: readonly NativeMarketObservation[];
@@ -38,6 +39,7 @@ interface ApsportApiState {
   readonly openStreams: Set<string>;
   readonly footballStreams: Set<string>;
   baselineEmitted: boolean;
+  lastCatalogPublicationMonotonicMs: number | null;
   // True while the roster established with no fixtures at all, which is when
   // the socket's own records are allowed to populate it.
   adoptsSocketFixtures: boolean;
@@ -82,10 +84,16 @@ interface SourceEpochFence {
 type JsonRecord = Record<string, unknown>;
 interface TsportMarketSemantics {
   readonly marketType: MarketType;
-  readonly selections: readonly ["HOME" | "OVER" | "ODD" | "YES", "AWAY" | "UNDER" | "EVEN" | "NO"];
+  readonly selections: readonly ["HOME" | "OVER" | "ODD" | "YES" | "HOME_DRAW", "AWAY" | "UNDER" | "EVEN" | "NO" | "DRAW_AWAY", ("DRAW" | "HOME_AWAY")?];
 }
 
 const marketSemanticsByGroup: Readonly<Record<string, TsportMarketSemantics>> = {
+  "1": { marketType: "FT_1X2", selections: ["HOME", "AWAY", "DRAW"] },
+  "2": { marketType: "FH_1X2", selections: ["HOME", "AWAY", "DRAW"] },
+  // AP's own QrT field enum + MB result-name mapper; not the SBO wire schema.
+  "12": { marketType: "FT_DOUBLE_CHANCE", selections: ["HOME_DRAW", "DRAW_AWAY", "HOME_AWAY"] },
+  "13": { marketType: "FH_DOUBLE_CHANCE", selections: ["HOME_DRAW", "DRAW_AWAY", "HOME_AWAY"] },
+  "89": { marketType: "SH_1X2", selections: ["HOME", "AWAY", "DRAW"] },
   "3": { marketType: "FT_TOTAL", selections: ["OVER", "UNDER"] },
   "4": { marketType: "FH_TOTAL", selections: ["OVER", "UNDER"] },
   "5": { marketType: "FT_AH", selections: ["HOME", "AWAY"] },
@@ -309,6 +317,11 @@ function sameRetainedRecord(left: RetainedRecord | undefined, right: RetainedRec
     semanticFingerprint([right.record, right.nativeMarketObservations]);
 }
 
+function receiptPublicationDue(state: ApsportApiState, envelope: ChromeBridgeEnvelope): boolean {
+  return state.lastCatalogPublicationMonotonicMs === null ||
+    envelope.receivedMonotonicMs - state.lastCatalogPublicationMonotonicMs >= RECEIPT_ONLY_PUBLICATION_INTERVAL_MS;
+}
+
 /**
  * Why a frame is not a TSPORT football record, counted by shape.
  *
@@ -359,7 +372,7 @@ function inverseLine(value: string): string | null {
   return inverse > 0 ? `+${inverse}` : String(inverse);
 }
 
-function price(odd: JsonRecord, key: "8" | "9"): { readonly priceText: string; readonly priceFormat: OddsFormat } | null {
+function price(odd: JsonRecord, key: "8" | "9" | "10"): { readonly priceText: string; readonly priceFormat: OddsFormat } | null {
   const formats = record(odd[key]);
   if (formats === null) return null;
   const malay = scalar(formats["2"]);
@@ -371,6 +384,12 @@ function price(odd: JsonRecord, key: "8" | "9"): { readonly priceText: string; r
     : null;
 }
 
+function tsportNativeMarketId(groupId: string, offerId: string): string {
+  // Native field 6 is reused across groups (observed FH_AH/home corner total).
+  // The native group is stable across snapshots and price updates; row order is not.
+  return `tsport:${groupId}:${offerId}`;
+}
+
 function extractTsportMarket(group: JsonRecord, odd: JsonRecord): SbobetCatalogInputRecord["markets"][number] | null {
   const groupId = scalar(group["3"]);
   const semantics = groupId === null ? null : marketSemanticsByGroup[groupId] ?? null;
@@ -379,18 +398,30 @@ function extractTsportMarket(group: JsonRecord, odd: JsonRecord): SbobetCatalogI
   const line = scalar(odd["7"]);
   const firstId = scalar(odd["0"]);
   const secondId = scalar(odd["2"]);
-  const marketId = scalar(odd["6"]);
+  const offerId = scalar(odd["6"]);
   const firstPrice = price(odd, "8");
   const secondPrice = price(odd, "9");
+  const locked = group["10"] !== "Active" || group["6"] === true || odd["13"] === true;
+  if (semantics.selections[2] !== undefined) {
+    const drawId = scalar(odd["3"]);
+    const drawPrice = price(odd, "10");
+    const slots = [[firstId, firstPrice], [secondId, secondPrice], [drawId, drawPrice]] as const;
+    const presentIds = slots.flatMap(([id]) => id === null ? [] : [id]);
+    if (offerId === null || new Set(presentIds).size !== presentIds.length) return null;
+    const selections = slots.flatMap(([selectionId, price], index) => selectionId === null || price === null ? [] : [
+      { selectionId, selection: semantics.selections[index]!, ...price, locked }]);
+    if (selections.length === 0) return null;
+    return { marketId: tsportNativeMarketId(groupId!, offerId), marketType: semantics.marketType, lineText: null,
+      selections };
+  }
   if (spec === null || (spec.linePolicy !== "NONE" && line === null) ||
-    firstId === null || secondId === null || marketId === null ||
+    firstId === null || secondId === null || offerId === null ||
     firstPrice === null || secondPrice === null || scalar(odd["3"]) !== null) return null;
   const isHandicap = spec.family === "HANDICAP";
   const awayLine = isHandicap ? inverseLine(line!) : null;
   if (isHandicap && awayLine === null) return null;
-  const locked = group["10"] !== "Active";
   return {
-    marketId, marketType: semantics.marketType, lineText: spec.linePolicy === "NONE" ? null : line!,
+    marketId: tsportNativeMarketId(groupId!, offerId), marketType: semantics.marketType, lineText: spec.linePolicy === "NONE" ? null : line!,
     ...(isHandicap ? { handicapLineFormat: "SIGNED" as const } : {}),
     selections: [
       { selectionId: firstId, selection: semantics.selections[0], priceText: firstPrice.priceText,
@@ -402,10 +433,17 @@ function extractTsportMarket(group: JsonRecord, odd: JsonRecord): SbobetCatalogI
 }
 
 function nativeOutcomeLabels(odd: JsonRecord, semantics: TsportMarketSemantics | null): readonly string[] {
-  if (semantics !== null) return semantics.selections;
+  if (semantics !== null) return semantics.selections.flatMap((selection, index) =>
+    selection !== undefined && scalar(odd[["0", "2", "3"][index]!]) !== null ? [selection] : []);
   return ([['0', 'NATIVE_0'], ['2', 'NATIVE_2'], ['3', 'NATIVE_3']] as const)
     .filter(([key]) => scalar(odd[key]) !== null).map(([, label]) => label);
 }
+
+const tsportInventoryScope: Readonly<Record<string, string>> = {
+  "10": "FULL_TIME", "11": "FIRST_HALF", "12": "FULL_TIME", "13": "FIRST_HALF",
+  "14": "FULL_TIME", "15": "FIRST_HALF", "98": "FULL_TIME", "131": "FULL_TIME",
+  "132": "FULL_TIME", "133": "FULL_TIME", "134": "FULL_TIME", "135": "FULL_TIME", "136": "FIRST_HALF"
+};
 
 export function observeTsportNativeMarkets(event: JsonRecord, observedAtMs: number): readonly NativeMarketObservation[] {
   const providerEventId = scalar(event["2"]);
@@ -421,7 +459,7 @@ export function observeTsportNativeMarkets(event: JsonRecord, observedAtMs: numb
       if (odd === null) continue;
       const normalized = semantics === null ? null : extractTsportMarket(group, odd);
       const knownLabel = nativeGroupLabelById[groupId] ?? null;
-      const providerMarketId = scalar(odd["6"]) ?? `${providerEventId}:${groupId}:${index}`;
+      const providerMarketId = tsportNativeMarketId(groupId, scalar(odd["6"]) ?? `${providerEventId}:row:${index}`);
       let disposition: NativeMarketObservation["disposition"];
       let reason: string;
       if (normalized !== null) {
@@ -429,20 +467,31 @@ export function observeTsportNativeMarkets(event: JsonRecord, observedAtMs: numb
         reason = semantics!.marketType;
       } else if (semantics !== null) {
         disposition = "EXCLUDED";
-        reason = "INVALID_TWO_WAY_SHAPE";
+        reason = semantics.selections[2] !== undefined ? "INVALID_THREE_WAY_SHAPE" : "INVALID_TWO_WAY_SHAPE";
       } else if (knownLabel === null) {
         disposition = "UNMAPPED";
         reason = "NATIVE_TYPE_UNMAPPED";
       } else {
-        disposition = "EXCLUDED";
+        disposition = "UNMAPPED";
         reason = threeWayNativeGroups.has(groupId) ? "THREE_WAY_OUTCOME_DOMAIN"
           : pushOrRefundNativeGroups.has(groupId) ? "PUSH_OR_REFUND_SETTLEMENT"
             : "CANONICAL_EQUIVALENCE_NOT_PROVEN";
       }
       observations.push({ provider: "APSPORT", category: "FOOTBALL", providerEventId,
         providerMarketId, nativeType: groupId, nativeLabel: knownLabel,
-        nativeScope: semantics === null ? null : footballBinaryMarketSpec(semantics.marketType)?.scope ?? null,
-        outcomeLabels: nativeOutcomeLabels(odd, semantics), observedAtMs, disposition, reason });
+        status: group["10"] !== "Active" || group["6"] === true || odd["13"] === true || event["9"] === true || !activeApsportApiEvent(event) ? "SUSPENDED" : "OPEN",
+        nativeScope: semantics !== null && footballResultMarketSpec(semantics.marketType) !== null ? footballResultMarketSpec(semantics.marketType)!.scope
+          : semantics === null ? tsportInventoryScope[groupId] ?? null : footballBinaryMarketSpec(semantics.marketType)?.scope ?? null,
+        outcomeLabels: nativeOutcomeLabels(odd, semantics),
+        nativeSelections: ([['0', '8'], ['2', '9'], ['3', '10']] as const).flatMap(([idKey, priceKey]) => {
+          const selectionId = scalar(odd[idKey]);
+          if (selectionId === null) return [];
+          const formats = record(odd[priceKey]);
+          const decimal = formats === null ? null : scalar(formats['0']);
+          const malay = formats === null ? null : scalar(formats['2']);
+          return [{ selectionId, outcomeId: idKey, line: scalar(odd['7']), price: decimal ?? malay,
+            ...(decimal !== null ? { rawFormat: 'DECIMAL' as const } : malay !== null ? { rawFormat: 'MALAY' as const } : {}) }];
+        }), observedAtMs, disposition, reason });
     }
   }
   return observations;
@@ -477,7 +526,7 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
     for (const rawOdd of group["9"]) {
       const odd = record(rawOdd);
       if (odd === null) continue;
-      const market = extractTsportMarket({ ...group, ...(eventActive ? {} : { "10": "Suspended" }) }, odd);
+      const market = extractTsportMarket({ ...group, ...(eventActive && event["9"] !== true ? {} : { "10": "Suspended" }) }, odd);
       if (market !== null) markets.push(market);
     }
   }
@@ -649,11 +698,12 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         const detail = state.detailRecords.get(event.providerEventId);
         return detail !== undefined && detail.record.markets.length === 0;
       });
+    state.lastCatalogPublicationMonotonicMs = envelope.receivedMonotonicMs;
     return {
       sourceId: envelope.sourceId,
       sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs,
-      value: catalog,
+      value: { ...catalog, observedMonotonicMs: envelope.receivedMonotonicMs },
       evidenceMode,
       provenance,
       generation: state.generation,
@@ -700,6 +750,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         openStreams: sameEpoch ? new Set(current!.openStreams) : new Set(),
         footballStreams: sameEpoch ? new Set(current!.footballStreams) : new Set(),
         baselineEmitted: true,
+        lastCatalogPublicationMonotonicMs: null,
         adoptsSocketFixtures: rosterEventIds.size === 0
       };
       this.#apiSources.set(envelope.sourceId, state);
@@ -711,6 +762,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     const isExactEventChange = batch.data.trigger === "EVENT_CHANGE";
     if (isExactEventChange && batch.data.records.length !== 1) return this.#ignore("exact-detail-not-single-event");
     let changed = false;
+    let reobservedQuotes = false;
     const removedEventIds = new Set<string>();
     for (const rawEvent of batch.data.records) {
       const eventId = apsportRawEventId(rawEvent);
@@ -742,9 +794,15 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       }
       const retained = retainedRecord(extracted, envelope, rawEvent);
       if (!isExactEventChange && !sameRetainedRecord(previous, retained)) changed = true;
+      if (extracted.markets.some((market) => market.selections.length > 0)) reobservedQuotes = true;
       current.detailRecords.set(eventId, retained);
     }
-    if (!changed) return this.#ignore("delta-no-change");
+    // Real repeated records renew only their own quote evidence. Coalesce their
+    // catalog publication, while empty/heartbeat traffic cannot flush a pending
+    // receipt and every economic or authoritative membership change stays immediate.
+    if (!changed && (!reobservedQuotes || !receiptPublicationDue(current, envelope))) {
+      return this.#ignore("delta-no-change");
+    }
     const removed = [...removedEventIds].filter((id) => !current.rosterEventIds.has(id));
     return [{ ...this.#apiCatalogUpdate(envelope, current, "DELTA", "AUTHENTICATED_HTTP"),
       ...(removed.length > 0 ? { authoritativeRemovedEventIds: removed } : {}) }];
@@ -802,9 +860,13 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     state.footballStreams.add(streamId);
     const retained = retainedRecord(incoming, envelope, event!);
     const previous = state.socketRecords.get(incoming.eventId);
-    if (sameRetainedRecord(previous, retained)) return [{ sourceId: envelope.sourceId,
-      sequence: envelope.sequence, observedAtMs: envelope.observedAtMs, transportAlive: true }];
+    const unchanged = sameRetainedRecord(previous, retained);
+    // Keep the actual incoming receipt even inside a coalesced publication
+    // window; never stamp another retained event with this frame's clocks.
     state.socketRecords.set(incoming.eventId, retained);
+    if (unchanged && (!incoming.markets.some((market) => market.selections.length > 0) ||
+      !receiptPublicationDue(state, envelope))) return [{ sourceId: envelope.sourceId,
+      sequence: envelope.sequence, observedAtMs: envelope.observedAtMs, transportAlive: true }];
     // While the socket is the roster, each update carries fixtures the empty
     // baseline never covered, and the coverage guard rightly refuses a delta
     // that invents events - measured 2026-08-31, that left the book publishing
@@ -852,7 +914,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       sourceId: envelope.sourceId,
       sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs,
-      value: catalog,
+      value: { ...catalog, observedMonotonicMs: envelope.receivedMonotonicMs },
       evidenceMode,
       provenance: "WS" as const,
       generation: stream.generation,

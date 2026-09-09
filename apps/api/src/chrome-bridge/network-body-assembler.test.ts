@@ -33,6 +33,146 @@ function ksportEnvelope(index: number, count = 2, fragment = index === 0 ? "live
 }
 
 describe("NetworkBodyAssembler", () => {
+  it("retains the first TTL fault and its original scalar counts through retries, promotion and rollback", () => {
+    let now = 1_000;
+    const accountId = "catalog-source:IM:FOOTBALL";
+    const assembler = new NetworkBodyAssembler({ now: () => now, ttlMs: 10,
+      laneToken: Object.freeze({ accountId, nonce: 1, phase: "CANDIDATE" }) });
+    assembler.ingest({ ...envelope(0, 3, "abc"), sourceEpoch: "worker:1" });
+    now = 1_005;
+    assembler.ingest({ ...envelope(1, 3, "de"), sourceEpoch: "worker:1" });
+    now = 1_016;
+    const expected = { reason: "BODY_TTL_EXPIRED", faultAtMs: 1_016, receivedFragments: 2,
+      expectedFragments: 3, receivedBytes: 5, bodyAgeMs: 16 };
+    expect(assembler.stats()).toMatchObject({ lastFault: expected });
+    now = 1_100;
+    assembler.ingest({ ...envelope(0), sourceEpoch: "worker:1", payload: { encoding: "UTF8",
+      body: JSON.stringify({ schemaVersion: 1, chunkCount: "malformed-private-value" }) } });
+    expect(assembler.stats()).toMatchObject({ lastFault: expected });
+    const promotion = assembler.preparePromotion(Object.freeze({ accountId, nonce: 2, phase: "ACTIVE" }));
+    promotion.commit();
+    expect(promotion.assembler.stats()).toMatchObject({ lastFault: expected });
+    expect(assembler.stats()).not.toHaveProperty("lastFault");
+    promotion.rollback();
+    expect(assembler.stats()).toMatchObject({ lastFault: expected });
+    assembler.resetSource("chrome:IM:8");
+    expect(assembler.stats()).toMatchObject({ lastFault: expected });
+    assembler.ingest({ ...envelope(0), sourceEpoch: "worker:2" });
+    expect(assembler.stats()).not.toHaveProperty("lastFault");
+    assembler.ingest({ ...envelope(0), sourceEpoch: "worker:1" });
+    expect(assembler.stats()).not.toHaveProperty("lastFault");
+  });
+
+  it.each([
+    ["MALFORMED_WRAPPER", undefined, (value: ChromeBridgeEnvelope) => ({ ...value,
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ schemaVersion: 1, chunkCount: "private" }) } })],
+    ["DOCUMENT_IDENTITY_MISSING", undefined, (value: ChromeBridgeEnvelope) => ({ ...value,
+      request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR" } })],
+    ["IDENTITY_MISMATCH", envelope(0), (value: ChromeBridgeEnvelope) => ({ ...value, observedAtMs: 2_000 })],
+    ["CHUNK_COUNT_MISMATCH", envelope(0), () => envelope(1, 3)],
+    ["DUPLICATE_FRAGMENT_CONFLICT", envelope(0), () => envelope(0, 2, "different-private-fragment")]
+  ] as const)("reports %s without retaining raw content or source/request identities", (reason, first, mutate) => {
+    const assembler = new NetworkBodyAssembler({ now: () => 1_000 });
+    if (first !== undefined) assembler.ingest(first);
+    assembler.ingest(mutate(envelope(1)));
+    expect(assembler.stats()).toMatchObject({ blockedSourceEpochs: 1,
+      lastFault: { reason, faultAtMs: 1_000 } });
+    const fault = assembler.stats().lastFault!;
+    expect(Object.keys(fault).sort()).toEqual(["bodyAgeMs", "expectedFragments", "faultAtMs",
+      "reason", "receivedBytes", "receivedFragments"]);
+    expect(JSON.stringify(fault)).not.toMatch(/private|chrome:|imsports|observer-a|network-/u);
+  });
+
+  it.each([
+    ["BODY_BYTES_LIMIT", { maxBodyBytes: 2 }, envelope(0, 2, "abc"), undefined],
+    ["SOURCE_BODY_COUNT_LIMIT", { maxPendingBodiesPerSource: 1 }, envelope(0, 2, "a"),
+      envelope(0, 2, "b", "network-different-request")],
+    ["SOURCE_BYTES_LIMIT", { maxPendingBytesPerSource: 2 }, envelope(0, 2, "a"), envelope(1, 2, "bc")]
+  ] as const)("distinguishes %s from global backpressure", (reason, options, first, second) => {
+    const assembler = new NetworkBodyAssembler({ ...options, now: () => 1_000 });
+    assembler.ingest(first);
+    if (second !== undefined) assembler.ingest(second);
+    expect(assembler.stats()).toMatchObject({ lastFault: { reason }, blockedSourceEpochs: 1 });
+  });
+
+  it("keeps ordinary pending, identical duplicate and global pressure diagnostics nonfatal", () => {
+    const budget = new NetworkBodyAssemblyBudget({ now: () => 1_000, maxPendingBytes: 2 });
+    const assembler = new NetworkBodyAssembler({ budget });
+    assembler.ingest(envelope(0, 2, "a"));
+    assembler.ingest(envelope(0, 2, "a"));
+    assembler.ingest(envelope(1, 2, "bc"));
+    expect(assembler.stats()).toMatchObject({ pendingBodies: 1, blockedSourceEpochs: 0 });
+    expect(assembler.stats()).not.toHaveProperty("lastFault");
+    expect(assembler.ingest(envelope(1, 2, "b"))?.payload.body).toBe("ab");
+    expect(assembler.stats()).not.toHaveProperty("lastFault");
+  });
+
+  it.each(["CMD", "IM", "BTI", "APSPORT", "SBOBET", "SABA"] as const)(
+    "moves %s pending receipts to its proven active lane without copying reservations", provider => {
+      const accountId = `catalog-source:${provider}:FOOTBALL` as const;
+      const budget = new NetworkBodyAssemblyBudget({ maxPendingBodies: 1 });
+      const candidate = new NetworkBodyAssembler({ budget,
+        laneToken: Object.freeze({ accountId, nonce: 1, phase: "CANDIDATE" }) });
+      const lobby = (provider === "APSPORT" ? "TSPORT" : provider === "SBOBET" ? "KSPORT" : provider) as ChromeBridgeEnvelope["lobby"];
+      const first = { ...envelope(0), lobby, sourceId: `chrome:${lobby}:8`, sourceEpoch: "worker:5" };
+      const last = { ...envelope(1), lobby, sourceId: `chrome:${lobby}:8`, sourceEpoch: "worker:5" };
+      expect(candidate.ingest(first)).toBeNull();
+      const reserved = budget.stats();
+      const promotion = candidate.preparePromotion(Object.freeze({ accountId, nonce: 2, phase: "ACTIVE" }));
+      expect(budget.stats()).toEqual(reserved);
+      promotion.commit();
+      candidate.dispose();
+      expect(budget.stats()).toEqual(reserved);
+      expect(candidate.ingest(last)).toBeNull();
+      expect(promotion.assembler.ingest(last)?.payload.body).toBe('{"StatusCode":100}');
+      expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+    });
+
+  it("restores pending body ownership when the surrounding promotion rolls back", () => {
+    const accountId = "catalog-source:CMD:FOOTBALL";
+    const budget = new NetworkBodyAssemblyBudget();
+    const candidate = new NetworkBodyAssembler({ budget,
+      laneToken: Object.freeze({ accountId, nonce: 1, phase: "CANDIDATE" }) });
+    candidate.ingest(envelope(0));
+    const reserved = budget.stats();
+    const promotion = candidate.preparePromotion(Object.freeze({ accountId, nonce: 2, phase: "ACTIVE" }));
+    promotion.commit();
+    candidate.dispose();
+    promotion.rollback();
+    expect(budget.stats()).toEqual(reserved);
+    expect(promotion.assembler.ingest(envelope(1))).toBeNull();
+    expect(candidate.ingest(envelope(1))?.payload.body).toBe('{"StatusCode":100}');
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("preserves original body expiry and fault fences through promotion", () => {
+    let now = 1_000;
+    const accountId = "catalog-source:CMD:FOOTBALL";
+    const candidate = new NetworkBodyAssembler({ now: () => now,
+      laneToken: Object.freeze({ accountId, nonce: 1, phase: "CANDIDATE" }) });
+    candidate.ingest({ ...envelope(0), sourceEpoch: "worker:5" });
+    now += 29_000;
+    const promotion = candidate.preparePromotion(Object.freeze({ accountId, nonce: 2, phase: "ACTIVE" }));
+    promotion.commit();
+    now += 1_001;
+    expect(promotion.assembler.ingest({ ...envelope(1), sourceEpoch: "worker:5" })).toBeNull();
+    expect(promotion.assembler.stats()).toMatchObject({ pendingBodies: 0, blockedSourceEpochs: 1 });
+    expect(promotion.assembler.ingest({ ...envelope(0), sourceEpoch: "worker:5" })).toBeNull();
+    promotion.assembler.ingest({ ...envelope(0), sourceEpoch: "worker:6" });
+    expect(promotion.assembler.ingest({ ...envelope(1), sourceEpoch: "worker:6" })).not.toBeNull();
+  });
+
+  it("refuses promotion into another account or another candidate lane", () => {
+    const candidate = new NetworkBodyAssembler({ laneToken: Object.freeze({
+      accountId: "catalog-source:CMD:FOOTBALL", nonce: 1, phase: "CANDIDATE" }) });
+    candidate.ingest(envelope(0));
+    expect(() => candidate.preparePromotion(Object.freeze({ accountId: "catalog-source:IM:FOOTBALL",
+      nonce: 2, phase: "ACTIVE" }))).toThrow("NETWORK_BODY_PROMOTION_INVALID");
+    expect(() => candidate.preparePromotion(Object.freeze({ accountId: "catalog-source:CMD:FOOTBALL",
+      nonce: 2, phase: "CANDIDATE" }))).toThrow("NETWORK_BODY_PROMOTION_INVALID");
+    expect(candidate.ingest(envelope(1))).not.toBeNull();
+  });
+
   it("binds pending bodies to one immutable authority lane and releases them on rotation", () => {
     const budget = new NetworkBodyAssemblyBudget();
     const candidateLane: AuthorityLaneToken = Object.freeze({

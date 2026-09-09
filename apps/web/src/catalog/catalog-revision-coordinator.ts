@@ -4,6 +4,7 @@ import type { CatalogReadResult } from "../api/catalog.js";
 export interface CatalogRevisionCoordinatorOptions {
   readonly read: (accountId: string) => Promise<CatalogReadResult>;
   readonly onCatalog: (result: CatalogReadResult) => void;
+  readonly onStale?: (entry: CatalogRevisionEntry) => void;
   readonly onError?: (accountId: string, error: unknown) => void;
   readonly retryDelayMs?: (error: unknown) => number;
   readonly coalesceMs?: number;
@@ -14,6 +15,7 @@ export interface CatalogRevisionCoordinatorOptions {
 export class CatalogRevisionCoordinator {
   readonly #read: CatalogRevisionCoordinatorOptions["read"];
   readonly #onCatalog: CatalogRevisionCoordinatorOptions["onCatalog"];
+  readonly #onStale: NonNullable<CatalogRevisionCoordinatorOptions["onStale"]>;
   readonly #onError: NonNullable<CatalogRevisionCoordinatorOptions["onError"]>;
   readonly #coalesceMs: number;
   readonly #fallbackMs: number;
@@ -22,18 +24,22 @@ export class CatalogRevisionCoordinator {
   #selected = new Set<string>();
   #desired = new Map<string, CatalogRevisionEntry>();
   readonly #held = new Map<string, string>();
+  readonly #externallyHeldTarget = new Map<string, CatalogRevisionEntry | undefined>();
+  readonly #lastObservedAtMs = new Map<string, number>();
   readonly #pending = new Map<string, number>();
   readonly #pendingDueAtMs = new Map<string, number>();
   readonly #inFlight = new Set<string>();
   readonly #lastPublishedAtMs = new Map<string, number>();
   readonly #retryAt = new Map<string, number>();
   #sequence = -1;
+  #baselineGeneration = 0;
   #fallbackTimer: number | undefined;
   #stopped = false;
 
   constructor(options: CatalogRevisionCoordinatorOptions) {
     this.#read = options.read;
     this.#onCatalog = options.onCatalog;
+    this.#onStale = options.onStale ?? (() => undefined);
     this.#onError = options.onError ?? (() => undefined);
     this.#coalesceMs = options.coalesceMs ?? 50;
     this.#fallbackMs = options.fallbackMs ?? 1_000;
@@ -59,13 +65,18 @@ export class CatalogRevisionCoordinator {
   }
 
   setHeldRevision(accountId: string, revision: string): void {
+    if (this.#held.get(accountId) !== revision) {
+      this.#externallyHeldTarget.set(accountId, this.#desired.get(accountId));
+    }
     this.#held.set(accountId, revision);
   }
 
   acceptBaseline(entries: readonly CatalogRevisionEntry[], sequence: number): void {
     if (this.#stopped) return;
+    this.#baselineGeneration += 1;
     this.#sequence = sequence;
     this.#desired = new Map(entries.map((entry) => [entry.accountId, entry]));
+    for (const entry of entries) if (entry.snapshotState === "STALE") this.#onStale(entry);
     this.#stopFallback();
     for (const accountId of this.#selected) this.#scheduleIfChanged(accountId);
   }
@@ -74,6 +85,7 @@ export class CatalogRevisionCoordinator {
     if (this.#stopped || sequence <= this.#sequence) return;
     this.#sequence = sequence;
     this.#desired.set(entry.accountId, entry);
+    if (entry.snapshotState === "STALE") this.#onStale(entry);
     if (this.#selected.has(entry.accountId)) this.#schedule(entry.accountId, this.#coalesceMs);
   }
 
@@ -131,27 +143,47 @@ export class CatalogRevisionCoordinator {
       desiredBeforeRead.revision === this.#held.get(accountId)) return;
     this.#inFlight.add(accountId);
     const target = desiredBeforeRead;
+    const heldBeforeRead = this.#held.get(accountId);
+    const baselineGeneration = this.#baselineGeneration;
     let failed = false;
     try {
       const result = await this.#read(accountId);
-      if (this.#stopped || !this.#selected.has(accountId)) return;
+      if (this.#stopped || !this.#selected.has(accountId) ||
+        baselineGeneration !== this.#baselineGeneration) return;
+      if (result.catalog.accountId !== accountId) throw new Error("Catalog response account mismatch");
       const latestTarget = this.#desired.get(accountId);
-      const superseded = !fallback && latestTarget !== undefined && target !== undefined &&
-        latestTarget.revision !== target.revision && result.revision !== latestTarget.revision;
-      if (!superseded && result.revision !== this.#held.get(accountId)) {
+      const held = this.#held.get(accountId);
+      const followsExternalHeldUpdate = latestTarget !== undefined &&
+        latestTarget !== this.#externallyHeldTarget.get(accountId) &&
+        result.revision === latestTarget.revision;
+      // Large reads can finish between revisions. Publish their progress unless
+      // a concurrent initial/cache read already advanced the catalog we hold.
+      const repeatsTargetBeforeExternalUpdate = latestTarget !== undefined &&
+        latestTarget === this.#externallyHeldTarget.get(accountId) && result.revision === latestTarget.revision;
+      const heldAdvanced = (held !== heldBeforeRead && !followsExternalHeldUpdate) ||
+        repeatsTargetBeforeExternalUpdate;
+      const observedAtMs = result.catalog.observedAtMs;
+      const olderObservation = observedAtMs < Math.max(this.#lastObservedAtMs.get(accountId) ?? 0,
+        target?.observedAtMs ?? 0);
+      const overtakenByStale = latestTarget?.snapshotState === "STALE" &&
+        result.catalog.snapshotState !== "STALE" && observedAtMs <= latestTarget.observedAtMs;
+      if (!heldAdvanced && !olderObservation && !overtakenByStale && result.revision !== held) {
         this.#held.set(accountId, result.revision);
+        this.#lastObservedAtMs.set(accountId, observedAtMs);
         this.#lastPublishedAtMs.set(accountId, Date.now());
         this.#onCatalog(result);
       }
       this.#retryAt.delete(accountId);
     } catch (error) {
+      if (this.#stopped || !this.#selected.has(accountId) ||
+        baselineGeneration !== this.#baselineGeneration) return;
       failed = true;
       const retryDelayMs = Math.max(0, this.#retryDelayMs(error));
       this.#retryAt.set(accountId, Date.now() + retryDelayMs);
       this.#onError(accountId, error);
     } finally {
       this.#inFlight.delete(accountId);
-      if (!fallback) {
+      if (!fallback || baselineGeneration !== this.#baselineGeneration) {
         if (failed) this.#schedule(accountId, 0);
         else this.#scheduleIfChanged(accountId);
       }

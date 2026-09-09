@@ -31,6 +31,7 @@ function harness() {
   let documentGate: ReturnType<typeof deferred<void>> | undefined;
   const bodies = new Map<string, string>();
   const requests: Array<{ url: string; init: RequestInit }> = [];
+  let mainRefresh = false;
   const forwarded: ChromeBridgeEnvelope[] = [];
   let observer!: NetworkObserver;
   const receive = async (url: string, value: unknown, code = 200) => {
@@ -42,25 +43,27 @@ function harness() {
       response: { url: responseUrl?.(url) ?? url, status: code } });
     await observer.handleEvent(source, "Network.loadingFinished", { requestId });
   };
-  const fetch = async (url: string, init: RequestInit) => {
+  const fetch = async (url: string, init: RequestInit, sessionId?: string) => {
     requests.push({ url, init });
     const isEarly = new URL(url).searchParams.get("timeRange") === "early";
     const id = new URL(url).searchParams.get("eventId") ?? "101";
-    const value = isEarly ? body : { "21": [`9.5 0.91*${id}211h -0.97*${id}212a ${id}2101`] };
+    const isMain = mainRefresh && new URL(url).pathname.endsWith("/getEvent") && !isEarly;
+    const value = isMain ? (new URL(url).searchParams.get("timeRange") === "live" ? [] : [league()]) :
+      isEarly ? body : { "21": [`9.5 0.91*${id}211h -0.97*${id}212a ${id}2101`] };
     const requestId = `active-${++ordinal}`;
     bodies.set(requestId, JSON.stringify(value));
     if (network) await observer.handleEvent(source, "Network.requestWillBeSent", { requestId,
-      type: "Fetch", frameId: binding.frameId, loaderId,
-      request: { url, method: "GET", headers: init.headers ?? {} } });
+      type: "Fetch", ...(sessionId === undefined ? { frameId: binding.frameId, loaderId } : {}),
+      request: { url, method: "GET", headers: init.headers ?? {} } }, sessionId);
     if (isEarly) await fetchGate?.promise;
     if (network) {
       await observer.handleEvent(source, "Network.responseReceived", { requestId, type: "Fetch",
-        response: { url: responseUrl?.(url) ?? url, status: isEarly ? status : 200 } });
-      void observer.handleEvent(source, "Network.loadingFinished", { requestId });
+        response: { url: responseUrl?.(url) ?? url, status: isEarly ? status : 200 } }, sessionId);
+      void observer.handleEvent(source, "Network.loadingFinished", { requestId }, sessionId);
     }
     return new Response(JSON.stringify(value), { status: isEarly ? status : 200, headers: { "retry-after": "2" } });
   };
-  const sendCommand = vi.fn(async (_tab: number, method: string, params?: Record<string, unknown>) => {
+  const sendCommand = vi.fn(async (_tab: number, method: string, params?: Record<string, unknown>, sessionId?: string) => {
     if (method === "Page.getFrameTree") {
       await documentGate?.promise;
       return { frameTree: { frame: { id: binding.frameId, loaderId, url: `${origin}/sport` } } };
@@ -68,7 +71,11 @@ function harness() {
     if (method === "Network.getResponseBody") return { body: bodies.get(String(params?.requestId)), base64Encoded: false };
     if (method === "Runtime.evaluate" && String(params?.expression).includes("AbortController")) {
       const value = await runInNewContext(String(params?.expression), {
-        location: { origin }, fetch, AbortController, setTimeout, clearTimeout, URL, Date, TextEncoder, TextDecoder
+        location: { origin, ...(mainRefresh ? { href: `${origin}/sport` } : {}) },
+        ...(mainRefresh ? { ...(sessionId === undefined ? { document: {} } : {}),
+          performance: { getEntriesByType: () => [{ name: todayUrl }] } } : {}),
+        fetch: (url: string, init: RequestInit) => fetch(url, init, sessionId),
+        AbortController, setTimeout, clearTimeout, URL, Date, TextEncoder, TextDecoder
       });
       return { result: { value: JSON.parse(JSON.stringify(value)) as unknown } };
     }
@@ -123,6 +130,8 @@ function harness() {
       response: { url: request.url, status } }, workerSession);
   const tick = async () => { maintenance.push(observer.maintainKsportFeed(source).catch(() => undefined)); await flush(); await flush(); };
   return { observer, epoch, context, pair, template, tick, receive, requests, forwarded, sendCommand,
+    enableMainRefresh: () => { mainRefresh = true; },
+    releaseMainScheduler: async () => { held.resolve(); await holding; await Promise.all(maintenance); },
     worker, beginWorkerTemplate, finishWorkerTemplate,
     detachWorker: () => observer.handleEvent(source, "Target.detachedFromTarget", { sessionId: workerSession }),
     early: () => forwarded.filter(x => x.request.streamId?.startsWith("sbobet-early:")),
@@ -140,6 +149,20 @@ function harness() {
 }
 
 describe("SBOBET All Dates observer lane", () => {
+  it.each([false, true])("reacquires All Dates from the actual Main refresh receipt after API reconnect (worker attached: %s)", async attachedWorker => {
+    const h = harness(); await h.context(); await h.template(); await h.pair(); await h.tick();
+    await vi.waitFor(() => expect(h.early()).toHaveLength(1)); await flush();
+    await h.releaseMainScheduler();
+    if (attachedWorker) await h.worker();
+    h.observer.beginBridgeSourceEpoch(source.sourceId);
+    h.enableMainRefresh(); h.setNow(wall + 31_000); await h.tick();
+    await vi.waitFor(() => expect(h.forwarded.filter(x => x.request.streamId?.startsWith("ksport-http:") &&
+      x.sourceEpoch !== h.early()[0]!.sourceEpoch)).toHaveLength(2));
+    await h.tick();
+    await vi.waitFor(() => expect(h.early()).toHaveLength(2));
+    expect(h.early()[1]!.sourceEpoch).not.toBe(h.early()[0]!.sourceEpoch);
+    expect(h.activeEarly()).toHaveLength(2);
+  });
   it("keeps successful worker main provenance when its actual Early response arrives", async () => {
     const h = harness(); await h.context(); await h.worker(); await h.pair();
     await h.finishWorkerTemplate(await h.beginWorkerTemplate()); await h.tick();
@@ -247,14 +270,17 @@ describe("SBOBET All Dates observer lane", () => {
     await vi.waitFor(() => expect(h.moreIds()).toContain("202"));
   });
 
-  it.each(["bridge", "context", "document"])("rejects the pending Early receipt after %s retirement", async kind => {
+  it.each(["bridge", "context", "document"].flatMap(kind => [200, 403].map(status => ({ kind, status }))))(
+    "rejects the pending Early response after $kind retirement (HTTP $status)", async ({ kind, status }) => {
     const h = harness(); await h.context(); await h.template(); await h.pair();
     const held = h.holdFetch(); await h.tick();
     await vi.waitFor(() => expect(h.activeEarly()).toHaveLength(1));
     if (kind === "bridge") h.observer.beginBridgeSourceEpoch(source.sourceId);
     if (kind === "context") await h.observer.handleEvent(source, "Runtime.executionContextDestroyed", { executionContextId: 91 });
     if (kind === "document") h.setLoader("document-2");
+    h.setStatus(status);
     held.resolve(); await flush(); await flush(); expect(h.early()).toHaveLength(0);
+    expect(await h.observer.sbobetRequestsPaused()).toBe(false);
   });
 
   it("paces successful All snapshots at 120 seconds independently of the held DOM scheduler", async () => {
@@ -271,7 +297,9 @@ describe("SBOBET All Dates observer lane", () => {
     expect(h.activeEarly()).toHaveLength(1); expect(h.early()).toHaveLength(0);
     h.setNow(wall + 8001); await vi.advanceTimersByTimeAsync(8001); await flush();
     h.setNetwork(true); await h.tick(); expect(h.activeEarly()).toHaveLength(1);
-    h.setNow(wall + 11_001); await h.tick(); await flush();
+    expect(await h.observer.sbobetRequestsPaused()).toBe(false);
+    h.setNow(wall + 10_000); await h.tick(); expect(h.activeEarly()).toHaveLength(1);
+    h.setNow(wall + 10_002); await h.tick(); await flush();
     expect(h.early()).toHaveLength(1);
   });
 
@@ -285,11 +313,24 @@ describe("SBOBET All Dates observer lane", () => {
     await vi.waitFor(() => expect(h.activeEarly()).toHaveLength(2));
   });
 
+  it("retains the pending Early fetch capacity without pausing the main feed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const h = harness(); await h.context(); await h.template(); await h.pair();
+    const held = h.holdFetch(); await h.tick();
+    expect(h.activeEarly()).toHaveLength(1);
+    h.setNow(wall + 8001); await vi.advanceTimersByTimeAsync(8001);
+    expect(await h.observer.sbobetRequestsPaused()).toBe(false);
+    h.setNow(wall + 10_001); await h.tick(); expect(h.activeEarly()).toHaveLength(1);
+    held.resolve(); await flush(); await flush();
+    expect(await h.observer.sbobetRequestsPaused()).toBe(false);
+  });
+
   it("backs off after HTTP 429 and retries an actual successful receipt", async () => {
     const h = harness(); await h.context(); await h.template(); await h.pair(); h.setStatus(429); await h.tick();
     await flush(); expect(h.activeEarly()).toHaveLength(1); expect(h.early()).toHaveLength(0);
     h.setStatus(200); h.setNow(wall + 1000); await h.tick(); expect(h.activeEarly()).toHaveLength(1);
-    h.setNow(wall + 5000); await h.tick();
+    h.setNow(wall + 5000); await h.tick(); expect(h.activeEarly()).toHaveLength(1);
+    h.setNow(wall + 30_001); await h.tick();
     await vi.waitFor(() => expect(h.early()).toHaveLength(1));
   });
 
@@ -297,6 +338,7 @@ describe("SBOBET All Dates observer lane", () => {
     const h = harness(); await h.context(); await h.template(); await h.pair();
     h.setBody({ error: "not a roster" }); await h.tick(); await flush();
     expect(h.early()).toHaveLength(0); expect(h.moreIds()).not.toContain("202");
+    expect(await h.observer.sbobetRequestsPaused()).toBe(false);
     h.setNow(wall + 5000); h.setBody(earlyBody); h.mismatchResponse(); await h.tick(); await flush();
     expect(h.early()).toHaveLength(0);
   });

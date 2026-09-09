@@ -105,6 +105,23 @@ function smallWsBaseline(sequence: number): ChromeBridgeEnvelope {
       streamId: "1" }, payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", "b1", rows, `r${sequence}`])}` } };
 }
 
+function establishSocket(plane: ChromeCatalogDataPlane): void {
+  expect(plane.ingest({ ...smallWsBaseline(0), sourceEpoch: EPOCH,
+    observedAtMs: WALL, receivedMonotonicMs: 100 }, { connectionGeneration: 1 })).toBe(true);
+}
+
+function completeEmptyCollector(sequence: number): ChromeBridgeEnvelope {
+  const generation = `saba:collector:complete-empty-${sequence}`;
+  const periods = ["TODAY", "EARLY"].map((period) => ({ period, rosterMatchIds: [], rosterCount: 0 }));
+  return { ...domEnvelope(sequence, []), payload: { encoding: "UTF8",
+    body: JSON.stringify({ schemaVersion: 2, snapshotId: generation, chunkIndex: 0, chunkCount: 1,
+      sweepId: generation, sweepComplete: true, sweepFrameKey: "sports-frame", sweepDocumentKey: "document-1",
+      records: [...periods.map((period) => ({ kind: "PERIOD_COMPLETE", collectorGeneration: generation, ...period })),
+        { kind: "TERMINAL", collectorGeneration: generation, periods, owners: [],
+          todayRestoration: { selected: true, rosterMatchIds: [], rosterCount: 0 },
+          unresolvedOwners: [], failedOwners: [] }] }) } };
+}
+
 describe("ChromeCatalogDataPlane SABA collector boundary", () => {
   it.each([
     [1_000_000, 50], [10, 1_000_000]
@@ -113,26 +130,27 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     const ws = { ...smallWsBaseline(5), receivedMonotonicMs: sourceClock };
     plane.ingest({ ...ws, sequence: 4, transport: "WS_STATE", payload: { encoding: "UTF8", body: '{"state":"OPEN"}' } });
     expect(plane.ingest(ws)).toBe(true);
+    expect(plane.ingest({ ...completeEmptyCollector(6), sourceEpoch: "worker-a:1",
+      observedAtMs: WALL + 106, receivedMonotonicMs: sourceClock + 1 })).toBe(true);
     const catalog = await plane.read("catalog-source:SABA:FOOTBALL");
     expect(catalog.quotes).toHaveLength(2);
     expect(catalog.quotes.map(({ receivedMonotonicMs }) => receivedMonotonicMs)).toEqual([apiClock - 30, apiClock - 30]);
   });
 
-  it.each([false, true])("does not let pre-DOM WS use retained inventory for promotion (failed prior DOM=%s)", async (failDom) => {
+  it.each([false, true])("does not let visible DOM rescue an incomplete replacement socket (prior DOM attempted=%s)", async (failDom) => {
     const coordinator = new ProviderAuthorityCoordinator();
     const rejected = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => WALL + 10_000, authorityCoordinator: coordinator,
       onIngestRejected: rejected });
+    establishSocket(plane);
     const baseline = Array.from({ length: 50 }, (_, index) => record(`legacy-${index}`));
     expect(plane.ingest(domEnvelope(1, baseline), { connectionGeneration: 1 })).toBe(true);
     expect(plane.ingest(largeCollectorEnvelope(), { connectionGeneration: 1 }), rejected.mock.calls.at(-1)?.[1]).toBe(true);
     const before = await plane.read("catalog-source:SABA:FOOTBALL");
-    expect(before.events).toHaveLength(50);
+    expect(before.events).toHaveLength(51);
     if (failDom) {
-      const promote = vi.spyOn(coordinator, "promote").mockReturnValueOnce({ promoted: false, reason: "PROMOTION_TRANSACTION_FAILED" });
       expect(plane.ingest({ ...domEnvelope(3, baseline), sourceEpoch: "worker-a:1" }, { connectionGeneration: 1 })).toBe(false);
-      expect(rejected.mock.calls.at(-1)?.[1]).toContain("CANDIDATE_PROMOTION_REJECTED");
-      promote.mockRestore();
+      expect(rejected.mock.calls.at(-1)?.[1]).toContain("ADAPTER_DECODE_EMPTY");
     }
     const ws = smallWsBaseline(5);
     plane.ingest({ ...ws, sequence: 4, transport: "WS_STATE", payload: { encoding: "UTF8", body: '{"state":"OPEN"}' } },
@@ -143,18 +161,21 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     expect((await plane.read("catalog-source:SABA:FOOTBALL")).events).toEqual(before.events);
     const promoted = plane.ingest({ ...domEnvelope(6, baseline), sourceEpoch: "worker-a:1",
       observedAtMs: WALL + 106, receivedMonotonicMs: 406 }, { connectionGeneration: 1 });
-    expect(promoted, rejected.mock.calls.at(-1)?.[1]).toBe(true);
+    expect(promoted, rejected.mock.calls.at(-1)?.[1]).toBe(false);
+    expect(coordinator.snapshot("catalog-source:SABA:FOOTBALL").active?.sourceEpoch).toBe(EPOCH);
     expect((await plane.read("catalog-source:SABA:FOOTBALL")).quotes
-      .filter(({ providerEventId }) => providerEventId.startsWith("retained-"))).toEqual(before.quotes);
+      .filter(({ providerEventId }) => providerEventId.startsWith("retained-")))
+      .toEqual(before.quotes.filter(({ providerEventId }) => providerEventId.startsWith("retained-")));
   });
 
   it.each([
     ["same-worker epoch replacement", "worker-a:1", 1],
     ["same epoch connection replacement", EPOCH, 2]
-  ] as const)("retains completed hidden inventory through %s without renewing quote clocks", async (_label, epoch, connection) => {
+  ] as const)("retains active hidden inventory when %s publishes a native baseline before its collector terminal, without renewing clocks", async (_label, epoch, connection) => {
     const rejected = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => WALL + 10_000,
       onIngestRejected: rejected });
+    establishSocket(plane);
     const baseline = Array.from({ length: 50 }, (_, index) => record(`legacy-${index}`));
     expect(plane.ingest(domEnvelope(1, baseline), { connectionGeneration: 1 })).toBe(true);
     expect(plane.ingest(collectorEnvelope(), { connectionGeneration: 1 })).toBe(true);
@@ -162,13 +183,22 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     const oldHidden = previous.quotes.filter(({ providerEventId }) => providerEventId === "hidden");
     expect(oldHidden).toHaveLength(2);
 
-    expect(plane.ingest({ ...domEnvelope(3, baseline), sourceEpoch: epoch },
-      { connectionGeneration: connection }), rejected.mock.calls.at(-1)?.[1]).toBe(true);
+    const nativeReplacementAccepted = plane.ingest({ ...smallWsBaseline(3), sourceEpoch: epoch },
+      { connectionGeneration: connection });
+    const domReplacementAccepted = plane.ingest({ ...domEnvelope(4, baseline), sourceEpoch: epoch,
+      observedAtMs: WALL + 104, receivedMonotonicMs: 404 },
+      { connectionGeneration: connection });
     const retained = await plane.read("catalog-source:SABA:FOOTBALL");
     expect(retained.quotes.filter(({ providerEventId }) => providerEventId === "hidden")).toEqual(oldHidden);
     expect(retained.nativeMarketObservations?.filter(({ providerEventId }) => providerEventId === "unknown"))
       .toEqual(previous.nativeMarketObservations?.filter(({ providerEventId }) => providerEventId === "unknown"));
-    expect(retained.events.map(({ providerEventId }) => providerEventId).sort()).toEqual(["hidden", "legacy-0"]);
+    expect(retained.events.map(({ providerEventId }) => providerEventId).sort()).toEqual(["2", "hidden", "legacy-0"]);
+    expect(nativeReplacementAccepted, rejected.mock.calls.at(-1)?.[1]).toBe(true);
+    expect(domReplacementAccepted, rejected.mock.calls.at(-1)?.[1]).toBe(true);
+    expect(plane.ingest({ ...completeEmptyCollector(5), sourceEpoch: epoch,
+      observedAtMs: WALL + 105, receivedMonotonicMs: 405 }, { connectionGeneration: connection })).toBe(true);
+    expect((await plane.read("catalog-source:SABA:FOOTBALL")).events.map(({ providerEventId }) => providerEventId))
+      .toEqual(["2"]);
   });
 
   it.each([
@@ -176,11 +206,17 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     ["different monotonic clock lineage", SOURCE, 7, "worker-b:0"]
   ] as const)("does not import collector inventory from a %s", async (_label, sourceId, tabId, epoch) => {
     const plane = new ChromeCatalogDataPlane({ now: () => WALL + 10_000 });
+    establishSocket(plane);
     const baseline = Array.from({ length: 50 }, (_, index) => record(`legacy-${index}`));
     expect(plane.ingest(domEnvelope(1, baseline), { connectionGeneration: 1 })).toBe(true);
     expect(plane.ingest(collectorEnvelope(), { connectionGeneration: 1 })).toBe(true);
-    expect(plane.ingest({ ...domEnvelope(3, baseline), sourceId, tabId, sourceEpoch: epoch },
+    expect(plane.ingest({ ...smallWsBaseline(3), sourceId, tabId, sourceEpoch: epoch },
       { connectionGeneration: 2 })).toBe(true);
+    expect(plane.ingest({ ...domEnvelope(4, baseline), sourceId, tabId, sourceEpoch: epoch,
+      observedAtMs: WALL + 104, receivedMonotonicMs: 404 },
+      { connectionGeneration: 2 })).toBe(true);
+    expect(plane.ingest({ ...completeEmptyCollector(5), sourceId, tabId, sourceEpoch: epoch,
+      observedAtMs: WALL + 105, receivedMonotonicMs: 405 }, { connectionGeneration: 2 })).toBe(true);
     const current = await plane.read("catalog-source:SABA:FOOTBALL");
     expect(current.events.some(({ providerEventId }) => providerEventId === "hidden")).toBe(false);
     expect(current.nativeMarketObservations?.some(({ providerEventId }) => providerEventId === "unknown")).toBe(false);
@@ -191,6 +227,7 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     const rejected = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => WALL + 10_000, publish,
       onIngestRejected: rejected });
+    establishSocket(plane);
     const legacy = Array.from({ length: 50 }, (_, index) => record(`legacy-${index}`));
     expect(plane.ingest(domEnvelope(1, legacy), { connectionGeneration: 1 }),
       rejected.mock.calls.at(-1)?.[1]).toBe(true);
@@ -199,7 +236,7 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     const catalog = await plane.read("catalog-source:SABA:FOOTBALL");
 
     expect(catalog.events.map(({ providerEventId }) => providerEventId).sort())
-      .toEqual(["hidden", "legacy-0"]);
+      .toEqual(["2", "hidden", "legacy-0"]);
     expect(catalog.events.map(({ providerEventId }) => providerEventId)).not.toContain("unknown");
     expect(catalog.nativeMarketObservations).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerEventId: "unknown", disposition: "EXCLUDED" })
@@ -207,11 +244,11 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ events: expect.any(Array) }), "FRESH");
   });
 
-  it("does not establish initial provider authority from a collector without qualified DOM evidence", () => {
+  it("establishes initial provider authority from complete Today and Early inventory without a visible DOM prerequisite", () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => WALL + 10_000, publish });
 
-    expect(plane.ingest(collectorEnvelope(1), { connectionGeneration: 1 })).toBe(false);
-    expect(publish).not.toHaveBeenCalled();
+    expect(plane.ingest(collectorEnvelope(2), { connectionGeneration: 1 })).toBe(true);
+    expect(publish).toHaveBeenCalledOnce();
   });
 });

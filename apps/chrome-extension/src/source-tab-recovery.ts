@@ -7,6 +7,7 @@ interface AttachedSource {
 }
 
 interface SourceTabRecoveryOptions {
+  readonly canRecover?: (lobby: ChromeLobbyId) => boolean;
   readonly listAttached: () => readonly AttachedSource[];
   readonly query: () => Promise<readonly TabDescriptor[]>;
   readonly update: (tabId: number, url: string) => Promise<TabDescriptor>;
@@ -54,7 +55,12 @@ export class SourceTabRecovery {
     this.#options = options;
   }
 
+  #assertRecoveryAllowed(lobby: ChromeLobbyId): void {
+    if (this.#options.canRecover?.(lobby) === false) throw new Error("SOURCE_REQUEST_BACKOFF");
+  }
+
   async ensure(lobby: ChromeLobbyId, url: string): Promise<void> {
+    this.#assertRecoveryAllowed(lobby);
     const recognized = recognizeExpectedLobbyTab({ id: 0, url }, lobby);
     if (recognized?.lobby !== lobby) throw new Error("UNTRUSTED_LAUNCH_URL");
     const launchUrl = lobby === "KSPORT" ? ksportFootballLaunchUrl(url) : url;
@@ -102,6 +108,7 @@ export class SourceTabRecovery {
     // KSPORT defers its sportsbook child target when launched in a background
     // tab on some Chrome builds. Make only this explicitly requested direct
     // launch active so its live/today baseline starts immediately.
+    this.#assertRecoveryAllowed(lobby);
     const pending = await this.#options.create("about:blank", lobby === "KSPORT");
     try {
       if (pending.id === undefined) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
@@ -111,6 +118,7 @@ export class SourceTabRecovery {
       // navigation; attaching after chrome.tabs.create(url) can miss it and
       // leave a heartbeating tab with no decoded catalog.
       await (this.#options.attachBootstrap ?? ((tab) => this.#options.attach(tab)))({ ...pending, url: launchUrl }, lobby);
+      this.#assertRecoveryAllowed(lobby);
       const navigated = await this.#options.update(pending.id, launchUrl);
       await this.#waitForLobby(navigated, lobby);
     } catch (error) {
@@ -133,6 +141,7 @@ export class SourceTabRecovery {
   }
 
   async restore(lobby: ChromeLobbyId): Promise<void> {
+    this.#assertRecoveryAllowed(lobby);
     if (lobby === "IM") {
       if (this.#imRestoreInFlight !== null) return this.#imRestoreInFlight;
       const operation = this.#restoreIm().finally(() => {
@@ -181,6 +190,7 @@ export class SourceTabRecovery {
       // canonical provider launch below.
       if (session.window !== undefined || recognizeLobbyTab(session.tab ?? {})?.lobby !== lobby ||
         !session.sessionId || !this.#options.restore) continue;
+      this.#assertRecoveryAllowed(lobby);
       const restored = await this.#waitForLobby(await this.#options.restore(session.sessionId), lobby);
       await this.#options.attach(restored);
       return;
@@ -238,6 +248,7 @@ export class SourceTabRecovery {
 
   async #reuse(tab: TabDescriptor, lobby: ChromeLobbyId, url: string, reload: boolean,
     deadSessionFallbackUrl?: string): Promise<void> {
+    this.#assertRecoveryAllowed(lobby);
     if (tab.id === undefined) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
     this.#options.beginSourceEpoch?.(`chrome:${lobby}:${tab.id}`);
     this.#options.onBootstrapStart?.(tab.id);
@@ -288,6 +299,7 @@ export class SourceTabRecovery {
           { ...tab, url: deadSessionFallbackUrl }, lobby);
         navigated = await this.#options.update(tab.id, deadSessionFallbackUrl);
       } else {
+        this.#assertRecoveryAllowed(lobby);
         navigated = reload && this.#options.reload !== undefined
           ? await this.#options.reload(tab.id, lobby)
           : await this.#options.update(tab.id, url);

@@ -1,4 +1,4 @@
-import type { ChromeBridgeControlMessage, ChromeLobbyId } from "@tool-chenh/contracts";
+import type { ChromeBridgeControlMessage, ChromeBridgeEnvelope, ChromeLobbyId } from "@tool-chenh/contracts";
 import { chromeBridgeProviderAccountIdForLobby, chromeBridgeSourceIdentity, type ChromeBridgeAccountKey,
   type ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
 import type { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
@@ -153,6 +153,28 @@ export class ChromeBridgeControlPlane {
     const control = this.#snapshotControl(sourceId, identity.lobby);
     socket.send(JSON.stringify(control));
     return 1;
+  }
+
+  rejectNetworkBody(envelope: Pick<ChromeBridgeEnvelope, "sourceId" | "sourceEpoch" | "sequence">): number {
+    if (this.#authorityCoordinator === null) return 0;
+    const source = chromeBridgeSourceIdentity(envelope.sourceId);
+    if (source === null) return 0;
+    const accountId = chromeBridgeProviderAccountIdForLobby(source.lobby);
+    const epoch = envelope.sourceEpoch ?? `legacy:${envelope.sourceId}`;
+    // The assembler fault belongs to one exact authority epoch. A delayed
+    // rejection must never rotate its replacement or a healthy sibling tab.
+    for (const disposition of ["ACTIVE", "CANDIDATE"] as const) {
+      const attached = this.#recoveryAuthoritySource(accountId, source.lobby, disposition);
+      if (attached?.sourceId !== envelope.sourceId || attached.identity.sourceEpoch !== epoch ||
+        attached.socket.readyState !== 1) continue;
+      const control: ChromeBridgeControlMessage = { version: 1, kind: "REJECT",
+        sourceId: envelope.sourceId, ...(envelope.sourceEpoch === undefined ? {} : { sourceEpoch: envelope.sourceEpoch }),
+        sequence: envelope.sequence,
+        reason: "NETWORK_BODY_UNAVAILABLE" };
+      try { attached.socket.send(JSON.stringify(control)); return 1; }
+      catch { return 0; }
+    }
+    return 0;
   }
 
   reloadSource(sourceId: string): number {

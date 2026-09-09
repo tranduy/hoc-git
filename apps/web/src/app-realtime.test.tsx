@@ -39,6 +39,50 @@ afterEach(() => {
 });
 
 describe("App catalog realtime epochs", () => {
+  it("retains the strongest stale observation when later entries in a batch have older timestamps", () => {
+    window.history.replaceState({}, "", "/football-live");
+    render(<App initialSnapshot={snapshot} />);
+    const options = clientHarness.options!;
+    act(() => options.onCatalogBaseline?.([], 0));
+    const strongest = { ...entry("stale-102"), observedAtMs: 102, snapshotState: "STALE" as const };
+    const older = { ...strongest, revision: "stale-101", observedAtMs: 101 };
+    const fresh = { ...entry("fresh-102"), observedAtMs: 102 };
+    act(() => {
+      options.onCatalogRevision?.(strongest, 1);
+      options.onCatalogRevision?.(older, 2);
+      options.onCatalogRevision?.(fresh, 3);
+    });
+    expect(JSON.parse(screen.getByTestId("catalog-feed").textContent!).revisions).toEqual([
+      { entry: strongest, sequence: 1 }, { entry: fresh, sequence: 3 }
+    ]);
+  });
+
+  it("preserves each account's stale invalidation when React batches a burst of newer revisions", () => {
+    window.history.replaceState({}, "", "/football-live");
+    render(<App initialSnapshot={snapshot} />);
+    const options = clientHarness.options!;
+    act(() => options.onCatalogBaseline?.([entry("im-initial")], 1));
+    const stale = { ...entry("im-stale"), snapshotState: "STALE" as const };
+    const bti = { ...entry("bti-fresh"), accountId: "catalog-source:BTI:FOOTBALL" };
+    const im = { ...entry("im-new"), observedAtMs: 101 };
+    act(() => {
+      options.onCatalogRevision?.(stale, 2);
+      options.onCatalogRevision?.(bti, 3);
+      options.onCatalogRevision?.(im, 4);
+    });
+    expect(JSON.parse(screen.getByTestId("catalog-feed").textContent!).revisions).toEqual([
+      { entry: stale, sequence: 2 }, { entry: bti, sequence: 3 }, { entry: im, sequence: 4 }
+    ]);
+
+    const newerIm = { ...im, revision: "im-newer", observedAtMs: 102 };
+    act(() => options.onCatalogRevision?.(newerIm, 5));
+    expect(JSON.parse(screen.getByTestId("catalog-feed").textContent!).revisions).toEqual([
+      { entry: stale, sequence: 2 }, { entry: bti, sequence: 3 }, { entry: newerIm, sequence: 5 }
+    ]);
+    act(() => options.onCatalogBaseline?.([newerIm], 0));
+    expect(JSON.parse(screen.getByTestId("catalog-feed").textContent!).revisions).toEqual([]);
+  });
+
   it("drops the previous socket revision when a reconnect baseline arrives", () => {
     window.history.replaceState({}, "", "/football-live");
     render(<App initialSnapshot={snapshot} />);

@@ -33,6 +33,7 @@ function setup(now: () => number = () => 2_000, browserRefreshEnabled = true,
   const waitForFreshBaseline = vi.fn(async (requestedAccountId: string) =>
     snapshot(requestedAccountId, { state: "LIVE", reason: null, lastCompleteBaselineAtMs: 2_001 }));
   const feedRegistry = {
+    read: vi.fn(() => { throw new Error("PROVIDER_FEED_NOT_LIVE"); }),
     snapshot: vi.fn((requestedAccountId: string) => snapshot(requestedAccountId)),
     subscribe: vi.fn(() => () => undefined),
     waitForFreshBaseline
@@ -656,6 +657,7 @@ describe("AutomaticSourceRecovery", () => {
       controlPlane: { requestLobbySnapshot: vi.fn(() => 1), reloadSource: vi.fn(() => 1),
         reloadRecoverySource: vi.fn(() => 1), ensureLobby: vi.fn(() => 1), restoreLobby: vi.fn(() => 1) },
       feedRegistry: {
+        read: vi.fn(() => { throw new Error("PROVIDER_FEED_NOT_LIVE"); }),
         snapshot: vi.fn(() => snapshot(APSPORT, { sourceId: "chrome:TSPORT:9",
           sourceEpoch: "observer-a:0", activeGeneration: "generation-1" })),
         subscribe: vi.fn(() => () => undefined),
@@ -680,7 +682,8 @@ describe("AutomaticSourceRecovery", () => {
     expect(() => new AutomaticSourceRecovery({
       controlPlane: { requestLobbySnapshot: vi.fn(() => 1), ensureLobby: vi.fn(() => 1),
         restoreLobby: vi.fn(() => 1) },
-      feedRegistry: { snapshot: vi.fn(() => snapshot(APSPORT)), subscribe: vi.fn(() => () => undefined),
+      feedRegistry: { read: vi.fn(() => { throw new Error("PROVIDER_FEED_NOT_LIVE"); }),
+        snapshot: vi.fn(() => snapshot(APSPORT)), subscribe: vi.fn(() => () => undefined),
         waitForFreshBaseline: vi.fn(async () => snapshot(APSPORT)) },
       refreshFabetLaunches: vi.fn(async () => undefined),
       withLatestFabetLaunch: async (_provider, _category, consume) => consume("https://x.test/fresh"),
@@ -846,6 +849,7 @@ describe("AutomaticSourceRecovery", () => {
         restoreLobby
       },
       feedRegistry: {
+        read: vi.fn(() => { throw new Error("PROVIDER_FEED_NOT_LIVE"); }),
         snapshot: vi.fn(() => snapshot(CMD, {
           sourceId: "chrome:CMD:5", sourceEpoch: "observer-a:0",
           activeGeneration: "cmd:5:observation:7"

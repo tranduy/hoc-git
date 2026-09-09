@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CanonicalEvent, Opportunity, StakeLeg } from "@tool-chenh/contracts";
 import { RoiBadge } from "./roi-badge.js";
+import { roiPercentFromRatio } from "../watch/roi-tone.js";
 
 const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
 const percentFormat = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -77,7 +78,7 @@ export function OpportunityCard({ opportunity, event, revision }: { readonly opp
         <dl className="opportunity-summary">
           <div><dt>Worst-case profit ({opportunity.baseCurrency})</dt><dd><ExactNumber label={`Worst-case profit in ${opportunity.baseCurrency}`} value={opportunity.worstCaseProfit} /></dd></div>
           <div><dt>Total stake ({opportunity.baseCurrency})</dt><dd><ExactNumber label={`Total stake in ${opportunity.baseCurrency}`} value={opportunity.totalStakeBase} /></dd></div>
-          <div><dt>ROI</dt><dd title={opportunity.roi}><RoiBadge ariaLabel={`ROI: ${opportunity.roi}`} roiPercent={Number(opportunity.roi) * 100} /></dd></div>
+          <div><dt>ROI</dt><dd title={opportunity.roi}><RoiBadge ariaLabel={`ROI: ${opportunity.roi}`} roiPercent={roiPercentFromRatio(opportunity.roi)} worstCaseProfit={opportunity.worstCaseProfit} /></dd></div>
           <div><dt>Confidence</dt><dd className={opportunity.executionConfidence === "HIGH" ? "confidence-high" : "confidence-blocked"}>{opportunity.executionConfidence} confidence</dd></div>
           <div><dt>Server quote age</dt><dd><QuoteAge ageMs={opportunity.quoteAgeMs} renderedAtMs={observedAtMs} /></dd></div>
         </dl>

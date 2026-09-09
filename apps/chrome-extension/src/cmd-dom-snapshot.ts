@@ -1,6 +1,22 @@
 // This expression returns only public catalog fields. It never returns HTML,
 // storage, cookies, URLs, request headers, or form values.
+export const PUBLIC_PROVIDER_TIMEZONE_EXPRESSION = `(() => {
+  const offsets = new Set();
+  const clock = /^\\d{1,2}:\\d{2}:\\d{2}\\s*(?:AM|PM)?\\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s*\\d{1,2},?\\s*\\d{4}\\s*GMT\\s*([+-])\\s*(\\d{1,2})(?::(\\d{2}))?$/iu;
+  for (const node of document.querySelectorAll("#systemTime, .c-header__time")) {
+    const value = (node.textContent ?? "").trim();
+    if (value.length > 160) return null;
+    const match = clock.exec(value);
+    if (match === null) return null;
+    const hour = Number(match[2]), minute = Number(match[3] ?? 0);
+    if (hour > 14 || minute > 59 || hour === 14 && minute !== 0) return null;
+    offsets.add((match[1] === "+" ? 1 : -1) * (hour * 60 + minute));
+  }
+  return offsets.size === 1 ? [...offsets][0] : null;
+})()`;
+
 export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
+  const providerTimezoneOffsetMinutes = (${PUBLIC_PROVIDER_TIMEZONE_EXPRESSION});
   const clean = (value, max = 160) => {
     const normalized = String(value ?? "").replace(/\\s+/gu, " ").trim();
     return normalized.length <= max ? normalized : "";
@@ -103,6 +119,7 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
       leagueId: clean(league.getAttribute("data-leagueid"), 128),
       leagueName: clean(league.querySelector(".c-league__name")?.textContent, 160),
       matchId,
+      providerTimezoneOffsetMinutes,
       timeText: clean(match.querySelector(".c-match-time")?.textContent, 80),
       teamNames: [...new Set([...match.querySelectorAll(".c-team-name")]
         .map((element) => clean(element.textContent, 160)).filter(Boolean))].slice(0, 4),

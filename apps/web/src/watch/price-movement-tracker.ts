@@ -4,7 +4,7 @@ import { decimalOdds, type ComparisonEvent } from "../catalog/comparison.js";
 
 export interface ObservedPriceMovement {
   readonly key: string;
-  readonly event: ComparisonEvent;
+  readonly event: Pick<ComparisonEvent, "key">;
   readonly rowKey: string;
   readonly provider: ProviderId;
   readonly selection: string;
@@ -44,13 +44,15 @@ export class PriceMovementTracker {
           for (const quote of cell.quotes) {
             const odds = decimalOdds(quote);
             if (odds === null) continue;
-            const key = quoteKey(event.key, row.key, cell.provider, quote.selection);
+            const key = `${quoteKey(event.key, row.key, cell.provider, quote.selection)}::${quote.providerEventId}::${quote.providerMarketId}::${quote.providerSelectionId}`;
             const decimal = plain(odds);
             current.set(key, { decimal });
             const previous = this.#previous.get(key);
             if (previous === undefined || previous.decimal === decimal) continue;
             const magnitude = new Decimal(decimal).minus(previous.decimal).abs();
-            const movement: ObservedPriceMovement = { key, event, rowKey: row.key, provider: cell.provider,
+            // Ranking uses only the identity. Retaining the comparison event
+            // also retains every provider's full historical catalog for 60s.
+            const movement: ObservedPriceMovement = { key, event: { key: event.key }, rowKey: row.key, provider: cell.provider,
               selection: quote.selection, previousDecimal: previous.decimal, currentDecimal: decimal,
               magnitude: magnitude.toFixed(magnitude.decimalPlaces()), changedAtMs };
             const prior = this.#latest.get(eventRowKey);

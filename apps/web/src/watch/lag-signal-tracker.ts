@@ -1,7 +1,7 @@
 import type { ProviderId, ProviderQuote } from "@tool-chenh/contracts";
 import { Decimal } from "@tool-chenh/core";
 import { decimalOdds, type ComparisonEvent, type ComparisonRow } from "../catalog/comparison.js";
-import { buildFixedBaseStakePlan, type FixedBaseStakePlan, type FixedBaseStakePolicy } from "./fixed-base-stake.js";
+import { buildFixedBaseStakePlan, stakeLegMatchesQuote, type FixedBaseStakePlan, type FixedBaseStakePolicy } from "./fixed-base-stake.js";
 
 export interface LagMovement {
   readonly provider: ProviderId;
@@ -59,8 +59,8 @@ function quoteAge(event: ComparisonEvent, provider: ProviderId, quote: ProviderQ
 
 function planQuoteAge(event: ComparisonEvent, row: ComparisonRow, plan: FixedBaseStakePlan, nowMs: number): number {
   return plan.legs.reduce((oldest, leg) => {
-    const cell = row.cells.find((candidate) => candidate.provider === leg.provider);
-    const quote = cell?.quotes.find((candidate) => candidate.selection === leg.selection);
+    const quote = row.cells.filter((candidate) => candidate.provider === leg.provider)
+      .flatMap(cell => cell.quotes).find((candidate) => stakeLegMatchesQuote(leg, candidate));
     return quote === undefined ? Number.POSITIVE_INFINITY : Math.max(oldest, quoteAge(event, leg.provider, quote, nowMs));
   }, 0);
 }
@@ -87,7 +87,7 @@ export class LagSignalTracker {
           for (const quote of cell.quotes) {
             const decimal = plainOdds(quote);
             if (decimal === null) continue;
-            const key = quoteKey(event.key, row.key, cell.provider, quote.selection);
+            const key = `${quoteKey(event.key, row.key, cell.provider, quote.selection)}::${quote.providerEventId}::${quote.providerMarketId}::${quote.providerSelectionId}`;
             current.set(key, { decimal });
             const previous = this.#previous.get(key);
             if (previous !== undefined && previous.decimal !== decimal) {

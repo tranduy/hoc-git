@@ -79,6 +79,7 @@ type CatalogAuthority = "NONE" | "WS" | "HTTP";
 
 interface SourceEpochState {
   early: EarlySnapshot | null;
+  baselinePublished: boolean;
   socket: SocketEpoch | null;
   readonly http: HttpEpoch;
   wsSequenceHighWatermark: number;
@@ -325,6 +326,11 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly lobby = "KSPORT" as const;
   readonly providerFamily = "SBOBET";
   readonly #states = new Map<string, SourceEpochState>();
+  readonly #requireEarlyRoster: boolean;
+
+  constructor(options: { readonly requireEarlyRoster?: boolean } = {}) {
+    this.#requireEarlyRoster = options.requireEarlyRoster === true;
+  }
 
   resetSource(sourceId: string): void {
     for (const key of this.#states.keys()) if (key.startsWith(`${sourceId}|`)) this.#states.delete(key);
@@ -336,6 +342,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (existing !== undefined) return existing;
     const created: SourceEpochState = {
       early: null,
+      baselinePublished: false,
       socket: null,
       http: { committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(),
         pendingBaseline: null, committedOrdinal: 0, authorityTabId: null,
@@ -378,13 +385,20 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       const applied = applyEarlyRoster(source, envelope);
       if (applied === null) return [];
       const catalog = catalogFromSource(source, envelope.observedAtMs);
+      // Main Live/Today proves only those two partitions. A new source/bridge
+      // must also receive All Dates before replacing the complete prematch book.
+      const initialBaseline = this.#requireEarlyRoster && !source.baselinePublished;
+      if (initialBaseline) source.baselinePublished = true;
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
-        value: catalog, ...emptyMarketProof(source, catalog), evidenceMode: "DELTA",
+        value: catalog, ...emptyMarketProof(source, catalog),
+        ...(initialBaseline ? { authoritativeBaseline: true, evidenceMode: "BASELINE" as const }
+          : { evidenceMode: "DELTA" as const }),
         ...(applied.removed.length === 0 ? {} : { authoritativeRemovedEventIds: applied.removed }),
         generation: source.http.generation, provenance: "AUTHENTICATED_HTTP" }];
     }
     if (envelope.transport === "HTTP_RESPONSE" && moreOrdinal(envelope) !== null) {
       if (!applyEventMore(source, envelope)) return [];
+      if (this.#requireEarlyRoster && !source.baselinePublished) return [];
       const catalog = catalogFromSource(source, envelope.observedAtMs);
       // The retained HTTP roster still owns this materialized catalog. More
       // closure retires only its own prices; it never proves event absence.
@@ -394,6 +408,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     if (envelope.transport === "HTTP_RESPONSE" && detailOrdinal(envelope) !== null) {
       if (!applyEventDetail(source, envelope)) return [];
+      if (this.#requireEarlyRoster && !source.baselinePublished) return [];
       const catalog = catalogFromSource(source, envelope.observedAtMs);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
         value: catalog, ...emptyMarketProof(source, catalog),
@@ -463,6 +478,8 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         ...epoch.committedPartitions.get("today")!.records.keys(), ...(source.early?.records.keys() ?? [])])) {
         syncPrematchAdmission(source, eventId, envelope.sequence);
       }
+      if (this.#requireEarlyRoster && source.early === null) return [];
+      source.baselinePublished = true;
       const catalog = catalogFromSource(source, envelope.observedAtMs);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
         observedAtMs: envelope.observedAtMs, value: catalog,
@@ -531,6 +548,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         appliedHttpLaneDelta;
     }
     if (!appliedHttpLaneDelta) return [];
+    if (this.#requireEarlyRoster && !source.baselinePublished) return [];
     const catalog = catalogFromSource(source, envelope.observedAtMs);
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog, evidenceMode: "DELTA",

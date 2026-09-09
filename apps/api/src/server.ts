@@ -514,13 +514,16 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     authorityCoordinator: chromeBridgeRegistry.authorityCoordinator, telemetry: pipelineTelemetry,
     onIngestRejected: (envelope, reason) => {
       pipelineTelemetry.recordIngestRejected(chromeBridgeProviderAccountIdForLobby(envelope.lobby), reason);
+      if (reason === "NETWORK_BODY_UNAVAILABLE") chromeBridgeControlPlane?.rejectNetworkBody(envelope);
     } })
     : null;
   if (chromeCatalogDataPlane !== null) {
-    await Promise.all(["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"].map(async (provider) => {
+    // Current six-book caches exceed 400 MB of JSON. Restore one at a time so
+    // startup does not retain six read buffers/strings alongside parsed books.
+    for (const provider of ["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"]) {
       const catalog = await catalogStore.load(`catalog-source|${provider}|FOOTBALL`);
       if (catalog !== null) chromeCatalogDataPlane.restore(catalog);
-    }));
+    }
   }
   if (chromeBridgeRegistry) {
     const allowedCaptureLobbies = captureLobbies(env.CHROME_BRIDGE_CAPTURE_LOBBIES);
@@ -645,14 +648,16 @@ export async function startServer(env: Readonly<Record<string, string | undefine
         listAuthorities: () => providerAuthorityCoordinator?.snapshots() ?? [],
         listFeeds: () => providerFeeds?.list() ?? [],
         listCatalogStatuses: () => catalogAccess.sources.listStatuses(),
-        catalogRevision: (accountId) => catalogRevisions.get(accountId)
+        catalogRevision: (accountId) => catalogRevisions.get(accountId),
+        networkBodyAssembly: (accountId) => chromeCatalogDataPlane?.networkBodyAssembly(accountId) ?? null
       }),
       get: (accountId) => pipelineTelemetry.diagnostic({
         listSources: () => pipelineDiagnosticSources(chromeBridgeRegistry),
         listAuthorities: () => providerAuthorityCoordinator?.snapshots() ?? [],
         listFeeds: () => providerFeeds?.list() ?? [],
         listCatalogStatuses: () => catalogAccess.sources.listStatuses(),
-        catalogRevision: (id) => catalogRevisions.get(id)
+        catalogRevision: (id) => catalogRevisions.get(id),
+        networkBodyAssembly: (id) => chromeCatalogDataPlane?.networkBodyAssembly(id) ?? null
       }, accountId)
     },
     providerPreflight: sessionServices.providerPreflight,

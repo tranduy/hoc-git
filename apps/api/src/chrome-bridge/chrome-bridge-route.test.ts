@@ -48,6 +48,37 @@ function nextMessage(socket: { once(event: "message", callback: (data: Buffer) =
 }
 
 describe("Chrome bridge route", () => {
+  it("delivers a fatal body rejection before the ACK from the same registry delivery", async () => {
+    const { app, registry, controlPlane } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    // The production data-plane rejection callback runs inside this synchronous
+    // registry delivery. Authority must already be attached for its REJECT.
+    registry.subscribe((envelope) => { controlPlane.rejectNetworkBody(envelope); });
+    const controls: unknown[] = [];
+    const acknowledged = new Promise<void>((resolve) => {
+      socket.on("message", (data) => {
+        const control = JSON.parse(data.toString("utf8")) as { kind: string };
+        controls.push(control);
+        if (control.kind === "ACK") resolve();
+      });
+    });
+    try {
+      socket.send(JSON.stringify({ ...validEnvelope, sourceEpoch: "worker-a:0" }));
+      await acknowledged;
+      expect(controls.slice(0, 2)).toEqual([
+        { version: 1, kind: "REJECT", sourceId: validEnvelope.sourceId, sourceEpoch: "worker-a:0",
+          sequence: 0, reason: "NETWORK_BODY_UNAVAILABLE" },
+        { version: 1, kind: "ACK", sourceId: validEnvelope.sourceId, sourceEpoch: "worker-a:0", sequence: 0 }
+      ]);
+    } finally {
+      socket.terminate();
+      await app.close();
+    }
+  });
+
   it("accepts a loopback extension client, validates the envelope, and ACKs", async () => {
     const { app, registry } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {

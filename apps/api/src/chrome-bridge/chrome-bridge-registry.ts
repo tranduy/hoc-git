@@ -72,14 +72,11 @@ export class ChromeBridgeRegistry {
   readonly #slots: ReadonlyMap<ChromeBridgeProviderAccountId, AccountTransportSlot>;
   readonly #listeners = new Set<(envelope: ChromeBridgeEnvelope, context: ChromeBridgeIngestContext) => void>();
   readonly #connectionGenerations = new WeakMap<object, number>();
-  // Revocation is per account on a connection, never the whole connection. All
-  // six books share one bridge socket, so revoking the socket let a single
-  // retired source refuse every later envelope from every other book, with the
-  // socket still open and the extension with no way to notice. Measured
-  // 2026-08-28: SABA fell silent at 17:29:05 with its provider session expired,
-  // and exactly retireAfterMs later, at 17:34:02, the five healthy books stopped
-  // together and stayed dead. A retired owner must still prove a newer
-  // connection generation, but only for the account it lost.
+  // Explicitly closed connections remain revoked. Idle source retirement is
+  // fenced by its authority identity instead: every book shares this socket,
+  // and a newer source epoch must be able to prove a replacement baseline
+  // without disconnecting healthy books. Revoking an idle candidate's account
+  // also used to silence its still-live incumbent on the same connection.
   readonly #revokedAccounts = new WeakMap<object, Set<ChromeBridgeProviderAccountId>>();
   readonly #implicitConnection = {};
   #latestConnectionGeneration = 0;
@@ -294,12 +291,10 @@ export class ChromeBridgeRegistry {
   #retireSources(now: number): void {
     for (const [accountId, slot] of this.#slots) {
       if (slot.candidate !== null && now - slot.candidate.lastAcceptedAtMs > this.#retireAfterMs) {
-        if (slot.candidate.connection !== null) this.#revoke(slot.candidate.connection, accountId);
         this.#authorityCoordinator.release(slot.candidate.identity);
         slot.candidate = null;
       }
       if (slot.active !== null && now - slot.active.lastAcceptedAtMs > this.#retireAfterMs) {
-        if (slot.active.connection !== null) this.#revoke(slot.active.connection, accountId);
         slot.retiredActiveTransportIdentity = slot.active.identity;
         this.#authorityCoordinator.release(slot.active.identity);
         slot.active = null;

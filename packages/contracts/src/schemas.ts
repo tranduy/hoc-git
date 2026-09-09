@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { footballBinaryMarketSpec } from "./football-binary-market.js";
+import { footballResultMarketSpec } from "./football-result-market.js";
 export {
   ChromeBridgeControlMessageSchema,
   ChromeBridgeEnvelopeSchema,
@@ -145,6 +146,10 @@ export const MarketTypeSchema = z.enum([
   "FT_AH",
   "FT_TOTAL",
   "FH_1X2",
+  "SH_1X2",
+  "FT_DOUBLE_CHANCE",
+  "FH_DOUBLE_CHANCE",
+  "SH_DOUBLE_CHANCE",
   "FH_AH",
   "FH_TOTAL",
   "SH_AH",
@@ -165,6 +170,7 @@ export const MarketTypeSchema = z.enum([
   "FT_BTTS",
   "FH_BTTS",
   "SH_BTTS",
+  "FT_BOTH_TEAMS_SCORE_BOTH_HALVES",
   "SENDING_OFF",
   "HOME_CORNER_FT_TOTAL",
   "HOME_CORNER_FH_TOTAL",
@@ -186,6 +192,8 @@ export const MarketTypeSchema = z.enum([
   "FT_BOTH_HALVES_UNDER_TOTAL",
   "HOME_FT_TOTAL",
   "AWAY_FT_TOTAL",
+  "HOME_FH_TOTAL",
+  "AWAY_FH_TOTAL",
   "HOME_FT_TO_WIN",
   "AWAY_FT_TO_WIN",
   "FT_ANY_TEAM_TO_WIN",
@@ -545,7 +553,7 @@ function validateCategoryCompatibility(
   context: z.RefinementCtx
 ): void {
   const compatibleMarketType = value.category === "FOOTBALL"
-    ? value.marketType === "FT_1X2" || value.marketType === "FH_1X2" ||
+    ? footballResultMarketSpec(value.marketType) !== null ||
       footballBinaryMarketSpec(value.marketType) !== null
     : lolMarketTypes.has(value.marketType);
   const compatibleScopes = value.category === "FOOTBALL" ? footballScopes : lolScopes;
@@ -567,9 +575,7 @@ function validateCategoryCompatibility(
   }
 
   const expectedFootballScope = value.category === "FOOTBALL"
-    ? value.marketType === "FT_1X2" ? "FULL_TIME"
-      : value.marketType === "FH_1X2" ? "FIRST_HALF"
-        : footballBinaryMarketSpec(value.marketType)?.scope
+    ? footballResultMarketSpec(value.marketType)?.scope ?? footballBinaryMarketSpec(value.marketType)?.scope
     : undefined;
   if (expectedFootballScope !== undefined && value.scope !== expectedFootballScope) {
     context.addIssue({
@@ -659,13 +665,17 @@ export const NativeMarketObservationSchema = z.strictObject({
   nativeType: z.string().trim().min(1).max(128),
   nativeLabel: z.string().trim().min(1).max(512).nullable(),
   nativeScope: z.string().trim().min(1).max(128).nullable(),
-  outcomeLabels: z.array(z.string().trim().min(1).max(256)).max(256),
+  outcomeLabels: z.array(z.string().trim().min(1).max(256)).max(1024),
+  nativeRow: z.string().max(4096).optional(),
+  status: QuoteStatusSchema.optional(),
   nativeSelections: z.array(z.strictObject({
     selectionId: z.string().max(256).nullable(),
     outcomeId: z.string().max(256).nullable(),
     line: z.string().max(512).nullable(),
-    price: z.string().max(128).nullable()
-  })).max(256).optional(),
+    price: z.string().max(128).nullable(),
+    rawFormat: OddsFormatSchema.optional(),
+    status: QuoteStatusSchema.optional()
+  })).max(1024).optional(),
   observedAtMs: z.number().finite().nonnegative(),
   disposition: z.enum(["NORMALIZED", "EXCLUDED", "UNMAPPED"]),
   reason: z.string().trim().min(1).max(256)

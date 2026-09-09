@@ -1,8 +1,9 @@
-import { footballBinaryMarketSpec, isNoPushFootballLine,
+import { footballBinaryMarketSpec, footballResultMarketSpec, resultComplement, isNoPushFootballLine,
   type MarketType, type ProviderEvent, type ProviderId, type ProviderMarket,
   type ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { compareProviders, sortProviderItems } from "./provider-order.js";
+import { observedCompetitionAliases } from "./observed-competition-aliases.js";
 
 export interface ComparisonCell {
   readonly provider: ProviderId;
@@ -15,6 +16,7 @@ export interface ComparisonCell {
 }
 
 export interface ComparisonRow {
+  readonly opposition?: ResultOpposition;
   readonly key: string;
   readonly marketType: string;
   readonly scope: string;
@@ -26,6 +28,7 @@ export interface ComparisonRow {
 }
 
 export interface ObservedTicketRow {
+  readonly opposition?: ResultOpposition;
   readonly key: string;
   readonly marketType: string;
   readonly scope: string;
@@ -33,6 +36,13 @@ export interface ObservedTicketRow {
   readonly settlementProfile: string;
   readonly outcomeDomain: readonly string[];
   readonly cells: readonly ComparisonCell[];
+}
+
+/** A comparison partition, never a replacement for either native source market. */
+export interface ResultOpposition {
+  readonly kind: "RESULT_COMPLEMENT";
+  readonly single: "HOME" | "DRAW" | "AWAY";
+  readonly double: "HOME_DRAW" | "HOME_AWAY" | "DRAW_AWAY";
 }
 
 export interface ComparisonEvent {
@@ -49,11 +59,68 @@ export interface ComparisonEvent {
 type EventOrientation = "SAME" | "SWAPPED";
 
 const footballTeamAliases = new Map<string, string>([
+  ["lausanne sports", "lausanne sport"],
+  ["rodez af", "rodez aveyron"],
   ["st gilloise", "union saint gilloise"],
   ["union st gilloise", "union saint gilloise"],
   ["sabah", "sabah baku"],
   ["al hussein jor", "al hussein irbid"],
-  ["maccabi kiryat gat", "kiryat gat"]
+  ["maccabi kiryat gat", "kiryat gat"],
+  // Exact variants observed across all six feeds. Include the full prefixed
+  // spellings so canonicalizing a short name preserves existing IM matches.
+  ["paris saint germain", "paris st germain"],
+  ["bayern munchen", "bayern munich"],
+  ["olympiacos", "olympiakos"],
+  ["helsingborg if", "helsingborg"],
+  ["helsingborgs", "helsingborg"],
+  ["helsingborgs if", "helsingborg"],
+  ["busan ipark", "busan i park"],
+  ["sheffield wednesday", "sheffield wed"],
+  ["west bromwich albion", "west brom"],
+  ["austria wien", "austria vienna"],
+  ["rapid wien", "rapid vienna"],
+  ["rapid wien 2", "rapid vienna 2"],
+  ["sk rapid wien 2", "rapid vienna 2"],
+  ["legia warszawa", "legia warsaw"],
+  ["kairat almaty", "kayrat almaty"],
+  ["grasshopper", "grasshoppers"],
+  ["djurgardens", "djurgarden"],
+  ["djurgardens if", "djurgarden"],
+  ["sparta praha", "sparta prague"],
+  ["ac sparta praha", "sparta prague"],
+  ["slavia praha", "slavia prague"],
+  ["sk slavia praha", "slavia prague"],
+  ["st gallen", "sankt gallen"],
+  ["el gouna", "el gounah"],
+  ["dinamo moscow", "dynamo moscow"],
+  ["baniyas", "bani yas"],
+  ["estudiantes lp", "estudiantes la plata"],
+  ["gimnasia lp", "gimnasia la plata"],
+  ["deportivo la coruna", "dep la coruna"],
+  ["st patricks athletic", "saint patricks"],
+  ["japan w u20", "japan u20 w"],
+  ["usa w u20", "usa u20 w"],
+  ["st mirren", "saint mirren"],
+  ["al ahly egypt", "al ahly cairo"],
+  ["operario ferroviario esporte clube", "operario ferroviario ec"],
+  ["operario pr", "operario ferroviario ec"],
+  ["stade rennes", "stade rennais"],
+  ["rennes", "stade rennais"],
+  ["ferencvarosi tc", "ferencvaros"],
+  ["young violets austria wien", "young violets austria vienna"],
+  ["palmeiras sp", "palmeiras"],
+  ["sociedade esportiva palmeiras", "palmeiras"],
+  ["rc lens", "lens"],
+  ["olympique lyonnais", "lyon"],
+  ["stade brestois", "brest"],
+  ["koln", "cologne"],
+  ["hamburger sv", "hamburg"],
+  ["nhat ban u23", "japan u23"],
+  ["nhat ban nu", "japan w"],
+  ["thai lan nu", "thailand w"],
+  ["han quoc nu", "south korea w"],
+  ["dai bac trung hoa nu", "chinese taipei w"],
+  ["viet nam nu", "vietnam w"]
 ]);
 
 const lolTeamAliases = new Map<string, string>([
@@ -91,6 +158,13 @@ function identityText(value: string): string {
 }
 
 const footballCompetitionAliases = new Map<string, string>([
+  ["scotland premiership", "scotland-premiership"],
+  ["scottish premiership", "scotland-premiership"],
+  ["giai ngoai hang scotland", "scotland-premiership"],
+  ["czech republic first league", "czech-first-league"],
+  ["czech republic 1st division", "czech-first-league"],
+  ["giai bong da hang nhat quoc gia sec", "czech-first-league"],
+  ["giai vo dich quoc gia cong hoa sec", "czech-first-league"],
   ["vong loai cup c3 chau au play off", "uefa-conference-league-qualification"],
   ["vong loai cup c3 chau au", "uefa-conference-league-qualification"],
   ["uefa europa conference league qualification", "uefa-conference-league-qualification"],
@@ -102,6 +176,53 @@ const footballCompetitionAliases = new Map<string, string>([
   ["giai hang nhi mexico expansion mx", "mexico-liga-expansion"],
   ["colombia primera b", "colombia-primera-b"],
   ["giai hang nhi colombia", "colombia-primera-b"],
+  ["giai bong da hang 2 colombia primera b", "colombia-primera-b"],
+  ["giai my mls next pro", "usa-mls-next-pro"],
+  ["usa mls next pro", "usa-mls-next-pro"],
+  ["giai mls next pro hoa ky", "usa-mls-next-pro"],
+  ["brazil campeonato paulista u20", "brazil-paulista-u20"],
+  ["giai vo dich paulista u20 cua brazil", "brazil-paulista-u20"],
+  ["giai paulista u20 brazil", "brazil-paulista-u20"],
+  ["colombia primera a", "colombia-primera-a"],
+  ["giai colombia primera a", "colombia-primera-a"],
+  ["giai vo dich quoc gia colombia", "colombia-primera-a"],
+  ["iceland u19 league a", "iceland-u19-league-a"],
+  ["giai u19 iceland a", "iceland-u19-league-a"],
+  ["belgium challenger pro league", "belgium-challenger-pro-league"],
+  ["giai challenger pro league bi", "belgium-challenger-pro-league"],
+  ["el salvador reserve league", "el-salvador-reserve-league"],
+  ["giai reserve league el salvador", "el-salvador-reserve-league"],
+  ["mexico liga mx", "mexico-liga-mx"],
+  ["giai liga mx mexico", "mexico-liga-mx"],
+  ["giai vo dich quoc gia mexico liga mx", "mexico-liga-mx"],
+  ["indonesia super league", "indonesia-liga-1"],
+  ["indonesia liga 1", "indonesia-liga-1"],
+  ["giai liga 1 indonesia", "indonesia-liga-1"],
+  ["giai uae pro league", "uae-pro-league"],
+  ["uae pro league", "uae-pro-league"],
+  ["finland veikkausliiga", "finland-veikkausliiga"],
+  ["giai ngoai hang phan lan", "finland-veikkausliiga"],
+  ["paraguay division intermedia", "paraguay-division-intermedia"],
+  ["giai paraguay segunda division", "paraguay-division-intermedia"],
+  ["giai vo dich quoc gia paraguay hang trung", "paraguay-division-intermedia"],
+  ["japan j2 league", "japan-j2-league"],
+  ["japan j league division 2", "japan-j2-league"],
+  ["giai bong da hang nhi nhat ban j2 league", "japan-j2-league"],
+  ["giai hang nhi nhat ban j2 league", "japan-j2-league"],
+  ["china csl", "china-super-league"],
+  ["china football super league", "china-super-league"],
+  ["giai bong da ngoai hang trung quoc", "china-super-league"],
+  ["giai vo dich quoc gia trung quoc", "china-super-league"],
+  ["england league two", "england-league-two"],
+  ["giai anh league two", "england-league-two"],
+  ["el salvador primera division", "el-salvador-primera-division"],
+  ["giai hang 1 el salvador", "el-salvador-primera-division"],
+  ["giai primera division el salvador", "el-salvador-primera-division"],
+  ["copa libertadores", "conmebol-libertadores"],
+  ["conmebol libertadores", "conmebol-libertadores"],
+  ["giai copa libertadores", "conmebol-libertadores"],
+  ["copa sudamericana", "conmebol-sudamericana"],
+  ["giai copa sudamericana", "conmebol-sudamericana"],
   ["giai laliga tay ban nha", "spain-la-liga"],
   ["giai la liga tay ban nha", "spain-la-liga"],
   ["giai vo dich quoc gia tay ban nha la liga", "spain-la-liga"],
@@ -110,6 +231,7 @@ const footballCompetitionAliases = new Map<string, string>([
   ["australia cup", "australia-cup"],
   ["australia ffa cup", "australia-cup"],
   ["cup australia", "australia-cup"],
+  ["cup quoc gia uc", "australia-cup"],
   ["giai vo dich cup uc", "australia-cup"],
   ["new zealand nrfl premier division women", "new-zealand-nrfl-women"],
   ["new zealand nrfl women premiership", "new-zealand-nrfl-women"],
@@ -222,7 +344,8 @@ const footballCompetitionAliases = new Map<string, string>([
   ["finland ykkosliiga", "finland-ykkosliiga"],
   ["giai hang nhat phan lan", "finland-ykkosliiga"],
   ["cup quoc gia israel", "israel-state-cup"],
-  ["cup israel", "israel-state-cup"]
+  ["cup israel", "israel-state-cup"],
+  ...observedCompetitionAliases
 ]);
 
 function competitionIdentity(value: string): string {
@@ -263,14 +386,16 @@ function footballMarketFamily(marketType: string): FootballMarketFamily {
 }
 
 function competitionIdentityForFamily(value: string, family: FootballMarketFamily): string {
-  const identity = competitionIdentity(value);
+  let identity = competitionIdentity(value);
   if (family === "CORNERS") {
-    return identity.replace(/\s+(?:corners?|corner bets?|phat goc|goc)$/u, "").trim();
+    identity = identity.replace(/\s+(?:corners?|corner bets?|phat goc|goc)$/u, "").trim();
   }
   if (family === "CARDS") {
-    return identity.replace(/\s+(?:bookings?|cards?|booking bets?|the phat|phat the)$/u, "").trim();
+    identity = identity.replace(/\s+(?:bookings?|cards?|booking bets?|the phat|phat the)$/u, "").trim();
   }
-  return identity;
+  // Product suffixes prevent the full label from matching a known league alias.
+  // Resolve the remaining base name only after removing this statistic's suffix.
+  return footballCompetitionAliases.get(identity) ?? identity;
 }
 
 function competitionLinkKey(identity: string, family: FootballMarketFamily): string {
@@ -462,7 +587,7 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
       for (const family of families) {
         const identity = competitionIdentityForFamily(event.competition, family);
         if (identity.length === 0) continue;
-        const key = `${catalog.provider} ${family} ${identity}`;
+        const key = `${catalog.provider}\u0000${family}\u0000${identity}`;
         const entry = fixturesByBookCompetition.get(key) ??
           { identity, provider: catalog.provider, family, fixtures: [] };
         entry.fixtures.push({ participantA: event.participantA, participantB: event.participantB,
@@ -479,7 +604,7 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
   const sharedFixtures = new Map<string, Set<number>>();
   const rememberedCounts = new Map<string, number>();
   const pairKey = (left: string, right: string): string =>
-    left < right ? `${left} ${right}` : `${right} ${left}`;
+    left < right ? `${left}\u0000${right}` : `${right}\u0000${left}`;
   const blocks = new Map<string, { key: string; index: number; fixture: LearnedFixture }[]>();
   for (const [key, entry] of fixturesByBookCompetition) {
     for (const [index, fixture] of entry.fixtures.entries()) {
@@ -520,7 +645,7 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
     for (let right = left + 1; right < entries.length; right += 1) {
       const [leftKey, leftEntry] = entries[left]!;
       const [rightKey, rightEntry] = entries[right]!;
-      if (leftKey.split(" ")[0] === rightKey.split(" ")[0]) continue;
+      if (leftKey.split("\u0000")[0] === rightKey.split("\u0000")[0]) continue;
       if (leftEntry.identity === rightEntry.identity) continue;
       if (leftEntry.family !== rightEntry.family) continue;
       // A pair the memory has watched agree on two fixtures is carrying the
@@ -571,10 +696,14 @@ interface FootballParticipantFingerprint {
 function footballParticipantFingerprint(value: string): FootballParticipantFingerprint {
   const identity = participantIdentity("FOOTBALL", value);
   const tokens = identity.split(" ").filter(Boolean);
+  // This observed team name must retain its distinction from Austria Vienna
+  // when Wien/Vienna aliases make the remaining club tokens identical.
+  const namedTeamQualifiers = /\byoung violets\b/u.test(identity) ? ["young violets"] : [];
   const canonicalQualifier = (token: string): string => ["ladies", "nu", "w", "women"].includes(token)
     ? "women" : ["res", "reserve", "reserves"].includes(token) ? "reserve" : token;
   return { identity,
-    qualifiers: tokens.filter((token) => footballParticipantQualifiers.has(token)).map(canonicalQualifier).sort(),
+    qualifiers: [...tokens.filter((token) => footballParticipantQualifiers.has(token)).map(canonicalQualifier),
+      ...namedTeamQualifiers].sort(),
     meaningful: tokens.filter((token) => !footballClubDesignators.has(token) &&
       !footballParticipantQualifiers.has(token)) };
 }
@@ -606,6 +735,14 @@ function footballOrientationScore(leftA: string, leftB: string, rightA: string, 
 
 function comparableFootballProduct(event: ProviderEvent): boolean {
   if (event.category !== "FOOTBALL") return true;
+  // Cached/provider payloads have labelled ET/PEN fixtures as REGULATION.
+  // These explicit settlement markers must not become optional name tokens
+  // in fuzzy club matching, even when both books made the same scope error.
+  const nativeText = decodeHtmlEntities(`${event.competition} ${event.participantA} ${event.participantB}`)
+    .normalize("NFKD").replace(/\p{M}+/gu, "");
+  const markedScopes = new Set<string>([...nativeText.matchAll(/\(\s*(ET|PEN|HIEP\s+PHU|LUAN\s+LUU)\s*\)/giu)]
+    .map(match => /^(?:ET|HIEP\s+PHU)$/iu.test(match[1]!) ? "EXTRA_TIME" : "PENALTY_SHOOTOUT"));
+  if (markedScopes.size > 1 || (markedScopes.size === 1 && !markedScopes.has(event.eventScope))) return false;
   const text = competitionIdentity(`${event.competition} ${event.participantA} ${event.participantB}`);
   return !/\b(?:fantasy match|which team advances|team to advance|special market)\b/u.test(text);
 }
@@ -809,6 +946,7 @@ const swappedFootballSubjectMarketType: Readonly<Partial<Record<MarketType, Mark
   HOME_FT_WIN_TO_NIL: "AWAY_FT_WIN_TO_NIL", AWAY_FT_WIN_TO_NIL: "HOME_FT_WIN_TO_NIL",
   HOME_FT_CLEAN_SHEET: "AWAY_FT_CLEAN_SHEET", AWAY_FT_CLEAN_SHEET: "HOME_FT_CLEAN_SHEET",
   HOME_FT_TOTAL: "AWAY_FT_TOTAL", AWAY_FT_TOTAL: "HOME_FT_TOTAL",
+  HOME_FH_TOTAL: "AWAY_FH_TOTAL", AWAY_FH_TOTAL: "HOME_FH_TOTAL",
   HOME_FT_TO_WIN: "AWAY_FT_TO_WIN", AWAY_FT_TO_WIN: "HOME_FT_TO_WIN"
 };
 
@@ -832,15 +970,24 @@ function orientMarket(market: ProviderMarket, orientation: EventOrientation): Pr
     isFootballHandicapMarketType(market.marketType);
   const marketType = market.category === "FOOTBALL" ? orientFootballMarketType(market.marketType, orientation)
     : market.marketType;
-  const settlementProfile = market.category === "FOOTBALL" && marketType !== market.marketType
+  // Only the registry's known subject-specific profile can be reoriented.
+  // A provider-specific rule must not become verified merely by swapping teams.
+  const settlementProfile = market.category === "FOOTBALL" && marketType !== market.marketType &&
+    market.settlementProfile === footballBinaryMarketSpec(market.marketType)?.settlementProfile
     ? footballBinaryMarketSpec(marketType)?.settlementProfile ?? market.settlementProfile
     : market.settlementProfile;
-  return { ...market, marketType, settlementProfile,
-    line: canonicalLine(shouldInvert ? invertLine(market.line) : market.line) };
+  const line = canonicalLine(shouldInvert ? invertLine(market.line) : market.line);
+  // Unchanged canonical and native values can share one immutable record,
+  // including through the worker's structured clone.
+  return marketType === market.marketType && settlementProfile === market.settlementProfile && line === market.line
+    ? market : { ...market, marketType, settlementProfile, line };
 }
 
 function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrientation): readonly ProviderQuote[] {
-  if (orientation !== "SWAPPED") return quotes.map((quote) => ({ ...quote, line: canonicalLine(quote.line) }));
+  if (orientation !== "SWAPPED") return quotes.map((quote) => {
+    const line = canonicalLine(quote.line);
+    return line === quote.line ? quote : { ...quote, line };
+  });
   return quotes.map((quote) => {
     if (quote.category === "LOL") {
       if (quote.selection === "TEAM_A") return { ...quote, selection: "TEAM_B" };
@@ -848,9 +995,12 @@ function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrient
       return quote;
     }
     if (quote.category === "FOOTBALL") {
-      const selection = quote.selection === "HOME" ? "AWAY" : quote.selection === "AWAY" ? "HOME" : quote.selection;
+      const selection = quote.selection === "HOME" ? "AWAY" : quote.selection === "AWAY" ? "HOME"
+        : quote.selection === "HOME_DRAW" ? "DRAW_AWAY" : quote.selection === "DRAW_AWAY" ? "HOME_DRAW" : quote.selection;
       const line = canonicalLine(isFootballHandicapMarketType(quote.marketType) ? invertLine(quote.line) : quote.line);
-      return { ...quote, marketType: orientFootballMarketType(quote.marketType, orientation), selection, line };
+      const marketType = orientFootballMarketType(quote.marketType, orientation);
+      return marketType === quote.marketType && selection === quote.selection && line === quote.line
+        ? quote : { ...quote, marketType, selection, line };
     }
     return quote;
   }).sort((left, right) => left.selection.localeCompare(right.selection));
@@ -864,50 +1014,195 @@ function eligibleTwoWayCells(cells: readonly ComparisonCell[], requireSameSettle
   const marketType = cells[0]?.market.marketType;
   if (marketType === undefined || marketType === "FT_1X2" || marketType === "FH_1X2") return [];
   const domains = new Map<string, ComparisonCell[]>();
-  const byProvider = new Map<ProviderId, ComparisonCell[]>();
-  for (const cell of cells) byProvider.set(cell.provider, [...(byProvider.get(cell.provider) ?? []), cell]);
-  for (const candidates of byProvider.values()) {
-    if (candidates.length !== 1) continue;
-    const cell = candidates[0]!;
-    const selections = [...new Set(cell.quotes.map((quote) => quote.selection))].sort();
-    if (selections.length !== 2) continue;
+  for (const cell of distinctResultSourceCells(cells)) {
+    const selections = exactTwoWayOutcomeDomain(cell.market.marketType, cell.market.scope, cell.market.line)!;
     const signature = [selections.join("|"), requireSameSettlement ? cell.market.settlementProfile : "DISPLAY_ONLY"].join("|");
     const matching = domains.get(signature) ?? [];
     matching.push(cell);
     domains.set(signature, matching);
   }
-  return [...domains.values()].filter((matching) => new Set(matching.map((cell) => cell.provider)).size >= 2)
-    .sort((left, right) => right.length - left.length)[0] ?? [];
+  return [...domains.values()].map(matching => {
+    const pairs = binaryOpposingCellPairs(matching);
+    const participating = new Set(pairs.flatMap(pair => [...pair]));
+    return matching.filter(cell => participating.has(cell));
+  }).filter(matching => matching.length > 0).sort((left, right) =>
+    new Set(right.map(cell => cell.provider)).size - new Set(left.map(cell => cell.provider)).size)[0] ?? [];
+}
+
+/** Source-market links, not a bookmaker combination count when some offers have one leg. */
+export function binaryOpposingCellPairs(cells: readonly ComparisonCell[]): readonly (readonly [ComparisonCell, ComparisonCell])[] {
+  const pairs: (readonly [ComparisonCell, ComparisonCell])[] = [];
+  for (let left = 0; left < cells.length; left += 1) for (let right = left + 1; right < cells.length; right += 1) {
+    const a = cells[left]!, b = cells[right]!;
+    const domain = exactTwoWayOutcomeDomain(a.market.marketType, a.market.scope, a.market.line);
+    if (a.provider === b.provider || domain === null || a.market.marketType !== b.market.marketType ||
+      a.market.scope !== b.market.scope || !sameMarketLine(a.market.line, b.market.line) ||
+      a.market.settlementProfile !== b.market.settlementProfile) continue;
+    if (domain.some((selection, index) => a.quotes.some(quote => quote.selection === selection &&
+      quote.status === "OPEN" && decimalOdds(quote) !== null) && b.quotes.some(quote =>
+        quote.selection === domain[1 - index] && quote.status === "OPEN" && decimalOdds(quote) !== null))) pairs.push([a, b]);
+  }
+  return pairs;
 }
 
 function displayTwoWayCells(cells: readonly ComparisonCell[]): readonly ComparisonCell[] {
-  const accepted: ComparisonCell[] = [];
-  let outcomeDomain: string | null = null;
-  const byProvider = new Map<ProviderId, ComparisonCell[]>();
-  for (const cell of cells.filter(isFocusedTwoWayTicket)) {
-    byProvider.set(cell.provider, [...(byProvider.get(cell.provider) ?? []), cell]);
-  }
-  for (const candidates of byProvider.values()) {
-    if (candidates.length !== 1) continue;
-    const cell = candidates[0]!;
-    const selections = [...new Set(cell.quotes.map((quote) => quote.selection))].sort().join("|");
-    if (outcomeDomain !== null && selections !== outcomeDomain) continue;
-    outcomeDomain ??= selections;
-    accepted.push(cell);
-  }
-  return accepted;
+  return distinctResultSourceCells(cells.filter(isAvailableTwoWayTicket));
 }
 
 export function exactTwoWayOutcomeDomain(marketType: string, scope: string,
   line: string | null): readonly string[] | null {
   const spec = footballBinaryMarketSpec(marketType as MarketType);
+  const asianLine = line !== null && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(line) &&
+    Number.isSafeInteger(Number(line) * 4);
   if (spec !== null && scope === spec.scope &&
-    (spec.linePolicy === "NONE" ? line === null : isNoPushFootballLine(line))) {
+    (spec.linePolicy === "NONE" ? line === null :
+      spec.family === "TOTAL" || spec.family === "HANDICAP"
+        ? asianLine : isNoPushFootballLine(line))) {
     return [...spec.outcomes].sort();
   }
   if (marketType === "SERIES_WINNER" && scope === "SERIES" && line === null) return ["TEAM_A", "TEAM_B"];
   if (marketType === "MAP_WINNER" && /^MAP_[1-5]$/u.test(scope) && line === null) return ["TEAM_A", "TEAM_B"];
   return null;
+}
+
+type OppositionContract = Pick<ComparisonRow, "marketType" | "scope" | "line" | "opposition">;
+
+export function comparisonOutcomeDomain(row: OppositionContract): readonly string[] | null {
+  if (row.opposition === undefined) return exactTwoWayOutcomeDomain(row.marketType, row.scope, row.line);
+  const spec = footballResultMarketSpec(row.marketType as MarketType);
+  return row.opposition.kind === "RESULT_COMPLEMENT" && spec?.family === "RESULT" && spec.scope === row.scope &&
+    row.line === null && spec.outcomes.includes(row.opposition.single) && resultComplement(row.opposition.single) === row.opposition.double
+    ? [row.opposition.single, row.opposition.double].sort() : null;
+}
+
+/** Validates the actual selected native leg; an unrelated missing outcome is not a fabricated quote. */
+export function isResultOppositionCell(row: OppositionContract, cell: ComparisonCell): boolean {
+  const domain = comparisonOutcomeDomain(row);
+  const spec = footballResultMarketSpec(cell.market.marketType);
+  if (row.opposition === undefined || domain === null || spec === null || cell.market.category !== "FOOTBALL" ||
+    cell.provider !== cell.market.provider || cell.market.scope !== row.scope || cell.market.scope !== spec.scope ||
+    cell.market.line !== null || cell.market.status !== "OPEN" ||
+    cell.market.settlementProfile !== spec.settlementProfile || cell.quotes.length !== 1) return false;
+  const quote = cell.quotes[0]!;
+  const selection = spec.family === "RESULT" ? row.opposition.single : row.opposition.double;
+  return quote.selection === selection && quote.provider === cell.provider && quote.category === "FOOTBALL" &&
+    quote.sequence !== null && quote.sequence !== undefined &&
+    quote.providerEventId === cell.market.providerEventId && quote.providerMarketId === cell.market.providerMarketId &&
+    quote.marketType === cell.market.marketType && quote.scope === row.scope && quote.line === null &&
+    quote.status === "OPEN" && decimalOdds(quote) !== null;
+}
+
+/** Only real complementary native source cells can contribute a route. */
+export function resultOppositionCellPairs(row: Pick<ComparisonRow, "marketType" | "scope" | "line" | "opposition" | "cells">):
+  readonly (readonly [ComparisonCell, ComparisonCell])[] {
+  const domain = comparisonOutcomeDomain(row);
+  if (row.opposition === undefined || domain === null) return [];
+  const eligible = row.cells.filter(cell => isResultOppositionCell(row, cell));
+  const unambiguous = distinctResultSourceCells(eligible);
+  return unambiguous.filter(cell => cell.quotes[0]!.selection === domain[0]).flatMap(first =>
+    unambiguous.filter(second => second.provider !== first.provider && second.quotes[0]!.selection === domain[1] &&
+      second.market.settlementProfile === first.market.settlementProfile).map(second => [first, second] as const));
+}
+
+export function distinctResultSourceCells(cells: readonly ComparisonCell[]): readonly ComparisonCell[] {
+  return cells.filter(cell => cells.filter(other => other.provider === cell.provider &&
+    other.market.providerEventId === cell.market.providerEventId &&
+    other.market.providerMarketId === cell.market.providerMarketId).length === 1 &&
+    !cells.some(other => other.provider === cell.provider && other.market.providerEventId !== cell.market.providerEventId));
+}
+
+function resultOppositionRows(rawCells: readonly ComparisonCell[]): readonly ObservedTicketRow[] {
+  const result: ObservedTicketRow[] = [];
+  const resultCells = rawCells.filter(cell => footballResultMarketSpec(cell.market.marketType) !== null);
+  if (resultCells.length === 0) return result;
+  for (const marketType of ["FT_1X2", "FH_1X2", "SH_1X2"] as const) {
+    const spec = footballResultMarketSpec(marketType)!;
+    for (const single of ["HOME", "DRAW", "AWAY"] as const) {
+      const opposition: ResultOpposition = { kind: "RESULT_COMPLEMENT", single,
+        double: resultComplement(single) as ResultOpposition["double"] };
+      const contract = { marketType, scope: spec.scope, line: null, opposition };
+      const candidates = new Map<string, ComparisonCell[]>();
+      for (const cell of resultCells) {
+        const nativeSpec = footballResultMarketSpec(cell.market.marketType);
+        if (nativeSpec === null || nativeSpec.scope !== spec.scope) continue;
+        // Reject contradictory or mixed-generation native rows before selecting a leg.
+        if (new Set(cell.quotes.map(quote => quote.selection)).size !== cell.quotes.length ||
+          new Set(cell.quotes.map(quote => quote.providerSelectionId)).size !== cell.quotes.length ||
+          new Set(cell.quotes.map(quote => quote.sequence)).size !== 1 ||
+          cell.quotes.some(quote => !nativeSpec.outcomes.includes(quote.selection as never) ||
+            quote.provider !== cell.provider || quote.category !== cell.market.category ||
+            quote.providerEventId !== cell.market.providerEventId || quote.providerMarketId !== cell.market.providerMarketId ||
+            quote.marketType !== cell.market.marketType || quote.scope !== cell.market.scope || quote.line !== null)) continue;
+        const selection = nativeSpec.family === "RESULT" ? single : opposition.double;
+        const selected = { ...cell, quotes: cell.quotes.filter(quote => quote.selection === selection) };
+        if (!isResultOppositionCell(contract, selected)) continue;
+        const key = `${cell.provider}|${cell.market.marketType}`;
+        candidates.set(key, [...(candidates.get(key) ?? []), selected]);
+      }
+      const cells = distinctResultSourceCells([...candidates.values()].flat());
+      const pairs = resultOppositionCellPairs({ ...contract, cells });
+      if (pairs.length === 0) continue;
+      const participating = new Set(pairs.flatMap(pair => [...pair]));
+      result.push({ ...contract, key: `RESULT_COMPLEMENT|${spec.scope}|${single}|${opposition.double}`,
+        settlementProfile: spec.settlementProfile, outcomeDomain: [single, opposition.double].sort(),
+        cells: cells.filter(cell => participating.has(cell)) });
+    }
+  }
+  return result;
+}
+
+export interface TwoWaySettlementCase {
+  readonly kind: "FIRST_WINS" | "SECOND_WINS" | "PUSH" | "SPLIT";
+  /** For each canonical outcome: stake fraction won, then fraction refunded. */
+  readonly factors: readonly [readonly [number, number], readonly [number, number]];
+}
+
+export function twoWaySettlementCases(marketType: string, scope: string,
+  line: string | null): readonly TwoWaySettlementCase[] | null {
+  if (exactTwoWayOutcomeDomain(marketType, scope, line) === null) return null;
+  const extremes: readonly TwoWaySettlementCase[] = [
+    { kind: "FIRST_WINS", factors: [[1, 0], [0, 0]] },
+    { kind: "SECOND_WINS", factors: [[0, 0], [1, 0]] }
+  ];
+  if (line === null || isNoPushFootballLine(line)) return extremes;
+  const value = Number(line);
+  if (Number.isInteger(value)) return [...extremes, { kind: "PUSH", factors: [[0, 1], [0, 1]] }];
+  const spec = footballBinaryMarketSpec(marketType as MarketType);
+  const fraction = Math.abs(value) % 1;
+  // Canonical TOTAL order is OVER, UNDER; HANDICAP order is AWAY, HOME.
+  const firstHalfWin = spec?.family === "TOTAL" ? fraction === 0.75
+    : !((fraction === 0.25 && value > 0) || (fraction === 0.75 && value < 0));
+  return [...extremes, { kind: "SPLIT", factors: firstHalfWin
+    ? [[0.5, 0.5], [0, 0.5]] : [[0, 0.5], [0.5, 0.5]] }];
+}
+
+export function comparisonSettlementCases(row: OppositionContract): readonly TwoWaySettlementCase[] | null {
+  if (row.opposition === undefined) return twoWaySettlementCases(row.marketType, row.scope, row.line);
+  return comparisonOutcomeDomain(row) === null ? null : [
+    { kind: "FIRST_WINS", factors: [[1, 0], [0, 0]] },
+    { kind: "SECOND_WINS", factors: [[0, 0], [1, 0]] }
+  ];
+}
+
+function settlementMargin(marketType: string, scope: string, line: string | null,
+  odds: readonly number[]): number | null {
+  const scenarios = twoWaySettlementCases(marketType, scope, line);
+  if (scenarios === null || odds.length !== 2) return null;
+  const payouts = scenarios.map(({ factors }) => factors.map(([won, refunded], index) =>
+    won * odds[index]! + refunded));
+  const fractions = [0, 1];
+  for (let i = 0; i < payouts.length; i += 1) for (let j = i + 1; j < payouts.length; j += 1) {
+    const a = payouts[i]!; const b = payouts[j]!;
+    const denominator = a[0]! - a[1]! - b[0]! + b[1]!;
+    if (denominator === 0) continue;
+    const fraction = (b[1]! - a[1]!) / denominator;
+    if (fraction >= 0 && fraction <= 1) fractions.push(fraction);
+  }
+  const margin = Math.max(...fractions.map(fraction => Math.min(...payouts.map(payout =>
+    fraction * payout[0]! + (1 - fraction) * payout[1]!)))) - 1;
+  // Display arithmetic is binary floating point; an exact zero must not become
+  // a profit badge. The constrained stake plan uses Decimal settlement math.
+  return Math.abs(margin) < 1e-12 ? 0 : margin;
 }
 
 function sameMarketLine(left: string | null, right: string | null): boolean {
@@ -919,20 +1214,34 @@ function sameMarketLine(left: string | null, right: string | null): boolean {
 
 export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
   const expectedDomain = exactTwoWayOutcomeDomain(cell.market.marketType, cell.market.scope, cell.market.line);
-  if (expectedDomain === null || cell.market.status !== "OPEN" || cell.quotes.length !== expectedDomain.length) return false;
+  return expectedDomain !== null && cell.quotes.length === expectedDomain.length &&
+    availableTwoWayCell(cell)?.quotes.length === expectedDomain.length;
+}
+
+export function isAvailableTwoWayTicket(cell: ComparisonCell): boolean {
+  return availableTwoWayCell(cell) !== null;
+}
+
+function availableTwoWayCell(cell: ComparisonCell): ComparisonCell | null {
+  const expectedDomain = exactTwoWayOutcomeDomain(cell.market.marketType, cell.market.scope, cell.market.line);
+  if (expectedDomain === null || cell.market.status !== "OPEN" || cell.quotes.length === 0 ||
+    cell.quotes.length > expectedDomain.length) return null;
   const expectedCategory = cell.market.marketType === "SERIES_WINNER" || cell.market.marketType === "MAP_WINNER"
     ? "LOL" : "FOOTBALL";
-  if (cell.market.provider !== cell.provider || cell.market.category !== expectedCategory) return false;
+  if (cell.market.provider !== cell.provider || cell.market.category !== expectedCategory) return null;
   const selections = cell.quotes.map((quote) => quote.selection);
-  if (new Set(selections).size !== selections.length || [...selections].sort().join("|") !== expectedDomain.join("|")) return false;
+  if (new Set(selections).size !== selections.length || selections.some(selection => !expectedDomain.includes(selection))) return null;
   const selectionIds = cell.quotes.map((quote) => quote.providerSelectionId);
-  if (new Set(selectionIds).size !== selectionIds.length) return false;
+  if (new Set(selectionIds).size !== selectionIds.length) return null;
   const generation = cell.quotes[0]?.sequence ?? null;
-  if (generation === null || !cell.quotes.every((quote) => quote.sequence === generation)) return false;
-  return cell.quotes.every((quote) => quote.status === "OPEN" && quote.provider === cell.provider &&
+  if (generation === null || !cell.quotes.every((quote) => quote.sequence === generation)) return null;
+  if (!cell.quotes.every((quote) => quote.provider === cell.provider &&
     quote.category === cell.market.category && quote.providerEventId === cell.market.providerEventId &&
     quote.providerMarketId === cell.market.providerMarketId && quote.marketType === cell.market.marketType &&
-    quote.scope === cell.market.scope && sameMarketLine(quote.line, cell.market.line));
+    quote.scope === cell.market.scope && sameMarketLine(quote.line, cell.market.line))) return null;
+  const quotes = cell.quotes.filter(quote => quote.status === "OPEN");
+  return quotes.length === 0 ? null : quotes.length === cell.quotes.length ? cell
+    : { ...cell, quotes, sourceQuotes: cell.sourceQuotes ?? cell.quotes };
 }
 
 export function isVisibleEvent(event: ProviderEvent, nowMs: number): boolean {
@@ -950,6 +1259,10 @@ export function decimalOdds(quote: ProviderQuote): number | null {
   if (!Number.isFinite(value)) return null;
   if (quote.rawFormat === "DECIMAL") return value > 1 ? value : null;
   if (quote.rawFormat === "HK") return value > 0 ? value + 1 : null;
+  if (quote.rawFormat === "AMERICAN") {
+    if (Math.abs(value) < 100) return null;
+    return value > 0 ? 1 + value / 100 : 1 + 100 / Math.abs(value);
+  }
   if (quote.rawFormat === "MALAY") {
     if (value === 0 || Math.abs(value) > 1) return null;
     return value > 0 ? 1 + value : 1 + 1 / Math.abs(value);
@@ -958,6 +1271,10 @@ export function decimalOdds(quote: ProviderQuote): number | null {
 }
 
 export function selectionLabel(event: ProviderEvent, selection: string): string {
+  if (selection === "DRAW") return "Hòa";
+  if (selection === "HOME_DRAW") return `${event.participantA} hoặc hòa`;
+  if (selection === "HOME_AWAY") return `${event.participantA} hoặc ${event.participantB}`;
+  if (selection === "DRAW_AWAY") return `Hòa hoặc ${event.participantB}`;
   if (selection === "TEAM_A" || selection === "HOME") return event.participantA;
   if (selection === "TEAM_B" || selection === "AWAY") return event.participantB;
   if (selection === "OVER") return "Over";
@@ -970,6 +1287,9 @@ export function selectionLabel(event: ProviderEvent, selection: string): string 
 }
 
 export function ticketMarketLabel(marketType: string): string {
+  if (marketType === "FT_1X2") return "1X2 cả trận";
+  if (marketType === "FH_1X2") return "1X2 hiệp 1";
+  if (marketType === "SH_1X2") return "1X2 hiệp 2";
   if (marketType === "FT_AH") return "Full-time handicap";
   if (marketType === "FT_TOTAL") return "Full-time total";
   if (marketType === "SERIES_WINNER") return "Series winner";
@@ -992,6 +1312,7 @@ export function ticketMarketLabel(marketType: string): string {
   if (marketType === "CORNER_FT_ODD_EVEN") return "Full-time corners odd/even";
   if (marketType === "CORNER_FH_ODD_EVEN") return "First-half corners odd/even";
   if (marketType === "FT_BTTS") return "Both teams to score";
+  if (marketType === "FT_BOTH_TEAMS_SCORE_BOTH_HALVES") return "Cả hai đội ghi bàn ở cả hai hiệp";
   if (marketType === "FH_BTTS") return "First-half both teams to score";
   if (marketType === "SH_BTTS") return "Second-half both teams to score";
   if (marketType === "SENDING_OFF") return "Sending off";
@@ -1015,6 +1336,8 @@ export function ticketMarketLabel(marketType: string): string {
   if (marketType === "FT_BOTH_HALVES_UNDER_TOTAL") return "Both halves under total";
   if (marketType === "HOME_FT_TOTAL") return "Home team total";
   if (marketType === "AWAY_FT_TOTAL") return "Away team total";
+  if (marketType === "HOME_FH_TOTAL") return "Home team total 1H";
+  if (marketType === "AWAY_FH_TOTAL") return "Away team total 1H";
   if (marketType === "HOME_FT_TO_WIN") return "Home team to win";
   if (marketType === "AWAY_FT_TO_WIN") return "Away team to win";
   if (marketType === "FT_ANY_TEAM_TO_WIN") return "Either team to win";
@@ -1023,6 +1346,33 @@ export function ticketMarketLabel(marketType: string): string {
 }
 
 export function observedTicketAsComparisonRow(ticket: ObservedTicketRow): ComparisonRow {
+  if (ticket.opposition !== undefined) {
+    const pairs = resultOppositionCellPairs(ticket).map(([first, second]) => {
+      const margin = 1 / (1 / decimalOdds(first.quotes[0]!)! + 1 / decimalOdds(second.quotes[0]!)!) - 1;
+      return { first, second, margin: Math.abs(margin) < 1e-12 ? 0 : margin };
+    }).sort((left, right) => right.margin - left.margin || compareProviders(left.first.provider, right.first.provider) ||
+      compareProviders(left.second.provider, right.second.provider));
+    const best = pairs[0];
+    return { key: ticket.key, marketType: ticket.marketType, scope: ticket.scope, line: ticket.line,
+      opposition: ticket.opposition, cells: ticket.cells, crossBook: best !== undefined, margin: best?.margin ?? null,
+      bestBySelection: best === undefined ? {} : {
+        [best.first.quotes[0]!.selection]: best.first.provider, [best.second.quotes[0]!.selection]: best.second.provider } };
+  }
+  if (ticket.cells.some(cell => cell.quotes.length < 2) || new Set(ticket.cells.map(cell => cell.provider)).size < ticket.cells.length) {
+    const candidates = binaryOpposingCellPairs(ticket.cells).flatMap(([a, b]) => ticket.outcomeDomain.flatMap((selection, index) => {
+      const first = a.quotes.find(quote => quote.selection === selection),
+        second = b.quotes.find(quote => quote.selection === ticket.outcomeDomain[1 - index]);
+      const firstOdds = first === undefined ? null : decimalOdds(first), secondOdds = second === undefined ? null : decimalOdds(second);
+      if (firstOdds === null || secondOdds === null) return [];
+      const odds = index === 0 ? [firstOdds, secondOdds] : [secondOdds, firstOdds];
+      const margin = settlementMargin(ticket.marketType, ticket.scope, ticket.line, odds);
+      return margin === null ? [] : [{ margin, bestBySelection: { [selection]: a.provider,
+        [ticket.outcomeDomain[1 - index]!]: b.provider } }];
+    })).sort((a, b) => b.margin - a.margin);
+    const best = candidates[0];
+    return { key: ticket.key, marketType: ticket.marketType, scope: ticket.scope, line: ticket.line, cells: ticket.cells,
+      bestBySelection: best?.bestBySelection ?? {}, crossBook: best !== undefined, margin: best?.margin ?? null };
+  }
   const bestBySelection: Record<string, ProviderId> = {};
   for (const selection of ticket.outcomeDomain) {
     const best = ticket.cells.flatMap((cell) => cell.quotes.filter((quote) => quote.selection === selection &&
@@ -1037,12 +1387,12 @@ export function observedTicketAsComparisonRow(ticket: ObservedTicketRow): Compar
     const quote = ticket.cells.find((cell) => cell.provider === provider)?.quotes.find((item) => item.selection === selection);
     return quote === undefined ? null : decimalOdds(quote);
   });
-  const inverseSum = bestOdds.length === 2 && bestOdds.every((value): value is number => value !== null)
-    ? bestOdds.reduce((sum, value) => sum + 1 / value, 0) : null;
+  const margin = bestOdds.length === 2 && bestOdds.every((value): value is number => value !== null)
+    ? settlementMargin(ticket.marketType, ticket.scope, ticket.line, bestOdds) : null;
   const crossBook = new Set(Object.values(bestBySelection)).size >= 2;
   return { key: ticket.key, marketType: ticket.marketType, scope: ticket.scope, line: ticket.line,
     cells: ticket.cells, bestBySelection, crossBook,
-    margin: crossBook && inverseSum !== null ? (1 / inverseSum) - 1 : null };
+    margin: crossBook ? margin : null };
 }
 
 /** A kickoff must sit this far ahead before it can contradict a live claim, so a
@@ -1117,7 +1467,11 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
   const catalogIndexes = new Map<LiveCatalogResponse, {
     readonly marketsByEvent: ReadonlyMap<string, readonly ProviderMarket[]>;
     readonly quotesByMarket: ReadonlyMap<string, readonly ProviderQuote[]>;
+    readonly quotedEventIds: ReadonlySet<string>;
   }>();
+  // Native market identifiers can be local to a fixture (observed in APSPORT).
+  const nativeMarketKey = (eventId: string, marketId: string): string =>
+    JSON.stringify([eventId, marketId]);
   for (const catalog of orderedCatalogs) {
     const marketsByEvent = new Map<string, ProviderMarket[]>();
     for (const market of catalog.markets) {
@@ -1126,12 +1480,15 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
       marketsByEvent.set(market.providerEventId, values);
     }
     const quotesByMarket = new Map<string, ProviderQuote[]>();
+    const quotedEventIds = new Set<string>();
     for (const quote of catalog.quotes) {
-      const values = quotesByMarket.get(quote.providerMarketId) ?? [];
+      quotedEventIds.add(quote.providerEventId);
+      const quoteKey = nativeMarketKey(quote.providerEventId, quote.providerMarketId);
+      const values = quotesByMarket.get(quoteKey) ?? [];
       values.push(quote);
-      quotesByMarket.set(quote.providerMarketId, values);
+      quotesByMarket.set(quoteKey, values);
     }
-    catalogIndexes.set(catalog, { marketsByEvent, quotesByMarket });
+    catalogIndexes.set(catalog, { marketsByEvent, quotesByMarket, quotedEventIds });
   }
   type EventProjection = { readonly catalog: LiveCatalogResponse; readonly event: ProviderEvent;
     readonly family: ComparisonMarketFamily };
@@ -1139,11 +1496,14 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
   for (const catalog of orderedCatalogs) {
     const index = catalogIndexes.get(catalog)!;
     for (const event of catalog.events) {
+      // A roster entry with no markets or quotes cannot claim a pairing slot.
+      // Keep incomplete market/quote records subject to the ambiguity guard.
+      const eventMarkets = index.marketsByEvent.get(event.providerEventId) ?? [];
+      if (eventMarkets.length === 0 && !index.quotedEventIds.has(event.providerEventId)) continue;
       if (event.category === "LOL") {
         projections.push({ catalog, event, family: "ESPORTS" });
         continue;
       }
-      const eventMarkets = index.marketsByEvent.get(event.providerEventId) ?? [];
       const families = eventMarkets.length === 0 ? ["GOALS" as const]
         : [...new Set(eventMarkets.map((market) => footballMarketFamily(market.marketType)))];
       for (const family of families) projections.push({ catalog, event, family });
@@ -1184,9 +1544,11 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
       const participantKey = [event.category, family, event.isLive ? "LIVE" : "PREMATCH",
         unorderedParticipantKey(event)].join("|");
       const exactCandidates = groupsByParticipants.get(participantKey) ?? [];
-      const candidatePool = exactCandidates.length > 0 ? exactCandidates : [...new Set(
-        footballCandidateLookupKeys(event, competitionLinks, family)
-          .flatMap((key) => footballGroupsByCandidate.get(key) ?? []))];
+      // An exact spelling can still belong to another competition or kickoff.
+      // Consider every candidate before applying identity and ambiguity gates.
+      const candidatePool = [...new Set([...exactCandidates,
+        ...footballCandidateLookupKeys(event, competitionLinks, family)
+          .flatMap((key) => footballGroupsByCandidate.get(key) ?? [])])];
       const matches = candidatePool.flatMap((candidate) => {
         if (candidate.family !== family || candidate.ids[catalog.provider] !== undefined ||
           ambiguous(catalog, event, family) || candidate.catalogs.some((source) =>
@@ -1213,6 +1575,87 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
       group.orientations[catalog.provider] = orientation ?? "SAME";
       group.sourceEvents[catalog.provider] = event;
   }
+  // Name compatibility need not be transitive: "Huracan" matches both
+  // "Huracan (ARG)" and "Club Atletico Huracan", which do not match each other.
+  // Preserve missing direct relations without inventing a three-book identity.
+  // A relation must be unique in both directions for the opposing provider;
+  // competing fixtures from that provider remain ambiguous and are withheld.
+  const relationKey = (family: ComparisonMarketFamily,
+    sources: readonly (readonly [ProviderId, string])[]): string =>
+    JSON.stringify([family, [...sources].sort(([ap, ae], [bp, be]) =>
+      compareProviders(ap, bp) || ae.localeCompare(be))]);
+  const existingRelations = new Set<string>();
+  for (const group of groups) {
+    const sources = group.catalogs.map(catalog =>
+      [catalog.provider, group.ids[catalog.provider]!] as const);
+    for (let left = 0; left < sources.length; left += 1) for (let right = left + 1; right < sources.length; right += 1) {
+      existingRelations.add(relationKey(group.family, [sources[left]!, sources[right]!]));
+    }
+  }
+  const projectionsByExact = new Map<string, EventProjection[]>();
+  const projectionsByCandidate = new Map<string, EventProjection[]>();
+  const relations: { left: EventProjection; right: EventProjection; orientation: EventOrientation }[] = [];
+  const peers = new Map<EventProjection, Map<ProviderId, EventProjection[]>>();
+  const recordPeer = (source: EventProjection, peer: EventProjection): void => {
+    const counts = peers.get(source) ?? new Map<ProviderId, EventProjection[]>();
+    const providerPeers = counts.get(peer.catalog.provider) ?? [];
+    providerPeers.push(peer);
+    counts.set(peer.catalog.provider, providerPeers);
+    peers.set(source, counts);
+  };
+  for (const projection of projections) {
+    const { catalog, event, family } = projection;
+    if (event.category !== "FOOTBALL" || event.isLive || ambiguous(catalog, event, family)) continue;
+    const exactKey = [family, event.isLive ? "LIVE" : "PREMATCH", unorderedParticipantKey(event)].join("|");
+    const candidates = new Set([...(projectionsByExact.get(exactKey) ?? []),
+      ...footballCandidateLookupKeys(event, competitionLinks, family)
+        .flatMap(key => projectionsByCandidate.get(key) ?? [])]);
+    for (const other of candidates) {
+      if (other.catalog.provider === catalog.provider) continue;
+      const orientation = compatibleEventOrientation(other.event, event, family, competitionLinks);
+      if (orientation === null) continue;
+      relations.push({ left: other, right: projection, orientation });
+      recordPeer(other, projection);
+      recordPeer(projection, other);
+    }
+    const exact = projectionsByExact.get(exactKey) ?? [];
+    exact.push(projection);
+    projectionsByExact.set(exactKey, exact);
+    const candidateKey = footballCandidateIndexKey(event, competitionLinks, family);
+    if (candidateKey !== null) {
+      const candidates = projectionsByCandidate.get(candidateKey) ?? [];
+      candidates.push(projection);
+      projectionsByCandidate.set(candidateKey, candidates);
+    }
+  }
+  const supplementalKeys = new Set<string>();
+  const consistentEvidence = new Map<EventProjection, boolean>();
+  const hasConsistentEvidence = (source: EventProjection): boolean => {
+    const cached = consistentEvidence.get(source);
+    if (cached !== undefined) return cached;
+    const events = [source, ...[...(peers.get(source)?.values() ?? [])].flat()].map(item => item.event);
+    const kickoffs = events.map(event => event.startAtUtcMs);
+    const discriminators = new Set(events.map(event => event.fixtureDiscriminator).filter(value => value !== null));
+    const consistent = Math.max(...kickoffs) - Math.min(...kickoffs) <= FOOTBALL_KICKOFF_TOLERANCE_MS &&
+      discriminators.size <= 1;
+    consistentEvidence.set(source, consistent);
+    return consistent;
+  };
+  for (const { left, right, orientation } of relations) {
+    const lp = left.catalog.provider, rp = right.catalog.provider;
+    if (peers.get(left)?.get(rp)?.length !== 1 || peers.get(right)?.get(lp)?.length !== 1 ||
+      !hasConsistentEvidence(left) || !hasConsistentEvidence(right)) continue;
+    const key = relationKey(left.family, [[lp, left.event.providerEventId], [rp, right.event.providerEventId]]);
+    if (existingRelations.has(key)) continue;
+    existingRelations.add(key);
+    const groupKey = `source-relation:${key}`;
+    supplementalKeys.add(groupKey);
+    groups.push({ key: groupKey, event: displayEvent(left.event), family: left.family,
+      catalogs: [left.catalog, right.catalog],
+      ids: { [lp]: left.event.providerEventId, [rp]: right.event.providerEventId },
+      orientations: { [lp]: "SAME", [rp]: orientation },
+      sourceEvents: { [lp]: left.event, [rp]: right.event } });
+  }
   return groups.map((group) => {
     const key = group.key;
     const rowGroups = new Map<string, ComparisonCell[]>();
@@ -1227,33 +1670,52 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
         const orientedMarket = orientMarket(market, orientation);
         const rowKey = marketKey(orientedMarket);
         const cells = rowGroups.get(rowKey) ?? [];
-        const phaseQuotes = (index.quotesByMarket.get(market.providerMarketId) ?? [])
+        const phaseQuotes = (index.quotesByMarket.get(nativeMarketKey(market.providerEventId, market.providerMarketId)) ?? [])
           .filter((quote) => quote.isLive === group.event.isLive);
-        cells.push({ provider: catalog.provider, market: orientedMarket,
+        const sourceCell = { provider: catalog.provider, market: orientedMarket,
           quotes: orientQuotes(phaseQuotes, orientation), sourceEvent: group.sourceEvents[catalog.provider]!,
-          sourceMarket: market, sourceQuotes: phaseQuotes });
+          sourceMarket: market, sourceQuotes: phaseQuotes };
+        cells.push(availableTwoWayCell(sourceCell) ?? sourceCell);
         rowGroups.set(rowKey, cells);
       }
     }
-    const observedRows = [...rowGroups.entries()].flatMap(([rowKey, rawCells]) => {
+    const resultRows = resultOppositionRows([...rowGroups.values()].flat());
+    // More than one settlement contract can each have a valid cross-book pair.
+    // Keep those independent rows; selecting the largest cluster loses the rest.
+    // A lone compatible cluster keeps its existing display/key behavior.
+    const rowEntries = [...rowGroups.entries()].flatMap(([rowKey, rawCells]): [string, readonly ComparisonCell[]][] => {
+      const profiles = new Map<string, ComparisonCell[]>();
+      for (const cell of rawCells) {
+        const profile = cell.market.settlementProfile;
+        const cells = profiles.get(profile) ?? [];
+        cells.push(cell);
+        profiles.set(profile, cells);
+      }
+      if (profiles.size < 2 || [...profiles.values()].filter(cells =>
+        eligibleTwoWayCells(cells.filter(isAvailableTwoWayTicket)).length >= 2).length < 2) return [[rowKey, rawCells]];
+      return [...profiles.entries()].map(([profile, cells]) => [`${rowKey}|settlement:${JSON.stringify(profile)}`, cells]);
+    });
+    const observedRows: ObservedTicketRow[] = rowEntries.flatMap(([rowKey, rawCells]) => {
       const cells = displayTwoWayCells(rawCells);
       if (cells.length === 0) return [];
-      const outcomeDomain = [...new Set(cells[0]!.quotes.map((quote) => quote.selection))].sort();
+      const outcomeDomain = exactTwoWayOutcomeDomain(cells[0]!.market.marketType, cells[0]!.market.scope, cells[0]!.market.line)!;
       return [{ key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
         line: cells[0]!.market.line, settlementProfile: cells[0]!.market.settlementProfile,
         outcomeDomain, cells } satisfies ObservedTicketRow];
     }).sort((left, right) => left.key.localeCompare(right.key));
-    const rows = [...rowGroups.entries()].map(([rowKey, rawCells]) =>
-      [rowKey, eligibleTwoWayCells(rawCells.filter(isFocusedTwoWayTicket))] as const)
+    observedRows.push(...resultRows);
+    const rows = rowEntries.map(([rowKey, rawCells]) =>
+      [rowKey, eligibleTwoWayCells(rawCells.filter(isAvailableTwoWayTicket))] as const)
       .filter(([, cells]) => cells.length >= 2).map(([rowKey, cells]): ComparisonRow => observedTicketAsComparisonRow({
         key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
         line: cells[0]!.market.line, settlementProfile: cells[0]!.market.settlementProfile,
-        outcomeDomain: [...new Set(cells[0]!.quotes.map((quote) => quote.selection))].sort(), cells
-      })).sort((left, right) => (right.margin ?? Number.NEGATIVE_INFINITY) - (left.margin ?? Number.NEGATIVE_INFINITY) || left.key.localeCompare(right.key));
+        outcomeDomain: exactTwoWayOutcomeDomain(cells[0]!.market.marketType, cells[0]!.market.scope, cells[0]!.market.line)!, cells
+      })).concat(resultRows.map(observedTicketAsComparisonRow)).sort((left, right) => (right.margin ?? Number.NEGATIVE_INFINITY) - (left.margin ?? Number.NEGATIVE_INFINITY) || left.key.localeCompare(right.key));
     const bestMargin = rows.reduce<number | null>((best, row) => row.margin === null ? best : Math.max(best ?? row.margin, row.margin), null);
     return { key, event: group.event, providers: group.catalogs.map((catalog) => catalog.provider),
       catalogs: group.catalogs, providerEventIds: group.ids, observedRows, rows, bestMargin };
-  }).sort((left, right) => (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY) ||
+  }).filter(group => !supplementalKeys.has(group.key) || group.rows.length > 0)
+    .sort((left, right) => (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY) ||
     left.event.startAtUtcMs - right.event.startAtUtcMs);
 }
 

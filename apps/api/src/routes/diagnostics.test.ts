@@ -13,6 +13,21 @@ const diagnostic: PipelineDiagnostic = {
 };
 
 describe("pipeline diagnostic routes", () => {
+  it("reports process resource counts without reading or refreshing provider catalogs", async () => {
+    const app = Fastify();
+    const list = vi.fn(async () => [diagnostic]);
+    const get = vi.fn(async () => diagnostic);
+    registerDiagnosticRoutes(app, { list, get });
+    const response = await app.inject({ method: "GET", url: "/api/diag/runtime" });
+    expect(response.statusCode).toBe(200);
+    const resource = response.json();
+    expect(Object.keys(resource).sort()).toEqual(["cpuSystemMicros", "cpuUserMicros", "heapLimitBytes",
+      "heapTotalBytes", "heapUsedBytes", "pid", "rssBytes", "uptimeMs"].sort());
+    expect(Object.values(resource).every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)).toBe(true);
+    expect(list.mock.calls.length + get.mock.calls.length).toBe(0);
+    await app.close();
+  });
+
   it("serves all accounts and one account without invoking a mutating operation", async () => {
     const app = Fastify();
     const list = vi.fn(async () => [diagnostic]);

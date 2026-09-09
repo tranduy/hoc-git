@@ -1,11 +1,11 @@
-import { footballBinaryMarketSpec,
-  type FootballBinaryOutcome, type MarketType, type OddsFormat,
+import { footballBinaryMarketSpec, footballResultMarketSpec,
+  type FootballBinaryOutcome, type FootballResultSelection, type MarketType, type OddsFormat,
   type ProviderEvent, type ProviderMarket, type ProviderQuote, type Scope } from "@tool-chenh/contracts";
-import { isSupportedFootballTwoWayLine } from "../football-market-policy.js";
+import { isSupportedFootballSplitLine, isSupportedFootballTwoWayLine } from "../football-market-policy.js";
 
 export interface SbobetCatalogSelection {
   readonly selectionId: string;
-  readonly selection: FootballBinaryOutcome | "DRAW";
+  readonly selection: FootballBinaryOutcome | FootballResultSelection;
   readonly priceText: string;
   readonly priceFormat?: OddsFormat;
   readonly locked: boolean;
@@ -56,15 +56,24 @@ const signedDecimal = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 
 function exactFootballMarketSemantics(marketType: MarketType, fallbackProfile?: string): {
   readonly isTotal: boolean; readonly isHandicap: boolean; readonly scope: Scope;
-  readonly outcomes: readonly FootballBinaryOutcome[]; readonly linePolicy: "HALF_UNIT" | "NONE";
+  readonly outcomes: readonly (FootballBinaryOutcome | FootballResultSelection)[]; readonly linePolicy: "HALF_UNIT" | "NONE";
+  readonly partialSelections: boolean;
   readonly settlementProfile: string;
 } | null {
+  // A native result selection is meaningful independently of other offers.
+  // Eligibility for an opposing ticket is decided from the exact outcome set.
+  const result = footballResultMarketSpec(marketType);
+  if (result !== null) return {
+    isTotal: false, isHandicap: false, scope: result.scope,
+    outcomes: result.outcomes, linePolicy: "NONE", partialSelections: true,
+    settlementProfile: result.settlementProfile
+  };
   const spec = footballBinaryMarketSpec(marketType);
   if (spec === null) return null;
   const defaultRegulation = spec.statistic === "GOALS" && spec.scope === "FULL_TIME" &&
     (marketType === "FT_AH" || marketType === "FT_TOTAL");
   return { isTotal: spec.family === "TOTAL", isHandicap: spec.family === "HANDICAP",
-    scope: spec.scope, outcomes: spec.outcomes, linePolicy: spec.linePolicy,
+    scope: spec.scope, outcomes: spec.outcomes, linePolicy: spec.linePolicy, partialSelections: true,
     settlementProfile: defaultRegulation ? fallbackProfile ?? spec.settlementProfile : spec.settlementProfile };
 }
 
@@ -81,9 +90,10 @@ function validPrice(selection: SbobetCatalogSelection): boolean {
 }
 
 function canonicalLine(value: string | null): string | null {
-  if (value === null) return null;
+  if (value === null || !/^\d+(?:\.\d+)?(?:\s*[\/-]\s*\d+(?:\.\d+)?)?$/u.test(value.trim())) return null;
   const parts = value.trim().split(/[\/-]/u).map(Number);
   if (parts.length < 1 || parts.length > 2 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 100)) return null;
+  if (parts.length === 2 && !isSupportedFootballSplitLine(parts[0]!, parts[1]!)) return null;
   return String(parts.reduce((sum, part) => sum + part, 0) / parts.length);
 }
 
@@ -93,12 +103,13 @@ function handicapValue(value: string): number | null {
   const first = Number(match[2]);
   const second = match[3] === undefined ? first : Number(match[3]);
   if (![first, second].every((part) => Number.isFinite(part) && part >= 0 && part <= 100)) return null;
+  if (match[3] !== undefined && !isSupportedFootballSplitLine(first, second)) return null;
   const magnitude = (first + second) / 2;
   return match[1] === "-" ? -magnitude : magnitude;
 }
 
 function canonicalHomeHandicap(selections: readonly SbobetCatalogSelection[], signedNative = false): string | null {
-  if (selections.length !== 2) return null;
+  if (selections.length < 1 || selections.length > 2 || (selections.length === 1 && !signedNative)) return null;
   const evidence = selections.flatMap((selection) => {
     const raw = selection.lineText?.trim();
     if (raw === undefined || raw === null || raw.length === 0) return signedNative ? [Number.NaN] : [];
@@ -177,13 +188,16 @@ export function normalizeSbobetCatalog(
         ? canonicalHomeHandicap(market.selections, market.handicapLineFormat === "SIGNED") : canonicalLine(market.lineText);
       if (linePolicy === "HALF_UNIT" && !isSupportedFootballTwoWayLine(line)) continue;
       const pricesValid = market.selections.every(validPrice);
-      if (market.marketId.trim() === "" || ids.size !== outcomes.length || actual.length !== outcomes.length ||
-        outcomes.some((outcome) => !actual.includes(outcome as never)) ||
+      const exactDomain = actual.length > 0 && ids.size === actual.length && new Set(actual).size === actual.length &&
+        actual.every((outcome) => outcomes.includes(outcome)) &&
+        (semantics.partialSelections || actual.length === outcomes.length);
+      if (market.marketId.trim() === "" || !exactDomain ||
         (linePolicy === "HALF_UNIT" && line === null) || !pricesValid) {
         invalid = true;
         break;
       }
-      const status = market.selections.some((selection) => selection.locked) ? "SUSPENDED" as const : "OPEN" as const;
+      const status = (semantics.partialSelections ? market.selections.every((selection) => selection.locked)
+        : market.selections.some((selection) => selection.locked)) ? "SUSPENDED" as const : "OPEN" as const;
       recordMarkets.push({
         provider, category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, marketType: market.marketType, scope, line,
@@ -194,7 +208,8 @@ export function normalizeSbobetCatalog(
         providerMarketId: market.marketId, providerSelectionId: selection.selectionId,
         marketType: market.marketType, scope, selection: selection.selection, line,
         rawOdds: selection.priceText, rawFormat: selection.priceFormat ?? "MALAY",
-        status, isLive: timing.isLive, sourceTimestampMs: null,
+        status: semantics.partialSelections ? selection.locked ? "SUSPENDED" : "OPEN" : status,
+        isLive: timing.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
       })));
     }

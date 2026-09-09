@@ -3,12 +3,14 @@ import type { ProviderEvent, ProviderId, TicketRealtimeCheckRequest,
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { decimalOdds, selectionHandicapLine, selectionLabel, ticketMarketLabel } from "../catalog/comparison.js";
 import { formatDisplayDecimal } from "../catalog/display-format.js";
-import { buildObservedAnchoredStakeEstimate, enumerateOpposingLegPairs,
+import { buildObservedAnchoredStakeEstimate, enumerateOpposingLegPairs, stakeLegMatchesQuote,
   type FixedBaseStakePolicy, type OpposingLegPair } from "../watch/fixed-base-stake.js";
 import type { RankedTicket } from "../watch/ranked-tickets.js";
 import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
 import { ProviderBrand } from "./provider-brand.js";
 import { RoiBadge } from "./roi-badge.js";
+import { ConditionalRoiNote } from "./conditional-roi-note.js";
+import { formatProfitAmount, roiPercentFromRatio } from "../watch/roi-tone.js";
 import { sortProviderItems, sortProviders } from "../catalog/provider-order.js";
 import type { TicketRealtimeCheckApiLike } from "../api/ticket-realtime-check.js";
 import type { TicketReportApiLike, TicketReportEntry, TicketReportRequest } from "../api/ticket-report.js";
@@ -19,10 +21,11 @@ export type ProviderCatalogEvidence = Partial<Record<ProviderId, {
 }>>;
 
 function money(value: string): string {
-  return `${Number(value).toLocaleString("en-US")} VND`;
+  return `${formatProfitAmount(value)} VND`;
 }
 
 function displayReason(reason: string): string {
+  if (reason === "APSPORT quote freshness not confirmed") return "APSPORT: chờ xác nhận giá mới";
   return reason === "Provider preflight required"
     ? "Chưa kiểm tra lại vé trực tiếp tại sàn"
     : reason;
@@ -34,14 +37,16 @@ function legId(provider: ProviderId, selection: string): string {
 
 function pairForPlan(ticket: RankedTicket, providers: readonly ProviderId[]): OpposingLegPair | null {
   if (ticket.plan === null) return null;
-  const wanted = new Set(ticket.plan.legs.map((leg) => legId(leg.provider, leg.selection)));
   return enumerateOpposingLegPairs(ticket.row, new Set(providers)).find((pair) =>
-    wanted.has(legId(pair.first.provider, pair.first.quote.selection)) &&
-    wanted.has(legId(pair.second.provider, pair.second.quote.selection))) ?? null;
+    ticket.plan!.legs.some(leg => stakeLegMatchesQuote(leg, pair.first.quote)) &&
+    ticket.plan!.legs.some(leg => stakeLegMatchesQuote(leg, pair.second.quote))) ?? null;
 }
 
 export function renderableRankedTickets(tickets: readonly RankedTicket[], providers: readonly ProviderId[]): readonly RankedTicket[] {
-  return tickets.filter((ticket) => pairForPlan(ticket, providers) !== null);
+  return tickets.filter((ticket) => ticket.plan === null
+    ? ticket.hasOpposingSources === true && ticket.opposingProviderPairs?.some(([first, second]) =>
+      first !== second && providers.includes(first) && providers.includes(second))
+    : pairForPlan(ticket, providers) !== null);
 }
 
 async function copyTeam(name: string): Promise<void> {
@@ -87,8 +92,8 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
   const rowProviders = compact && quotePlan !== null
     ? orderedProviders.filter((provider) => orderedQuoteLegs.some((leg) => leg.provider === provider)) : orderedProviders;
   const openableLegs = orderedQuoteLegs.flatMap((leg) => {
-    const quote = ticket.row.cells.find((cell) => cell.provider === leg.provider)
-      ?.quotes.find((candidate) => candidate.selection === leg.selection);
+    const quote = ticket.row.cells.filter((cell) => cell.provider === leg.provider)
+      .flatMap(cell => cell.quotes).find((candidate) => stakeLegMatchesQuote(leg, candidate));
     return quote === undefined ? [] : [{ leg, quote }];
   }) ?? [];
   const displayedStake = (provider: ProviderId, selection: string): string => {
@@ -96,7 +101,7 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     return plan?.legs.find((leg) => leg.provider === provider && leg.selection === selection)?.stake ??
       ticket.plan?.legs.find((leg) => leg.provider === provider && leg.selection === selection)?.stake ?? "";
   };
-  const canCaptureTicket = openableLegs.length === 2 && openableLegs.every(({ leg }) =>
+  const canCaptureTicket = ticket.row.opposition === undefined && openableLegs.length === 2 && openableLegs.every(({ leg }) =>
     providerCatalogEvidence?.[leg.provider] !== undefined && displayedStake(leg.provider, leg.selection) !== "");
   const captureDisplayedTicket = (): TicketRealtimeCheckRequest | null => {
     if (!canCaptureTicket) return null;
@@ -165,8 +170,8 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
       "ranked-ticket-row ranked-ticket-row--neutral"}${compact ? " ranked-ticket-row--compact" : ""}${highlighted ? " ranked-ticket-row--highlight" : ""}`}
     id={ticketDomId(ticket.eventKey, ticket.key)} tabIndex={-1}
     style={compact ? { "--ticket-provider-count": rowProviders.length } as CSSProperties : undefined}>
-    <th><strong>{ticketMarketLabel(ticket.row.marketType)}</strong><span>{ticket.row.line === null ? "No line" : `Line ${ticket.row.line}`}</span>
-      {plan !== null && <RoiBadge className="ranked-ticket-roi" roiPercent={Number(plan.roi) * 100} size="sm" />}
+    <th><strong>{ticketMarketLabel(ticket.row.marketType)}{ticket.row.opposition === undefined ? "" : " ↔ Cơ hội kép"}</strong><span>{ticket.row.line === null ? "No line" : `Line ${ticket.row.line}`}</span>
+      {plan !== null && <RoiBadge className="ranked-ticket-roi" roiPercent={roiPercentFromRatio(plan.roi)} worstCaseProfit={plan.worstCaseProfit} size="sm" />}
       <small>{ticket.key}</small>{openableLegs.length > 0 && onOpenProviderTicket !== undefined &&
         <div className="open-provider-ticket-group">{openableLegs.map(({ leg, quote }) =>
           <button aria-label={`Mở kèo ${leg.provider} tại sàn`} className="open-provider-ticket"
@@ -175,13 +180,15 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
               providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId
             }); }} type="button">Mở {leg.provider}</button>)}</div>}</th>
     {rowProviders.map((provider, providerIndex) => {
-      const cell = ticket.row.cells.find((candidate) => candidate.provider === provider);
+      const cells = ticket.row.cells.filter((candidate) => candidate.provider === provider);
       const selectedLeg = compact ? quotePlan?.legs.find((leg) => leg.provider === provider) : undefined;
-      const visibleQuotes = selectedLeg === undefined ? cell?.quotes :
-        cell?.quotes.filter((quote) => quote.selection === selectedLeg.selection);
+      const quotes = cells.flatMap(cell => cell.quotes);
+      const visibleQuotes = selectedLeg === undefined ? quotes :
+        quotes.filter((quote) => stakeLegMatchesQuote(selectedLeg, quote));
       return <td data-label={`#${provider} prices`} key={provider}>{compact &&
         <header className="ranked-ticket-provider-heading"><ProviderBrand compact provider={provider} /></header>}
-        {cell === undefined ? <span className="rate-missing">Unavailable</span> :
+        {cells.length === 0 ? <span className="rate-missing">Unavailable</span> : visibleQuotes.length === 0
+          ? <span className="rate-missing">Chờ giá mới</span> :
         <div className="ranked-ticket-prices">{visibleQuotes?.map((quote, quoteIndex) => {
           const normalized = decimalOdds(quote);
           const best = ticket.row.bestBySelection[quote.selection] === provider;
@@ -199,7 +206,8 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
             <small>{normalized === null ? "invalid" : `decimal ${normalized.toFixed(3)}`} · {quote.status}</small></span>;
         })}</div>}</td>;
     })}
-    <td data-label="Selected opposing legs">{quotePlan === null ? <span className="rate-missing">No opposing pair</span> :
+    <td data-label="Selected opposing legs">{quotePlan === null ? <span className="rate-missing">
+      {ticket.hasOpposingSources === true ? "Đã ghép kèo; chờ giá mới" : "No opposing pair"}</span> :
       <div className="ranked-ticket-legs">{orderedQuoteLegs.map((leg) => <span key={legId(leg.provider, leg.selection)}>
         <b>#{leg.provider} · {selectionLabel(event, leg.selection)}</b><small>@ {formatDisplayDecimal(leg.decimalOdds)}</small></span>)}</div>}</td>
     <td data-label="Stakes">{ticket.plan === null ? "—" : <div className="ranked-ticket-stakes">
@@ -218,9 +226,15 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
         : <strong>Total {money(plan.totalStake)}</strong>}
     </div>}</td>
     <td data-label="Outcome profit">{plan === null ? "—" : <div className="ranked-ticket-profits">{selections.map((selection) =>
-      <span key={selection}>If {selectionLabel(event, selection)} wins <b>{money(plan.profitsBySelection[selection] ?? "0")}</b></span>)}</div>}</td>
-    <td data-label="Guaranteed / ROI">{plan === null ? <span className="rate-missing">Cannot calculate</span> : <div className="ranked-ticket-result">
-      <strong>Guaranteed {money(plan.worstCaseProfit)}</strong><RoiBadge roiPercent={Number(plan.roi) * 100} size="md" />
+      <span key={selection}>If {selectionLabel(event, selection)} wins <b>{money(plan.profitsBySelection[selection] ?? "0")}</b></span>)}
+      {plan.settlementScenarios?.filter(scenario => scenario.kind === "PUSH" || scenario.kind === "SPLIT")
+        .map(scenario => <span key={scenario.kind}><span>{scenario.kind === "PUSH" ? "Hoàn tiền" : "Chia tiền"}</span>{" "}
+          <b>{money(scenario.profit)}</b></span>)}
+    </div>}</td>
+    <td data-label="Guaranteed / ROI">{plan === null ? <span className="rate-missing">
+      {ticket.plan === null ? "Chưa đủ giá hợp lệ để tính tiền" : "Cannot calculate"}</span> : <div className="ranked-ticket-result">
+      <strong>Guaranteed {money(plan.worstCaseProfit)}</strong><RoiBadge roiPercent={roiPercentFromRatio(plan.roi)} worstCaseProfit={plan.worstCaseProfit} size="md" />
+      <ConditionalRoiNote row={ticket.row} plan={plan} />
       {Object.entries(ticket.gapsBySelection).map(([selection, gap]) => <small key={selection}>
         {selectionLabel(event, selection)}: Gap {formatDisplayDecimal(gap.absolute)} · {Number(gap.percent).toFixed(2)}%
       </small>)}

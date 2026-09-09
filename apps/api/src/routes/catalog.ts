@@ -5,6 +5,7 @@ import { CatalogTelemetryRegistry } from "./catalog-telemetry.js";
 import type { CatalogStoreLike } from "../catalog/durable-catalog-store.js";
 import { CatalogCoverageGuard } from "../catalog/catalog-coverage-guard.js";
 import type { CatalogRevisionStore, StoredCatalogRevision } from "../catalog/catalog-revision-store.js";
+import { catalogWithNativeCounts } from "../catalog/catalog-native-coverage.js";
 
 export interface CatalogReaderLike {
   readonly requestTimeoutMs?: number;
@@ -211,6 +212,15 @@ export function registerCatalogRoutes(
   app.get("/api/catalog/accounts/:accountId", async (request, reply) => {
     const parsed = paramsSchema.safeParse(request.params);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
+    const query = z.object({ nativeDetail: z.enum(["full", "summary", "counts"]).optional() }).safeParse(request.query);
+    if (!query.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
+    const summary = query.data.nativeDetail === "summary";
+    const counts = query.data.nativeDetail === "counts";
+    const view = (catalog: ReturnType<typeof forAccount>) =>
+      counts ? catalogWithNativeCounts(catalog) : !summary || catalog.nativeMarketObservations === undefined ? catalog : { ...catalog,
+        nativeMarketObservations: catalog.nativeMarketObservations.map(({ nativeSelections: _selections, nativeRow: _rawRow,
+          ...observation }) => observation) };
+    const etagSuffix = counts ? "-native-counts" : summary ? "-native-summary" : "";
     try {
       const accountId = parsed.data.accountId;
       const accountSnapshotFreshnessMaxAgeMs = reader.snapshotFreshnessMaxAgeMsFor?.(accountId) ??
@@ -220,19 +230,19 @@ export function registerCatalogRoutes(
         throw new Error("CATALOG_SNAPSHOT_FRESHNESS_INVALID");
       }
       const sendRevision = (entry: StoredCatalogRevision) => {
-        const etag = `"${entry.revision}"`;
+        const etag = `"${entry.revision}${etagSuffix}"`;
         reply.header("etag", etag).header("x-catalog-revision", entry.revision);
         if (request.headers["if-none-match"] === etag) return reply.code(304).send();
-        return forAccount(entry.catalog, accountId, entry.snapshotState);
+        return view(forAccount(entry.catalog, accountId, entry.snapshotState));
       };
       const sendCatalog = (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => {
         if (revisions !== undefined) return sendRevision(revisions.publish(accountId, catalog, {
           snapshotState, freshnessMs: accountSnapshotFreshnessMaxAgeMs
         }));
-        const etag = `"${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${snapshotState}"`;
+        const etag = `"${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${snapshotState}${etagSuffix}"`;
         reply.header("etag", etag);
         if (request.headers["if-none-match"] === etag) return reply.code(304).send();
-        return forAccount(catalog, accountId, snapshotState);
+        return view(forAccount(catalog, accountId, snapshotState));
       };
       const deadlineMs = performance.now() + requestTimeoutMs;
       const sourceKey = await within(

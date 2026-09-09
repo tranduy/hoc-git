@@ -285,10 +285,20 @@ export function normalizeSabaFootballRecords(
       : semantics?.isLineFree === true ? ["ODD", "EVEN"]
         : semantics === null ? ["OUTCOME_1", "OUTCOME_2"] : ["OVER", "UNDER"];
     const observe = (disposition: NativeMarketObservation["disposition"], reason: string): void => {
+      // Preserve provider field identities even when their outcome semantics are
+      // unknown; OUTCOME_1/2 alone cannot be replayed into a canonical contract.
+      const nativeSelections = Object.entries(record).flatMap(([field, value]) => {
+        if (!/^(?:odds\d+a|cs\d+)$/u.test(field) || finite(value) === null) return [];
+        const rawLine = field === "odds1a" ? finite(record.hdp1)
+          : field === "odds2a" ? finite(record.hdp2) : null;
+        return [{ selectionId: null, outcomeId: field, line: rawLine === null ? null : String(rawLine),
+          price: String(value), ...(isCleanSheet ? { rawFormat: "DECIMAL" as const }
+            : semantics !== null ? { rawFormat: "MALAY" as const } : {}) }];
+      });
       nativeMarketObservations.push({
         provider: "SABA", category: "FOOTBALL", providerEventId, providerMarketId,
         nativeType, nativeLabel: null, nativeScope, outcomeLabels: defaultOutcomes,
-        observedAtMs: options.observedAtMs, disposition, reason
+        observedAtMs: options.observedAtMs, disposition, reason, nativeSelections
       });
     };
     if (matchId === null || !acceptedMatches.has(matchId)) {

@@ -12,11 +12,11 @@ const row = (id: number, groupId = group(id)) => {
   return value;
 };
 type NativeRequest = { url: string; body: string; timeout: number;
-  success: (body: unknown) => void; fail: () => void };
+  success: (body: unknown) => void; fail: (xhr?: { status: number; getResponseHeader?: (name: string) => string | null }) => void };
 function harness() {
   const requests: NativeRequest[] = [];
   const globals: Record<string, unknown> = {
-    Date, URL, URLSearchParams, Map, Set, location: { hostname: "cgnew.fts368.com",
+    Date, URL, URLSearchParams, Map, Set, setTimeout, clearTimeout, location: { hostname: "cgnew.fts368.com",
       pathname: "/Member/BetOdds/HdpDouble.aspx", origin: "https://cgnew.fts368.com" },
     document: { documentElement: { dataset: {} } },
     GetOddsUrl: () => "/Member/BetsView/BetLight/DataOdds.ashx",
@@ -108,10 +108,13 @@ describe("CMD native catalog collector", () => {
     const h = harness(); h.tick(); h.commit([row(1), row(2)], [row(3), row(4), row(5)]);
     expect(h.more()).toHaveLength(2);
     h.complete(h.more()[0]!, 1);
+    vi.advanceTimersByTime(500);
     expect(h.more()).toHaveLength(3);
     h.complete(h.more()[1]!, 2);
+    vi.advanceTimersByTime(500);
     expect(h.more()).toHaveLength(4);
-    h.complete(h.more()[2]!, 3); h.complete(h.more()[3]!, 4); h.complete(h.more()[4]!, 5);
+    h.complete(h.more()[2]!, 3); h.complete(h.more()[3]!, 4);
+    vi.advanceTimersByTime(500); h.complete(h.more()[4]!, 5);
     expect(h.tick()).toMatchObject({ groups: 5, done: 5, pending: 0, active: 0, failed: 0 });
     expect(h.more()).toHaveLength(5);
   });
@@ -122,9 +125,11 @@ describe("CMD native catalog collector", () => {
     h.tick("source:2"); h.commit([row(3), row(4)], []);
     expect(h.more()).toHaveLength(2);
     h.complete(old[0]!, 1);
+    vi.advanceTimersByTime(500);
     expect(h.more()).toHaveLength(3);
     expect(h.tick("source:2")).toMatchObject({ generation: "source:2", done: 0, active: 2, groups: 2 });
     h.complete(old[1]!, 2);
+    vi.advanceTimersByTime(500);
     expect(h.more()).toHaveLength(4);
   });
 
@@ -167,5 +172,78 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(1);
     vi.setSystemTime(START + 15_001); h.tick();
     expect(h.more()).toHaveLength(2);
+  });
+
+  it("pauses every owned request after HTTP failure, honors Retry-After and resumes the retained queue", () => {
+    const h = harness(); h.tick(); h.commit([row(1), row(2), row(3)], []);
+    h.more()[0]!.fail({ status: 429, getResponseHeader: () => "120" });
+    h.complete(h.more()[1]!, 2);
+    expect(h.tick()).toMatchObject({ requestPaused: true, requestStatus: 429, requestRetryInMs: 120_000,
+      groups: 3, done: 1, active: 0 });
+    const count = h.requests.length;
+    vi.setSystemTime(START + 119_999); h.tick();
+    expect(h.requests).toHaveLength(count);
+    vi.setSystemTime(START + 120_001); h.tick();
+    expect(h.more().length).toBeGreaterThan(2);
+    expect(h.tick()).toMatchObject({ requestPaused: false, groups: 3, done: 1 });
+  });
+
+  it("retains request backoff across source-generation changes and does not let late success clear it", () => {
+    const h = harness(); h.tick(); h.commit([row(1), row(2)], []);
+    const old = h.more().slice();
+    old[0]!.fail({ status: 503 });
+    h.tick("source:2"); h.complete(old[1]!, 2);
+    expect(h.tick("source:2")).toMatchObject({ requestPaused: true, requestRetryInMs: 30_000 });
+    expect(h.lists()).toHaveLength(2);
+    vi.setSystemTime(START + 30_001); h.tick("source:2");
+    expect(h.lists()).toHaveLength(4);
+  });
+
+  it("backs off roster failures exponentially without discarding successful detail clocks", () => {
+    const h = harness(); h.tick(); h.commit([row(1)], []); h.complete(h.more()[0]!, 1);
+    let now = START + 30_001;
+    for (const delay of [30_000, 60_000, 120_000, 240_000, 300_000, 300_000]) {
+      vi.setSystemTime(now); h.tick();
+      const pair = h.lists().slice(-2);
+      pair[0]!.fail({ status: 503 }); pair[1]!.fail({ status: 503 });
+      expect(h.tick()).toMatchObject({ requestPaused: true, requestRetryInMs: delay, groups: 1, done: 1 });
+      now += delay + 1;
+    }
+    const state = (h.globals.document as any).documentElement.__fieldlineCmdNativeCatalogV1;
+    expect(state.owners.get(group(1)).nativeMore.observedAtMs).toBe(START);
+  });
+
+  it("paces fast More callbacks so maintenance ticks cannot flood the next owners", () => {
+    const h = harness(); h.tick(); h.commit(Array.from({ length: 20 }, (_, i) => row(i + 1)), []);
+    h.complete(h.more()[0]!, 1); h.complete(h.more()[1]!, 2);
+    for (let i = 0; i < 10; i += 1) h.tick();
+    expect(h.more()).toHaveLength(2);
+    vi.advanceTimersByTime(500);
+    expect(h.more()).toHaveLength(4);
+  });
+
+  it.each([401, 403])("waits fifteen minutes after authentication refusal %s without relaunching", (status) => {
+    const h = harness(); h.tick(); h.lists()[0]!.fail({ status }); h.lists()[1]!.fail({ status });
+    vi.setSystemTime(START + 899_999);
+    expect(h.tick()).toMatchObject({ requestPaused: true, requestRetryInMs: 1 });
+    expect(h.requests).toHaveLength(2);
+    vi.setSystemTime(START + 900_001); h.tick();
+    expect(h.lists()).toHaveLength(4);
+  });
+
+  it("honors an HTTP-date Retry-After longer than its own backoff ceiling", () => {
+    const h = harness(); h.tick();
+    h.lists()[0]!.fail({ status: 503, getResponseHeader: () => new Date(START + 600_000).toUTCString() });
+    expect(h.tick()).toMatchObject({ requestPaused: true, requestRetryInMs: 600_000 });
+  });
+
+  it("stops scheduled More work after maintenance goes silent and resumes on the next tick", () => {
+    const h = harness(); h.tick(); h.commit([row(1), row(2), row(3)], []);
+    vi.setSystemTime(START + 16_000);
+    h.complete(h.more()[0]!, 1); h.complete(h.more()[1]!, 2);
+    vi.advanceTimersByTime(1_000);
+    expect(h.more()).toHaveLength(2);
+    h.tick();
+    expect(h.more()).toHaveLength(4);
   });
 });

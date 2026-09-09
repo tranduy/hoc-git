@@ -13,6 +13,105 @@ const apps: FastifyInstance[] = [];
 afterEach(async () => Promise.all(apps.splice(0).map(async (app) => app.close())));
 
 describe("provider catalog route", () => {
+  it("preserves the AP observation clock pair through full, summary and counts responses", async () => {
+    const catalog = { dataMode: "LIVE" as const, accountId: "account", provider: "APSPORT" as const,
+      category: "FOOTBALL" as const, comparisonState: "AWAITING_SECOND_PROVIDER" as const,
+      observedAtMs: 100, observedMonotonicMs: 50.25, rejectedMarketCount: 0,
+      events: [], markets: [], quotes: [], nativeMarketObservations: [] };
+    const revisions = new CatalogRevisionStore({ now: () => 100 });
+    const app = buildApp(createFixtureRuntime(1_000), { catalogReader: { read: async () => catalog },
+      catalogRevisions: revisions });
+    apps.push(app);
+    for (const view of ["full", "summary", "counts"]) {
+      const response = await app.inject({ method: "GET", url: `/api/catalog/accounts/account?nativeDetail=${view}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ observedAtMs: 100, observedMonotonicMs: 50.25 });
+    }
+    const before = revisions.get("account")!;
+    const next = revisions.publish("account", { ...catalog, observedMonotonicMs: 50.5 },
+      { snapshotState: "FRESH", freshnessMs: 100 });
+    expect(next.revision).not.toBe(before.revision);
+    const updated = await app.inject({ method: "GET", url: "/api/catalog/accounts/account?nativeDetail=counts",
+      headers: { "if-none-match": `"${before.revision}-native-counts"` } });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({ observedAtMs: 100, observedMonotonicMs: 50.5 });
+  });
+
+  it("serves per-event native counts without raw inventory and preserves canonical data and view ETags", async () => {
+    const observation = { provider: "BTI", category: "FOOTBALL" as const, providerEventId: "event-1",
+      providerMarketId: "native-1", nativeType: "QA60", nativeLabel: "Correct score", nativeScope: "FULL_TIME",
+      outcomeLabels: ["1:0"], observedAtMs: 100, disposition: "UNMAPPED" as const, reason: "NATIVE_TYPE_UNMAPPED" };
+    const catalog: ObservedProviderCatalog = { dataMode: "LIVE", accountId: "account", provider: "BTI",
+      category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100,
+      rejectedMarketCount: 2, events: [], markets: [], quotes: [], nativeMarketObservations: [
+        observation, { ...observation, providerMarketId: "native-2", disposition: "NORMALIZED" },
+        { ...observation, providerEventId: "event-2", disposition: "EXCLUDED" },
+        { ...observation, category: "LOL" }, { ...observation, provider: "IM" }
+      ] };
+    const revisions = new CatalogRevisionStore({ now: () => 100 });
+    const app = buildApp(createFixtureRuntime(1_000), { catalogReader: { read: async () => catalog },
+      catalogRevisions: revisions });
+    apps.push(app);
+    const full = await app.inject({ method: "GET", url: "/api/catalog/accounts/account" });
+    const counts = await app.inject({ method: "GET", url: "/api/catalog/accounts/account?nativeDetail=counts",
+      headers: { "if-none-match": String(full.headers.etag) } });
+    expect(counts.statusCode).toBe(200);
+    expect(counts.json()).toEqual({ ...full.json(), nativeMarketObservations: undefined,
+      nativeCoverageByEvent: [
+        { providerEventId: "event-1", normalized: 1, excluded: 0, unmapped: 1 },
+        { providerEventId: "event-2", normalized: 0, excluded: 1, unmapped: 0 }
+      ] });
+    expect(counts.headers.etag).toBe(`"${counts.headers["x-catalog-revision"]}-native-counts"`);
+    expect(counts.headers["x-catalog-revision"]).toBe(full.headers["x-catalog-revision"]);
+    expect(catalog.nativeMarketObservations).toHaveLength(5);
+    const unchanged = await app.inject({ method: "GET", url: "/api/catalog/accounts/account?nativeDetail=counts",
+      headers: { "if-none-match": String(counts.headers.etag) } });
+    expect(unchanged.statusCode).toBe(304);
+    const summary = await app.inject({ method: "GET", url: "/api/catalog/accounts/account?nativeDetail=summary",
+      headers: { "if-none-match": String(counts.headers.etag) } });
+    expect(summary.statusCode).toBe(200);
+    expect(summary.json().nativeMarketObservations).toHaveLength(5);
+    expect(summary.json().nativeCoverageByEvent).toBeUndefined();
+  });
+
+  it.each([undefined, []])("preserves absent versus empty native inventory in the counts view (%j)", async (native) => {
+    const catalog: ObservedProviderCatalog = { dataMode: "LIVE", accountId: "account", provider: "BTI",
+      category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100,
+      rejectedMarketCount: 0, events: [], markets: [], quotes: [],
+      ...(native === undefined ? {} : { nativeMarketObservations: native }) };
+    const app = buildApp(createFixtureRuntime(1_000), { catalogReader: { read: async () => catalog } });
+    apps.push(app);
+    const response = await app.inject({ method: "GET", url: "/api/catalog/accounts/account?nativeDetail=counts" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().nativeMarketObservations).toBeUndefined();
+    expect(response.json().nativeCoverageByEvent).toEqual(native);
+  });
+
+  it("serves a compact native inventory without losing full raw selections or mixing view ETags", async () => {
+    const native = { provider: "BTI", category: "FOOTBALL" as const, providerEventId: "1", providerMarketId: "2",
+      nativeType: "QA60", nativeLabel: "Correct score", nativeScope: "FULL_TIME", outcomeLabels: ["1:0"],
+      nativeSelections: [{ selectionId: "3", outcomeId: "1:0", line: null, price: "8", rawFormat: "DECIMAL" as const }],
+      observedAtMs: 100, disposition: "UNMAPPED" as const, reason: "NATIVE_TYPE_UNMAPPED" };
+    const catalog: ObservedProviderCatalog = { dataMode: "LIVE", accountId: "account", provider: "BTI",
+      category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100,
+      rejectedMarketCount: 0, events: [], markets: [], quotes: [], nativeMarketObservations: [native] };
+    const revisions = new CatalogRevisionStore({ now: () => 100 });
+    const app = buildApp(createFixtureRuntime(1_000), { catalogReader: { read: async () => catalog },
+      catalogRevisions: revisions });
+    apps.push(app);
+    const full = await app.inject({ method: "GET", url: "/api/catalog/accounts/account" });
+    const summary = await app.inject({ method: "GET", url: "/api/catalog/accounts/account?nativeDetail=summary",
+      headers: { "if-none-match": String(full.headers.etag) } });
+    expect(summary.statusCode).toBe(200);
+    expect(summary.json().nativeMarketObservations).toEqual([{ ...native, nativeSelections: undefined }]);
+    expect(full.json().nativeMarketObservations).toEqual([native]);
+    expect(summary.json().observedAtMs).toBe(full.json().observedAtMs);
+    expect(summary.headers["x-catalog-revision"]).toBe(full.headers["x-catalog-revision"]);
+    expect(summary.headers.etag).not.toBe(full.headers.etag);
+    expect(catalog.nativeMarketObservations?.[0]?.nativeSelections).toHaveLength(1);
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/account?nativeDetail=summary",
+      headers: { "if-none-match": String(summary.headers.etag) } })).statusCode).toBe(304);
+  });
   it("publishes a catalog with the source-specific freshness window", async () => {
     const revisions = new CatalogRevisionStore({ now: () => 100 });
     const reader = {

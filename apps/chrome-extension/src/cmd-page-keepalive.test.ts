@@ -3,6 +3,56 @@ import { describe, expect, it, vi } from "vitest";
 const CMD_SOURCE = { lobby: "CMD" as const, sourceId: "chrome:CMD:7", tabId: 7 };
 
 describe("CMD page keepalive", () => {
+  it("does not turn a native request cooldown into replacement of the CMD tab", async () => {
+    const { recoverCmdTab } = await import("./cmd-page-keepalive.js");
+    const replace = vi.fn(async () => 8);
+    await expect(recoverCmdTab(CMD_SOURCE, { isAttached: () => true,
+      get: async () => ({ id: 7, url: "https://cgnew.fts368.com/BasePage/home.aspx" }),
+      isExpected: () => true, attachBootstrap: async () => undefined,
+      reload: async () => { throw new Error("CMD_REQUEST_BACKOFF"); }, replace,
+      waitForFreshBaseline: async () => false })).rejects.toThrow("CMD_REQUEST_BACKOFF");
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("observes a retained page after worker restart before acting on an overdue schedule", async () => {
+    const { CmdPageKeepalive } = await import("./cmd-page-keepalive.js");
+    let now = 2_000_000;
+    let fresh = false;
+    let stored = { lastCompletedAtMs: 1_000, nextAttemptAtMs: 1_201_000 };
+    const reload = vi.fn(async () => undefined);
+    const keepalive = new CmdPageKeepalive({ now: () => now, startupGraceMs: 90_000,
+      listAttached: () => [CMD_SOURCE], isBusy: () => false, isLoading: async () => false,
+      shouldDeferReload: () => fresh, loadState: async () => stored,
+      saveState: async (state) => { stored = state; }, reload });
+    await keepalive.tick();
+    expect(reload).not.toHaveBeenCalled();
+    now += 30_000; fresh = true; await keepalive.tick();
+    now += 60_000; await keepalive.tick();
+    expect(reload).not.toHaveBeenCalled();
+    fresh = false; now += 30_000; await keepalive.tick();
+    expect(reload).toHaveBeenCalledExactlyOnceWith(CMD_SOURCE);
+  });
+
+  it("preserves a fresh CMD document across a full day and still recovers a failed source", async () => {
+    const { CmdPageKeepalive } = await import("./cmd-page-keepalive.js");
+    let now = 1_000;
+    let fresh = true;
+    let stored: { lastCompletedAtMs: number; nextAttemptAtMs: number } | null = null;
+    const reload = vi.fn(async () => undefined);
+    const options = { now: () => now, listAttached: () => [CMD_SOURCE], isBusy: () => false,
+      isLoading: async () => false, shouldDeferReload: () => fresh,
+      loadState: async () => stored, saveState: async (state: NonNullable<typeof stored>) => { stored = state; }, reload };
+    for (let minute = 0; minute <= 24 * 60; minute += 1) {
+      now = 1_000 + minute * 60_000;
+      // A worker restart reads the persisted schedule; it must not force navigation.
+      await new CmdPageKeepalive(options).tick();
+    }
+    expect(reload).not.toHaveBeenCalled();
+    fresh = false; now += 20 * 60_000;
+    await new CmdPageKeepalive(options).tick();
+    expect(reload).toHaveBeenCalledExactlyOnceWith(CMD_SOURCE);
+  });
+
   it("rejects a corrupted persisted schedule so keepalive can seed a safe new window", async () => {
     const { parseCmdPageKeepaliveState } = await import("./cmd-page-keepalive.js");
 

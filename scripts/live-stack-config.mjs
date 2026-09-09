@@ -1,3 +1,9 @@
+export function resolveWebMode(environment) {
+  const mode = environment.FIELDLINE_WEB_MODE?.trim() || "development";
+  if (mode !== "development" && mode !== "preview") throw new Error("WEB_MODE_INVALID");
+  return mode;
+}
+
 export function resolveLiveStackEnvironment(environment, host, webPort) {
   const publicOrigin = environment.FIELDLINE_PUBLIC_ORIGIN?.trim();
 
@@ -20,7 +26,7 @@ export function resolveApiNodeArgs(environment) {
   const megabytes = configured !== undefined && /^\d{3,4}$/u.test(configured)
     ? Number(configured)
     : 512;
-  const bounded = Number.isSafeInteger(megabytes) && megabytes >= 192 && megabytes <= 1_024
+  const bounded = Number.isSafeInteger(megabytes) && megabytes >= 192 && megabytes <= 4_096
     ? megabytes
     : 512;
   return [`--max-old-space-size=${bounded}`];

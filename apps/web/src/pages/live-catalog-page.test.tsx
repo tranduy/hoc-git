@@ -1,10 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import type { AccountStatus, CatalogSourceStatus, ProviderEvent, ProviderMarket, ProviderQuote,
   ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountApiLike } from "../api/accounts.js";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
+import type { CatalogRealtimeFeed } from "../api/client.js";
 import type { CatalogSourceApiLike } from "../api/catalog-sources.js";
 import type { ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import type { ProviderTicketApiLike, ProviderTicketIdentity } from "../api/provider-ticket.js";
@@ -14,6 +15,10 @@ import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
 import { SOUND_VOLUME_STORAGE_KEY } from "../watch/sound-settings.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
 import { saveProfitAlerts, type ProfitAlert } from "../watch/profit-alert-tracker.js";
+import { loadCatalogCache } from "../catalog/catalog-cache.js";
+import * as rankedTickets from "../watch/ranked-tickets.js";
+import { capturedRefundExample } from "../watch/conditional-roi.test-fixtures.js";
+import { TicketPreflightCoordinator, type VerifiedTicketEvidence } from "../watch/ticket-preflight-coordinator.js";
 
 const account: AccountStatus = {
   id: "account-1", alias: "CMD main", provider: "CMD", category: "FOOTBALL", sessionState: "ACTIVE", profileState: "FRESH",
@@ -60,6 +65,244 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
+  it.each([false, true])("keeps checked-book pairs after SABA/SBO removal (expired AP: %s)", async expiredAp => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const atMs = Date.now();
+    const providers = ["SABA", "SBOBET", "CMD", "APSPORT", "BTI"] as const;
+    const sources: CatalogSourceStatus[] = providers.map(provider => ({ id: `catalog-source:${provider}:FOOTBALL`,
+      alias: provider, provider, category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN",
+      acquiredAtMs: atMs, reason: null }));
+    const view = render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sources }} catalogApi={{ read: async id => {
+        const provider = sources.find(source => source.id === id)!.provider;
+        const line = expiredAp && provider === "BTI" ? "-3.5" : market.line;
+        return { ...catalog, accountId: id, provider, observedAtMs: atMs, snapshotState: "FRESH",
+          events: [{ ...event, provider, startAtUtcMs: atMs + 3_600_000 }], markets: [{ ...market, provider, line }],
+          quotes: quotes.map(quote => ({ ...quote, provider, line })) };
+      } }} />);
+    await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
+    await waitFor(() => expect(screen.getByLabelText("Tổng kèo ghép").textContent)
+      .toContain(`${expiredAp ? 6 : 10} cặp market`));
+    if (expiredAp) vi.setSystemTime(atMs + 16_000);
+    for (const provider of ["SABA", "SBOBET"]) {
+      const row = [...view.container.querySelectorAll(".provider-selector__item")]
+        .find(item => item.textContent?.includes(provider))!;
+      fireEvent.click(row.querySelector("input[type=checkbox]")!);
+    }
+    expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain(`${expiredAp ? 1 : 3} cặp market`);
+    expect(screen.queryByText("No exact two-book comparison is currently available")).toBeNull();
+    if (expiredAp) {
+      expect(screen.getByText("ĐÃ GHÉP · CHỜ GIÁ")).toBeTruthy();
+      expect(screen.getByText("Chờ giá mới từ APSPORT")).toBeTruthy();
+      expect(view.container.querySelector(".catalog-event .roi-badge")).toBeNull();
+    } else expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+  });
+
+  it.each(["handicap", "total", "break-even"] as const)("distinguishes captured %s value on the card and selected detail", async kind => {
+    const { row } = capturedRefundExample(kind);
+    window.localStorage.setItem(WATCH_BASE_STAKE_STORAGE_KEY, "500000");
+    const sources: CatalogSourceStatus[] = row.cells.map(({ provider }) => {
+      if (provider === "FABET") throw new Error("Fixture requires an observed sportsbook");
+      return {
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: Date.now(), reason: null
+    }; });
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sources }} catalogApi={{ read: async id => {
+        const source = sources.find(s => s.id === id)!;
+        const cell = row.cells.find(c => c.provider === source.provider)!;
+        return { ...catalog, accountId: id, provider: source.provider, observedAtMs: Date.now(), snapshotState: "FRESH",
+          events: [{ ...event, provider: source.provider, providerEventId: cell.market.providerEventId }],
+          markets: [cell.market], quotes: [...cell.quotes] };
+      } }} />);
+    const card = await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
+    const selected = screen.getByLabelText("Selected ticket balance");
+    expect(within(card).getByText("ROI 0.00%").classList.contains("roi-badge--neutral")).toBe(true);
+    if (kind === "break-even") {
+      expect(within(card).queryByText(/ROI khi không hoàn tiền/u)).toBeNull();
+      expect(within(selected).queryByText(/ROI khi không hoàn tiền/u)).toBeNull();
+    } else {
+      const label = `ROI khi không hoàn tiền: ${kind === "handicap" ? "1.24" : "0.28"}%`;
+      expect(within(card).getByText(label)).toBeTruthy();
+      expect(within(selected).getByText(label)).toBeTruthy();
+      expect(within(card).getByText("Hoàn đủ hai cược: lãi 0 VND")).toBeTruthy();
+      expect(within(selected).getByText("Worst-case: 0 VND")).toBeTruthy();
+      fireEvent.click(card);
+      await waitFor(() => expect(within(screen.getByLabelText("Selected match detail")).getByText(label)).toBeTruthy());
+    }
+  });
+
+  it.each(["revision", "baseline", "batched"] as const)("retires a positive pinned pair immediately on stale %s metadata without waiting for a body", async (kind) => {
+    const providers = ["BTI", "IM"] as const;
+    const observedAtMs = Date.now();
+    const sources: CatalogSourceStatus[] = providers.map((provider) => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: observedAtMs, reason: null
+    }));
+    const catalogs = new Map(sources.map((source) => [source.id, {
+      ...catalog, accountId: source.id, provider: source.provider, snapshotState: "FRESH" as const, observedAtMs,
+      events: [{ ...event, provider: source.provider }], markets: [{ ...market, provider: source.provider }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: source.provider,
+        rawOdds: (source.provider === "BTI") === (quote.selection === "HOME") ? "2.2" : "1.1" }))
+    }]));
+    const loaded = new Set<string>();
+    const readRevision = async (id: string) => {
+      if (loaded.has(id)) return new Promise<never>(() => undefined);
+      loaded.add(id);
+      return { catalog: catalogs.get(id)!, revision: `${id}-fresh` };
+    };
+    const baseline = { entries: [], sequence: 0 };
+    const props = { fixedCategory: "FOOTBALL" as const,
+      accountApi: { ...accountApi, list: async () => [] }, catalogSourceApi: { list: async () => sources },
+      catalogApi: { read: async (id: string) => catalogs.get(id)!, readRevision } };
+    const view = render(<LiveCatalogPage {...props}
+      catalogRealtime={{ connectionState: "LIVE", baseline, revision: null }} />);
+    const card = await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
+    expect(within(card).getByText("ROI 10.00%")).toBeTruthy();
+    fireEvent.click(card);
+    const entry = { accountId: sources[1]!.id, revision: "im-stale", observedAtMs, snapshotState: "STALE" as const };
+    const newerIm = { entry: { ...entry, revision: "im-next", snapshotState: "FRESH" as const,
+      observedAtMs: observedAtMs + 1 }, sequence: 3 };
+    const feed: CatalogRealtimeFeed = kind === "baseline"
+      ? { connectionState: "LIVE", baseline: { entries: [entry], sequence: 1 }, revision: null }
+      : kind === "batched" ? { connectionState: "LIVE", baseline, revision: newerIm,
+        revisions: [{ entry, sequence: 1 }, { entry: { ...entry, accountId: sources[0]!.id,
+          revision: "bti-next", snapshotState: "FRESH" }, sequence: 2 }, newerIm] }
+      : { connectionState: "LIVE", baseline, revision: { entry, sequence: 1 } };
+    view.rerender(<LiveCatalogPage {...props} catalogRealtime={feed} />);
+
+    expect(screen.queryByRole("button", { name: "Compare Alpha vs Beta" })).toBeNull();
+    expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain("0 cặp market giữa hai sàn");
+    const detail = screen.getByRole("complementary", { name: "Selected match detail" });
+    expect(within(detail).getByText("Waiting for an exact pair")).toBeTruthy();
+    expect(within(detail).queryByText("Alpha vs Beta")).toBeNull();
+    expect(screen.queryByText("ROI 10.00%")).toBeNull();
+  });
+
+  it("keeps delayed initial fresh bodies below a stale revision floor excluded until a newer body arrives", async () => {
+    const providers = ["BTI", "IM"] as const;
+    const observedAtMs = Date.now();
+    const sources: CatalogSourceStatus[] = providers.map((provider) => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: observedAtMs, reason: null
+    }));
+    const providerCatalog = (id: string, at: number): LiveCatalogResponse => {
+      const provider = sources.find((source) => source.id === id)!.provider;
+      return { ...catalog, accountId: id, provider, snapshotState: "FRESH", observedAtMs: at,
+        events: [{ ...event, provider }], markets: [{ ...market, provider }],
+        quotes: quotes.map((quote) => ({ ...quote, provider })) };
+    };
+    const pending: Array<{ id: string; resolve: (result: { catalog: LiveCatalogResponse; revision: string }) => void }> = [];
+    const readRevision = (id: string) => new Promise<{ catalog: LiveCatalogResponse; revision: string }>((resolve) => pending.push({ id, resolve }));
+    const baseline = { entries: [], sequence: 0 };
+    const props = { fixedCategory: "FOOTBALL" as const,
+      accountApi: { ...accountApi, list: async () => [] }, catalogSourceApi: { list: async () => sources },
+      catalogApi: { read: async (id: string) => providerCatalog(id, observedAtMs), readRevision } };
+    const view = render(<LiveCatalogPage {...props}
+      catalogRealtime={{ connectionState: "LIVE", baseline, revision: null }} />);
+    await waitFor(() => expect(pending).toHaveLength(2));
+    const stale = { accountId: sources[1]!.id, revision: "im-stale", observedAtMs, snapshotState: "STALE" as const };
+    view.rerender(<LiveCatalogPage {...props}
+      catalogRealtime={{ connectionState: "LIVE", baseline, revision: { entry: stale, sequence: 1 } }} />);
+    await act(async () => {
+      for (const item of pending.slice(0, 2)) item.resolve({ catalog: providerCatalog(item.id, observedAtMs), revision: `${item.id}-old` });
+    });
+    expect(screen.queryByRole("button", { name: "Compare Alpha vs Beta" })).toBeNull();
+    expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain("0 cặp market giữa hai sàn");
+
+    const fresh = { ...stale, revision: "im-new", observedAtMs: observedAtMs + 1, snapshotState: "FRESH" as const };
+    view.rerender(<LiveCatalogPage {...props}
+      catalogRealtime={{ connectionState: "LIVE", baseline, revision: { entry: fresh, sequence: 2 } }} />);
+    expect(screen.queryByRole("button", { name: "Compare Alpha vs Beta" })).toBeNull();
+    await waitFor(() => expect(pending.length).toBeGreaterThan(2));
+    await act(async () => pending.at(-1)!.resolve({ catalog: providerCatalog(stale.accountId, observedAtMs + 1), revision: "im-new" }));
+    expect(await screen.findByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+
+    // A delayed stale announcement for the earlier observation cannot retire a newer body.
+    view.rerender(<LiveCatalogPage {...props}
+      catalogRealtime={{ connectionState: "LIVE", baseline, revision: { entry: stale, sequence: 3 } }} />);
+    expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+  });
+
+  it("keeps counts from separate fixture groups when their display names and kickoff collide", async () => {
+    const providers = ["SABA", "SBOBET", "CMD", "BTI"] as const;
+    const sources: CatalogSourceStatus[] = providers.map((provider) => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: Date.now(), reason: null
+    }));
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sources }} catalogApi={{ read: async (id) => {
+        const provider = sources.find((source) => source.id === id)!.provider;
+        return { ...catalog, accountId: id, provider, observedAtMs: Date.now(),
+          events: [{ ...event, provider,
+            competition: provider === "SABA" || provider === "SBOBET" ? "Premier North" : "Premier South" }],
+          markets: [{ ...market, provider }], quotes: quotes.map((quote) => ({ ...quote, provider })) };
+      } }} />);
+
+    expect((await screen.findByText(/2 nhóm kèo/u)).textContent).toContain("2 cặp market giữa hai sàn");
+    expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain("4 market nguồn");
+  });
+
+  it("counts every compared contract and book pair before limiting the ranked list to twenty tickets", async () => {
+    const providers = ["SABA", "SBOBET", "CMD"] as const;
+    const sources: CatalogSourceStatus[] = providers.map((provider) => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: Date.now(), reason: null
+    }));
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sources }} catalogApi={{ read: async (id) => {
+        const provider = sources.find((source) => source.id === id)!.provider;
+        const markets = Array.from({ length: 30 }, (_, index) => ({ ...market, provider,
+          providerMarketId: `market-${index}`, line: String(index + 0.5) }));
+        return { ...catalog, accountId: id, provider, observedAtMs: Date.now(),
+          events: [{ ...event, provider }], markets,
+          quotes: markets.flatMap((item) => quotes.map((quote) => ({ ...quote, provider,
+            providerMarketId: item.providerMarketId,
+            providerSelectionId: `${item.providerMarketId}-${quote.selection}`, line: item.line }))) };
+      } }} />);
+
+    expect((await screen.findByText(/30 nhóm kèo/u)).textContent).toContain("90 cặp market giữa hai sàn");
+    expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain("90 market nguồn");
+    expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain("Kèo hai cửa đối ứng");
+    expect(screen.getAllByRole("button", { name: "Compare Alpha vs Beta" })).toHaveLength(20);
+  });
+
+  it("ranks a worker result once and does not rerank when empty preflight evidence resolves", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(10_000);
+    const pending: Array<(value: ReadonlyMap<string, VerifiedTicketEvidence>) => void> = [];
+    const preflight = vi.spyOn(TicketPreflightCoordinator.prototype, "refresh")
+      .mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+    const originalRank = rankedTickets.rankedEvent;
+    const ranking = vi.spyOn(rankedTickets, "rankedEvent").mockImplementation((input) => {
+      const result = originalRank(input);
+      vi.setSystemTime(Date.now() + 100);
+      return result;
+    });
+    const sources: CatalogSourceStatus[] = (["SABA", "SBOBET"] as const).map((provider) => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+    }));
+    try {
+      render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+        catalogSourceApi={{ list: async () => sources }} catalogApi={{ read: async (id) => {
+          const provider = sources.find((source) => source.id === id)!.provider;
+          return { ...catalog, accountId: id, provider, observedAtMs: Date.now(),
+            events: [{ ...event, provider, startAtUtcMs: 60_000 }], markets: [{ ...market, provider }],
+            quotes: quotes.map((quote) => ({ ...quote, provider })) };
+        } }} />);
+      expect(await screen.findByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+      expect(ranking).toHaveBeenCalledTimes(1);
+      expect(ranking.mock.calls[0]?.[0].nowMs).toBe(10_000);
+      ranking.mockClear();
+      await act(async () => { for (const resolve of pending) resolve(new Map()); });
+      expect(ranking).not.toHaveBeenCalled();
+    } finally {
+      ranking.mockRestore();
+      preflight.mockRestore();
+    }
+  });
+
   it("keeps the comparison workspace fixed by omitting volatile source and movement panels", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
@@ -106,7 +349,7 @@ describe("LiveCatalogPage", () => {
     saveProfitAlerts(window.localStorage, [saved]);
 
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={catalogApi} />);
-    fireEvent.click(await screen.findByRole("button", { name: /Kèo profit.*1/u }));
+    fireEvent.click(await screen.findByRole("button", { name: /Lịch sử kèo profit.*1/u }));
 
     const history = screen.getByRole("complementary", { name: /100 kèo profit/u });
     expect(history.textContent).toContain("Alpha vs Beta");
@@ -139,7 +382,7 @@ describe("LiveCatalogPage", () => {
     expect(providers.nextElementSibling).toBe(phases);
     expect(phases?.nextElementSibling).toBe(actions);
     expect(within(actions).getByRole("button", { name: "Reset sàn" })).toBeTruthy();
-    expect(within(actions).getByRole("button", { name: /Kèo profit/u })).toBeTruthy();
+    expect(within(actions).getByRole("button", { name: /Lịch sử kèo profit/u })).toBeTruthy();
     expect(within(actions).queryByRole("button", { name: "Load live catalog" })).toBeNull();
     expect(within(actions).getByRole("region", { name: /Cấu hình tiền cược/u })).toBeTruthy();
   });
@@ -277,7 +520,8 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByLabelText("Selected ticket balance")).toBeTruthy();
   });
 
-  it("renders a negative observation ROI in red instead of the neutral warning tone", async () => {
+  it.each([["1.8", "-10.00", "negative"], ["2", "0.00", "neutral"]] as const)(
+    "keeps observation odds %s visible with ROI %s and the %s tone", async (odds, percent, tone) => {
     const source = (provider: "SABA" | "SBOBET"): CatalogSourceStatus => ({
       id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
       sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
@@ -288,7 +532,7 @@ describe("LiveCatalogPage", () => {
       markets: [{ ...market, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market` }],
       quotes: quotes.map((quote) => ({ ...quote, provider, providerEventId: `${provider}-event`,
         providerMarketId: `${provider}-market`, providerSelectionId: `${provider}-${quote.selection}`,
-        rawOdds: "1.8" }))
+        rawOdds: odds }))
     });
 
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
@@ -296,10 +540,10 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
 
     const card = await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
-    const roi = within(card).getByText("ROI -10.00%");
+    const roi = within(card).getByText(`ROI ${percent}%`);
     expect(roi.classList.contains("roi-badge--lg")).toBe(true);
-    expect(card.classList.contains("catalog-event--roi-negative")).toBe(true);
-    expect(card.querySelector(".event-edge-summary")?.classList.contains("event-edge-summary--roi-negative")).toBe(true);
+    expect(card.classList.contains(`catalog-event--roi-${tone}`)).toBe(true);
+    expect(card.querySelector(".event-edge-summary")?.classList.contains(`event-edge-summary--roi-${tone}`)).toBe(true);
   });
 
   it("renders globally ranked ticket cards and pins the exact ticket selected from the list", async () => {
@@ -339,7 +583,7 @@ describe("LiveCatalogPage", () => {
     expect(cards[0]!.className).toMatch(/catalog-event--roi-/u);
   });
 
-  it("renders only the 50 highest-ROI cards when more exact tickets exist", async () => {
+  it("renders only the 20 highest-ROI cards when more exact tickets exist", async () => {
     const source = (provider: "SABA" | "SBOBET"): CatalogSourceStatus => ({
       id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
       sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
@@ -363,10 +607,12 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => [source("SABA"), source("SBOBET")] }}
       catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
 
-    await vi.waitFor(() => expect(screen.getAllByRole("button", { name: "Compare Alpha vs Beta" })).toHaveLength(50));
+    await vi.waitFor(() => expect(screen.getAllByRole("button", { name: "Compare Alpha vs Beta" })).toHaveLength(20));
     const cards = screen.getAllByRole("button", { name: "Compare Alpha vs Beta" });
     expect(within(cards[0]!).getByText("ROI 25.50%")).toBeTruthy();
-    expect(within(cards[49]!).getByText("ROI 1.00%")).toBeTruthy();
+    expect(within(cards[1]!).getByText("ROI 25.00%")).toBeTruthy();
+    expect(within(cards[19]!).getByText("ROI 16.00%")).toBeTruthy();
+    expect(screen.queryByText("ROI 15.50%")).toBeNull();
     expect(screen.queryByText("ROI 0.50%")).toBeNull();
   });
 
@@ -710,7 +956,7 @@ describe("LiveCatalogPage", () => {
     expect(await screen.findByText("LIVE · 1H · 11:00 elapsed")).toBeTruthy();
   });
 
-  it("shows provider checkboxes, countdown, provider badges, and side-by-side market rates", async () => {
+  it.each(["observations", "counts"] as const)("shows provider coverage and the same comparison using native %s", async (nativeDetail) => {
     const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
     const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
     const saba = { ...catalog, accountId: sabaAccount.id, provider: "SABA" as const,
@@ -736,7 +982,13 @@ describe("LiveCatalogPage", () => {
       quotes: quotes.map((quote) => ({ ...quote, provider: "SBOBET" as const, providerEventId: "sbo-event",
         providerMarketId: "sbo-market", providerSelectionId: `sbo-${quote.selection}`,
         rawOdds: quote.selection === "HOME" ? "2.25" : quote.rawOdds })) };
-    const api: CatalogApiLike = { read: async (id) => id === sabaAccount.id ? saba : sbobet };
+    const { nativeMarketObservations: _observations, ...canonicalSaba } = saba;
+    const source = nativeDetail === "counts" ? { ...canonicalSaba, nativeCoverageByEvent: [
+      { providerEventId: "saba-event", normalized: 1, excluded: 0, unmapped: 1 },
+      { providerEventId: "saba-virtual", normalized: 100, excluded: 200, unmapped: 300 },
+      { providerEventId: "absent-event", normalized: 100, excluded: 200, unmapped: 300 }
+    ] } : saba;
+    const api: CatalogApiLike = { read: async (id) => id === sabaAccount.id ? source : sbobet };
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
 
     expect((await screen.findByRole("checkbox", { name: /SABA main/u }) as HTMLInputElement).checked).toBe(true);
@@ -1049,6 +1301,37 @@ describe("LiveCatalogPage", () => {
     expect(storageWrites).toHaveBeenCalledTimes(initialWrites);
   });
 
+  it("keeps renewed catalog and quote clocks when a returning source has unchanged prices", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(1_000);
+    const source: CatalogSourceStatus = { id: "catalog-source:CMD:FOOTBALL", alias: "CMD", provider: "CMD",
+      category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null };
+    let available = true;
+    let reads = 0;
+    const readRevision = vi.fn(async () => {
+      reads += 1;
+      return { revision: "unchanged-prices", catalog: { ...catalog, accountId: source.id,
+        observedAtMs: reads * 100, quotes: quotes.map((quote) => ({ ...quote, sequence: reads,
+          sourceTimestampMs: reads * 100 })) } };
+    });
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => available ? [source] : [] }}
+      catalogApi={{ read: async () => catalog, readRevision }}
+      catalogRealtime={{ connectionState: "LIVE", baseline: { entries: [], sequence: 0 }, revision: null }} />);
+    await vi.waitFor(() => expect(loadCatalogCache(window.localStorage)[0]?.observedAtMs).toBe(100));
+
+    available = false;
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    available = true;
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+
+    expect(reads).toBe(2);
+    const renewed = loadCatalogCache(window.localStorage)[0];
+    expect(renewed?.observedAtMs).toBe(200);
+    expect(renewed?.quotes[0]?.sequence).toBe(2);
+    expect(renewed?.quotes[0]?.sourceTimestampMs).toBe(200);
+  });
+
   it("pauses fallback reads while the page is hidden", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const read = vi.fn(async () => catalog);
@@ -1291,6 +1574,44 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByRole("button", { name: "Compare Server Home vs Server Away" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Compare Cached Home vs Cached Away" })).toBeNull();
+  });
+
+  it.each(["initial", "revision"] as const)("keeps a fresh BTI and SBOBET pair when stale IM shares the same match (%s)", async (mode) => {
+    const providers = ["BTI", "SBOBET", "IM"] as const;
+    const observedAtMs = Date.now();
+    const providerCatalog = (provider: typeof providers[number]): LiveCatalogResponse => ({
+      ...catalog, accountId: `catalog-source:${provider}:FOOTBALL`, provider,
+      snapshotState: provider === "IM" && mode === "initial" ? "STALE" : "FRESH", observedAtMs,
+      events: [{ ...event, provider, providerEventId: `${provider}-event` }],
+      markets: [{ ...market, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market` }],
+      quotes: quotes.map((quote) => ({ ...quote, provider, providerEventId: `${provider}-event`,
+        providerMarketId: `${provider}-market`, providerSelectionId: `${provider}-${quote.selection}`,
+        rawOdds: provider === "IM" ? "4" : (provider === "BTI") === (quote.selection === "HOME") ? "2.2" : "1.1" }))
+    });
+    const baseline = { entries: [], sequence: 0 };
+    const renderPage = (revision: CatalogRealtimeFeed["revision"]) => <LiveCatalogPage fixedCategory="FOOTBALL"
+      catalogRealtime={{ connectionState: "LIVE", baseline, revision }} accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => providers.map((provider) => ({
+        id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+        sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+      })) }} catalogApi={{ read: async (id) => providerCatalog(providers.find((provider) =>
+        id === `catalog-source:${provider}:FOOTBALL`)!) }} />;
+    const view = render(renderPage(null));
+    if (mode === "revision") {
+      await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
+      view.rerender(renderPage({ entry: { accountId: "catalog-source:IM:FOOTBALL", revision: "im-stale",
+        observedAtMs, snapshotState: "STALE" }, sequence: 1 }));
+    }
+
+    const card = await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
+    expect(within(card).getByText("ROI 10.00%")).toBeTruthy();
+    expect(within(card).getByTestId("provider-brand-BTI")).toBeTruthy();
+    expect(within(card).getByTestId("provider-brand-SBOBET")).toBeTruthy();
+    expect(within(card).queryByTestId("provider-brand-IM")).toBeNull();
+    fireEvent.click(card);
+    const detail = screen.getByRole("complementary", { name: "Selected match detail" });
+    expect(within(detail).getByLabelText("IM no exact event match")).toBeTruthy();
+    expect(within(detail).queryByLabelText("IM available for this match")).toBeNull();
   });
 
   it("hides an API stale-while-revalidate snapshot", async () => {
@@ -1866,7 +2187,11 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage {...props} />);
     const coolingDown = await screen.findByRole("button", { name: "Reload BTI" });
     expect((coolingDown as HTMLButtonElement).disabled).toBe(true);
-    expect(coolingDown.textContent).toBe("Reload sau 60s");
+    // Source discovery may already have resumed persisted verification. Both
+    // states must preserve the manual cooldown and refuse another request.
+    expect(["Reload sau 60s", "Đang reload…"]).toContain(coolingDown.textContent);
+    expect(Number(window.localStorage.getItem("tool-chenh.provider-source-recovery.manual.v1.BTI")))
+      .toBeGreaterThan(Date.now());
     fireEvent.click(coolingDown);
     expect(recover).toHaveBeenCalledTimes(2);
   });

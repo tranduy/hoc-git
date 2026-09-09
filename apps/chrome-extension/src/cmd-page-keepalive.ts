@@ -34,6 +34,7 @@ interface CmdPageKeepaliveOptions {
   readonly listAttached: () => readonly CmdAttachedSource[];
   readonly isBusy: (sourceId: string) => boolean;
   readonly isLoading: (tabId: number) => Promise<boolean>;
+  readonly shouldDeferReload?: (source: CmdAttachedSource) => boolean;
   readonly loadState: () => Promise<CmdPageKeepaliveState | null>;
   readonly saveState: (state: CmdPageKeepaliveState) => Promise<void>;
   readonly reload: (source: CmdAttachedSource) => Promise<void>;
@@ -43,6 +44,7 @@ interface CmdPageKeepaliveOptions {
   readonly intervalMs?: number;
   readonly busyRetryMs?: number;
   readonly failureRetryMs?: number;
+  readonly startupGraceMs?: number;
 }
 
 interface ExactCmdTab {
@@ -96,7 +98,8 @@ export async function recoverCmdTab(source: CmdAttachedSource, options: CmdTabRe
   try {
     await reloadExactCmdTab(source, options);
     if (await options.waitForFreshBaseline(source.tabId)) return;
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "CMD_REQUEST_BACKOFF") throw error;
     // A renderer crash can leave a recognizable URL on a tab whose debugger
     // target no longer accepts attachment or reload. Replacement below is the
     // only recovery that creates a new renderer process.
@@ -213,6 +216,7 @@ export class CmdPageKeepalive {
   readonly #intervalMs: number;
   readonly #busyRetryMs: number;
   readonly #failureRetryMs: number;
+  readonly #startupReadyAtMs: number;
   #state: CmdPageKeepaliveState | null | undefined;
   #inflight: Promise<void> | null = null;
   #reloadSerial = 0;
@@ -223,6 +227,7 @@ export class CmdPageKeepalive {
     this.#intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.#busyRetryMs = options.busyRetryMs ?? DEFAULT_BUSY_RETRY_MS;
     this.#failureRetryMs = options.failureRetryMs ?? DEFAULT_FAILURE_RETRY_MS;
+    this.#startupReadyAtMs = this.#now() + (options.startupGraceMs ?? 0);
   }
 
   tick(): Promise<void> {
@@ -283,9 +288,18 @@ export class CmdPageKeepalive {
       return;
     }
     if (nowMs < this.#state.nextAttemptAtMs) return;
+    if (nowMs < this.#startupReadyAtMs) {
+      await this.#remember({ ...this.#state, nextAttemptAtMs: this.#startupReadyAtMs });
+      return;
+    }
 
     const source = this.#options.listAttached().find((candidate) => candidate.lobby === "CMD");
     if (source === undefined) {
+      await this.#remember({ ...this.#state, nextAttemptAtMs: nowMs + this.#busyRetryMs });
+      return;
+    }
+
+    if (this.#options.shouldDeferReload?.(source)) {
       await this.#remember({ ...this.#state, nextAttemptAtMs: nowMs + this.#busyRetryMs });
       return;
     }

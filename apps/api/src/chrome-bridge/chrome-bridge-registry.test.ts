@@ -245,7 +245,7 @@ describe("ChromeBridgeRegistry", () => {
     expect(registry.listSources()).toEqual([]);
   });
 
-  it("requires a newer authenticated connection generation to reclaim a retired owner", () => {
+  it("requires a newer authority identity to reclaim an idle retired candidate", () => {
     let now = 1_000;
     const registry = new ChromeBridgeRegistry({ now: () => now, retireAfterMs: 100 });
     const retiredConnection = {};
@@ -256,15 +256,63 @@ describe("ChromeBridgeRegistry", () => {
     now = 1_101;
     expect(registry.listSources()).toEqual([]);
 
+    expect(registry.ingest({ ...envelope(1), sourceEpoch: "observer-a:0" }, retiredConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
     expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
       sourceEpoch: "observer-a:1" }, retiredConnection))
-      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+      .toMatchObject({ kind: "ACK" });
     expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
       sourceEpoch: "observer-a:1" }, replacementConnection))
       .toMatchObject({ kind: "ACK" });
     expect(registry.listSources()).toEqual([expect.objectContaining({
       sourceId: "chrome:SABA:8", lastSequence: 0
     })]);
+  });
+
+  it("keeps a live authority receiving data when an unproven candidate on the same socket expires", () => {
+    let now = 1_000;
+    const registry = new ChromeBridgeRegistry({ now: () => now, retireAfterMs: 100 });
+    const connection = {};
+    const active = { ...envelope(0), sourceEpoch: "observer-a:0" };
+    registry.ingest(active, connection);
+    const token = registry.authorityCoordinator.snapshot("catalog-source:SABA:FOOTBALL").candidateToken!;
+    expect(registry.authorityCoordinator.promote(token, proof(1n))).toMatchObject({ promoted: true });
+    const candidate = { ...envelope(0, "chrome:SABA:8"), tabId: 8, sourceEpoch: "observer-a:1" };
+    expect(registry.ingest(candidate, connection)).toMatchObject({ kind: "ACK" });
+    now = 1_060;
+    expect(registry.ingest({ ...active, sequence: 1 }, connection)).toMatchObject({ kind: "ACK" });
+    now = 1_120;
+    expect(registry.ingest({ ...active, sequence: 2 }, connection)).toMatchObject({ kind: "ACK" });
+    expect(registry.listSources()).toEqual([expect.objectContaining({
+      sourceId: active.sourceId, authorityDisposition: "ACTIVE", lastSequence: 2
+    })]);
+    expect(registry.ingest({ ...candidate, sequence: 1 }, connection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+  });
+
+  it("admits a strictly newer source epoch after idle retirement without reopening retired data", () => {
+    let now = 1_000;
+    const registry = new ChromeBridgeRegistry({ now: () => now, retireAfterMs: 100 });
+    const connection = {};
+    const retired = { ...envelope(40), sourceEpoch: "observer-a:19" };
+    registry.ingest(retired, connection);
+    const token = registry.authorityCoordinator.snapshot("catalog-source:SABA:FOOTBALL").candidateToken!;
+    expect(registry.authorityCoordinator.promote(token, proof(1n))).toMatchObject({ promoted: true });
+    now = 1_101;
+    expect(registry.listSources()).toEqual([]);
+    expect(registry.ingest({ ...retired, sequence: 41 }, connection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-b:99" }, connection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    const next = { ...envelope(0), sourceEpoch: "observer-a:20" };
+    expect(registry.ingest(next, connection)).toMatchObject({ kind: "ACK" });
+    expect(registry.listActiveSources()).toEqual([]);
+    const nextToken = registry.authorityCoordinator.snapshot("catalog-source:SABA:FOOTBALL").candidateToken!;
+    expect(registry.authorityCoordinator.promote(nextToken, proof(2n))).toMatchObject({ promoted: true });
+    expect(registry.listActiveSources()).toEqual([expect.objectContaining({ lastSequence: 0 })]);
+    expect(registry.ingest({ ...retired, sequence: 42 }, connection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(registry.ingest({ ...next, sequence: 1 }, connection)).toMatchObject({ kind: "ACK" });
   });
 
   it("retires one silent book without silencing the others sharing its socket", () => {
@@ -295,10 +343,13 @@ describe("ChromeBridgeRegistry", () => {
       .toMatchObject({ kind: "ACK" });
     expect(registry.listSources()).toEqual([expect.objectContaining({ sourceId: "chrome:CMD:9" })]);
 
-    // SABA alone still has to prove a newer connection to reclaim its account.
+    // The expired SABA identity stays fenced; a newer epoch can recover on the
+    // authenticated socket without interrupting CMD or claiming a baseline.
+    expect(registry.ingest({ ...envelope(1), sourceEpoch: "observer-a:0" }, sharedConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
     expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
       sourceEpoch: "observer-a:1" }, sharedConnection))
-      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+      .toMatchObject({ kind: "ACK" });
     expect(registry.ingest({ ...cmd(3), sourceEpoch: "observer-c:0" }, sharedConnection))
       .toMatchObject({ kind: "ACK" });
   });

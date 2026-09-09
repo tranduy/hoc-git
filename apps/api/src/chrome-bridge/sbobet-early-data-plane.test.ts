@@ -64,6 +64,35 @@ function catalog(adapter: KsportWsCatalogAdapter, envelope: ChromeBridgeEnvelope
 }
 
 describe("SBOBET complete Early All roster", () => {
+  it("does not publish a Main-only catalog as complete while the new epoch awaits All Dates", () => {
+    const adapter = new KsportWsCatalogAdapter({ requireEarlyRoster: true });
+    expect(adapter.decode(main(1, "live", []))).toEqual([]);
+    expect(adapter.decode(main(2, "today", roster([native(TODAY)], 481)))).toEqual([]);
+    const first = adapter.decode(early(3));
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE" });
+    expect((first[0]!.value as ObservedProviderCatalog).events.map(event => event.providerEventId).sort())
+      .toEqual([EARLY, TODAY].sort());
+    adapter.decode(main(4, "live", [], 2, 3));
+    const next = adapter.decode(main(5, "today", roster([native(TODAY)], 481), 2, 3));
+    expect(next).toHaveLength(1);
+    expect((next[0]!.value as ObservedProviderCatalog).events.map(event => event.providerEventId).sort())
+      .toEqual([EARLY, TODAY].sort());
+    expect((next[0]!.value as ObservedProviderCatalog).quotes.find(quote => quote.providerEventId === EARLY)?.sequence).toBe(3);
+  });
+
+  it("accepts a validated empty All Dates roster but requires fresh coverage again after an epoch reset", () => {
+    const adapter = new KsportWsCatalogAdapter({ requireEarlyRoster: true });
+    adapter.decode(main(1, "live", [])); adapter.decode(main(2, "today", roster([native(TODAY)], 481)));
+    expect(adapter.decode(early(3, []))[0]).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE" });
+    adapter.resetSource("chrome:KSPORT:8");
+    adapter.decode(main(4, "live", [], 2, 3));
+    expect(adapter.decode(main(5, "today", roster([native(TODAY)], 481), 2, 3))).toEqual([]);
+    const replay = early(6, [], 5);
+    expect(adapter.decode({ ...replay, request: { ...replay.request, replayed: true } })).toEqual([]);
+    expect(adapter.decode(early(7, [], 5))[0]).toMatchObject({ authoritativeBaseline: true });
+  });
+
   it("admits the actual 377-owner All response with native prices and inventory under the existing pair generation", () => {
     const adapter = new KsportWsCatalogAdapter(); seed(adapter);
     const update = adapter.decode(early(3, fixture.body))[0];
@@ -77,7 +106,7 @@ describe("SBOBET complete Early All roster", () => {
       providerMarketId: "18467449931040", providerSelectionId: "56916910030004000h", rawOdds: "-0.96",
       sequence: 3, receivedMonotonicMs: 1030 }));
     expect(value.nativeMarketObservations).toContainEqual(expect.objectContaining({ providerEventId: EARLY,
-      nativeType: "1", disposition: "EXCLUDED" }));
+      nativeType: "1", disposition: "NORMALIZED" }));
   });
 
   it("retains Early-only More and its receipt clocks across Today full refreshes", () => {
@@ -228,6 +257,25 @@ describe("SBOBET complete Early All roster", () => {
 const stores: CatalogRevisionStore[] = [];
 afterEach(() => stores.splice(0).forEach(store => store.close()));
 describe("SBOBET Early through the real revision store", () => {
+  it("keeps the complete revision during source replacement until the new Main and All Dates coverage arrives", () => {
+    const now = () => WALL + 2_000;
+    const revisions = new CatalogRevisionStore({ now }); stores.push(revisions);
+    const plane = new ChromeCatalogDataPlane({ now, publish: (value, snapshotState) =>
+      revisions.publish(value.accountId, value, { snapshotState, freshnessMs: 30_000 }) });
+    const ingest = (value: ChromeBridgeEnvelope) => plane.ingest(ChromeBridgeEnvelopeSchema.parse(value), { connectionGeneration: 1 });
+    ingest(main(1, "live", [])); ingest(main(2, "today", roster([native(TODAY)], 481)));
+    expect(ingest(early(3))).toBe(true);
+    const complete = revisions.get(ACCOUNT)!;
+    const replacementEpoch = "early-source:2";
+    expect(ingest({ ...main(10, "live", [], 2, 9), sourceEpoch: replacementEpoch })).toBe(false);
+    expect(ingest({ ...main(11, "today", roster([native(TODAY)], 481), 2, 9), sourceEpoch: replacementEpoch })).toBe(false);
+    expect(revisions.get(ACCOUNT)!.revision).toBe(complete.revision);
+    expect(revisions.get(ACCOUNT)!.catalog.events.map(event => event.providerEventId).sort()).toEqual([EARLY, TODAY].sort());
+    expect(ingest(early(12, roster(), 11, 12, replacementEpoch))).toBe(true);
+    expect(revisions.get(ACCOUNT)!.catalog.events.map(event => event.providerEventId).sort()).toEqual([EARLY, TODAY].sort());
+    expect(revisions.get(ACCOUNT)!.observedAtMs).toBe(WALL + 1_200);
+  });
+
   it("publishes additional Early markets, changed More prices and exact Early removal without renewing baseline generation", async () => {
     const now = () => WALL + 2_000;
     const revisions = new CatalogRevisionStore({ now }); stores.push(revisions);
@@ -235,7 +283,8 @@ describe("SBOBET Early through the real revision store", () => {
       revisions.publish(value.accountId, value, { snapshotState, freshnessMs: 30_000 }) });
     const ingest = (value: ChromeBridgeEnvelope) => plane.ingest(ChromeBridgeEnvelopeSchema.parse(value), { connectionGeneration: 1 });
     expect(ingest(main(1, "live", []))).toBe(false);
-    expect(ingest(main(2, "today", roster([native(TODAY)], 481)))).toBe(true);
+    expect(ingest(main(2, "today", roster([native(TODAY)], 481)))).toBe(false);
+    expect(revisions.get(ACCOUNT)).toBeUndefined();
     expect(ingest(early(3))).toBe(true);
     expect(ingest(more(4))).toBe(true);
     const first = revisions.get(ACCOUNT)!;

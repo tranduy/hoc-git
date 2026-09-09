@@ -34,7 +34,7 @@ function catalog(observedAtMs: number, home = "2.1", status: "OPEN" | "SUSPENDED
   };
 }
 
-function totalCatalog(provider: "SABA" | "SBOBET", accountId: string, over: string, under: string,
+function totalCatalog(provider: "SABA" | "SBOBET" | "CMD" | "APSPORT", accountId: string, over: string, under: string,
   status: "OPEN" | "SUSPENDED" = "OPEN", observedAtMs = 1_000): LiveCatalogResponse {
   const providerEventId = `${provider}-total-event`;
   const providerMarketId = `${provider}-total-market`;
@@ -72,6 +72,32 @@ afterEach(() => {
 });
 
 describe("MatchWatchDetail", () => {
+  it.each([[true, 5_001], [false, 15_001]] as const)("keeps a waiting exact pair after AP %s prices expire without a second read", async (isLive, elapsed) => {
+    const asPhase = (source: LiveCatalogResponse): LiveCatalogResponse => ({ ...source,
+      snapshotState: "FRESH", events: source.events.map(item => item.category === "FOOTBALL" ? { ...item, isLive,
+        liveState: isLive ? item.liveState : null } : item), quotes: source.quotes.map(item => ({ ...item, isLive })) });
+    const cmd = asPhase(totalCatalog("CMD", "cmd-account", "2.20", "1.70", "OPEN", 10_000));
+    const ap = asPhase(totalCatalog("APSPORT", "ap-account", "1.75", "2.20", "OPEN", 10_000));
+    const comparison = buildComparisonEvents([cmd, ap])[0]!;
+    const read = vi.fn();
+    const { container } = render(<MatchWatchDetail accountId="cmd-account" catalogApi={{ read }}
+      comparisonCatalogs={[cmd, ap]} comparisonEvent={comparison} initialCatalog={cmd}
+      onBack={() => undefined} providerEventId="CMD-total-event" externallyRefreshed />);
+    const prices = () => container.querySelector(".watch-prices")!;
+    expect(prices().textContent).toContain("ROI 10.00%");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(elapsed - 1); });
+    expect(prices().textContent).toContain("ROI 10.00%");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+
+    expect(prices().querySelectorAll(".watch-odds-ticket")).toHaveLength(1);
+    expect(prices().textContent).toContain("APSPORT: chờ xác nhận giá mới");
+    expect(prices().textContent).not.toContain("ROI");
+    expect(prices().textContent).not.toContain("Worst");
+    expect(prices().querySelectorAll(".watch-odds-ticket--profitable")).toHaveLength(0);
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("resets the detail provider selection when a different match is opened", () => {
     const firstSaba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
     const firstSbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");

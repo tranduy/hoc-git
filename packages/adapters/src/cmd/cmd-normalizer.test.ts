@@ -4,6 +4,64 @@ import { normalizeCmdCatalog, normalizeObservedFootballCatalog, observeNativeCmd
   type CmdCatalogInputRecord } from "./cmd-normalizer.js";
 
 describe("normalizeCmdCatalog", () => {
+  it("maps SABA type 12 only when its ordered labels prove first-half Odd/Even", () => {
+    const options = { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 123,
+      timezoneOffsetMinutes: 480, sequence: 7 };
+    const group = { betTypeIds: ["12"], labels: ["Even", "Odd"], odds: ["0.93", "0.95"].map((priceText) =>
+      ({ marketOddsId: "saba-first-half-oe", priceText, status: null, greyedOut: null })) };
+    const input = { ...record, groups: [group] };
+    const value = normalizeObservedFootballCatalog("SABA", [input], options);
+    expect(value.markets).toEqual([expect.objectContaining({ marketType: "FH_ODD_EVEN", scope: "FIRST_HALF",
+      settlementProfile: "football-goals-odd-even-first-half", line: null })]);
+    expect(value.quotes.map((quote) => [quote.selection, quote.rawOdds])).toEqual([["EVEN", "0.93"], ["ODD", "0.95"]]);
+    for (const invalid of [{ ...group, betTypeIds: ["24"] }, { ...group, labels: [] },
+      { ...group, labels: ["Odd", "Odd"] }]) {
+      expect(normalizeObservedFootballCatalog("SABA", [{ ...record, groups: [invalid] }], options).markets).toEqual([]);
+    }
+    expect(normalizeObservedFootballCatalog("CMD", [input], options).markets).toEqual([]);
+  });
+
+  it.each([["5", "FULL_TIME"], ["15", "FIRST_HALF"]] as const)(
+    "preserves SABA %s decimal prices and period without inventing unlabeled outcome order", (nativeType, nativeScope) => {
+      const input = { ...record, groups: [{ betTypeIds: [nativeType], labels: [],
+        odds: ["2.39", "2.54", "3.25"].map((priceText) => ({ marketOddsId: "134039544__1062462885",
+          priceText, priceFormat: "DECIMAL" as const, status: null, greyedOut: "false" })) }] };
+      const options = { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 123,
+        timezoneOffsetMinutes: 480, sequence: 7 };
+      expect(normalizeObservedFootballCatalog("SABA", [input], options).markets).toEqual([]);
+      expect(observeNativeCmdMarkets("SABA", [input], options)).toEqual([
+        expect.objectContaining({ providerMarketId: "134039544__1062462885", nativeType, nativeScope,
+          disposition: "EXCLUDED", reason: "NATIVE_RESULT_OUTCOME_UNPROVEN",
+          outcomeLabels: ["OUTCOME_1", "OUTCOME_2", "OUTCOME_3"],
+          nativeSelections: ["2.39", "2.54", "3.25"].map((price) => ({ selectionId: null,
+            outcomeId: null, line: null, price, rawFormat: "DECIMAL", status: "OPEN" })) })
+      ]);
+    });
+
+  it.each([
+    ["MAIN:2", "FT_ODD_EVEN", "FULL_TIME", "football-goals-odd-even-regulation"],
+    ["FH:2", "FH_ODD_EVEN", "FIRST_HALF", "football-goals-odd-even-first-half"]
+  ] as const)("normalizes the proven native %s Odd/Even group with its original market identity", (
+    nativeType, marketType, scope, settlementProfile) => {
+    const input = { ...record, groups: [{ betTypeIds: [nativeType], labels: ["ODD", "EVEN"],
+      odds: ["0.97", "0.91"].map((priceText) => ({ marketOddsId: `native:${nativeType}`, priceText,
+        status: null, greyedOut: null })) }] };
+    const options = { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 123,
+      timezoneOffsetMinutes: 480, sequence: 7 };
+    const normalized = normalizeCmdCatalog([input], options);
+    expect(normalized.markets).toEqual([expect.objectContaining({ providerMarketId: `native:${nativeType}`,
+      marketType, scope, settlementProfile, line: null })]);
+    expect(normalized.quotes.map((quote) => [quote.providerMarketId, quote.selection, quote.rawOdds,
+      quote.rawFormat, quote.scope, quote.sequence])).toEqual([
+      [`native:${nativeType}`, "ODD", "0.97", "MALAY", scope, 7],
+      [`native:${nativeType}`, "EVEN", "0.91", "MALAY", scope, 7]
+    ]);
+    expect(observeNativeCmdMarkets("CMD", [input], options)).toEqual([
+      expect.objectContaining({ nativeType, providerMarketId: `native:${nativeType}`,
+        disposition: "NORMALIZED", nativeScope: scope, outcomeLabels: ["ODD", "EVEN"] })
+    ]);
+  });
+
   it.each(["TRỰC TIẾP 01:45AM", "01:45AM", "01:45"])(
     "uses only the explicit collector date for undated SABA kickoff %s", (timeText) => {
       const input = { ...record, timeText, groups: [record.groups[1]!] };
@@ -102,6 +160,21 @@ describe("normalizeCmdCatalog", () => {
       }
     ]
   };
+
+  it.each([420, 480])("normalizes explicit SABA public GMT offset %i across UTC date boundaries", (offset) => {
+    const result = normalizeObservedFootballCatalog("SABA", [{ ...record, timeText: "09/09 12:30AM",
+      providerTimezoneOffsetMinutes: offset }], { observedAtMs: Date.UTC(2026, 8, 8, 20),
+      receivedMonotonicMs: 1, timezoneOffsetMinutes: 480, sequence: 1 });
+    expect(result.events[0]?.startAtUtcMs).toBe(Date.UTC(2026, 8, 9, 0, 30) - offset * 60_000);
+  });
+
+  it("refuses new SABA records with unknown timezone while retaining legacy default behavior", () => {
+    const options = { observedAtMs: Date.UTC(2026, 8, 8, 20), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 1 };
+    expect(normalizeObservedFootballCatalog("SABA", [{ ...record, providerTimezoneOffsetMinutes: null }], options).events)
+      .toEqual([]);
+    expect(normalizeObservedFootballCatalog("SABA", [record], options).events).toHaveLength(1);
+  });
 
   it("maps a structurally proven DOM odd/even group without requiring a numeric line", () => {
     const oddEven: CmdCatalogInputRecord = { ...record, groups: [{
@@ -286,7 +359,7 @@ describe("normalizeCmdCatalog", () => {
     expect(result).toEqual([
       expect.objectContaining({ providerMarketId: "total-1", nativeType: "3", disposition: "NORMALIZED" }),
       expect.objectContaining({ providerMarketId: "1x2-1", nativeType: "5", disposition: "EXCLUDED",
-        reason: "THREE_WAY_OUTCOME_DOMAIN" }),
+        reason: "NATIVE_RESULT_OUTCOME_UNPROVEN" }),
       expect.objectContaining({ providerMarketId: "unknown", nativeType: "777", disposition: "UNMAPPED",
         reason: "NATIVE_TYPE_UNMAPPED" })
     ]);
@@ -321,6 +394,28 @@ describe("normalizeCmdCatalog", () => {
     expect(result.markets[0]).toEqual(expect.objectContaining({ line: "3.75", status: "SUSPENDED" }));
     expect(result.quotes.every((quote) => quote.status === "SUSPENDED")).toBe(true);
   });
+
+  it.each(["CMD", "SABA"] as const)(
+    "does not invent equivalent half-unit lines from ambiguous %s split totals or handicaps", (provider) => {
+      const input: CmdCatalogInputRecord = { ...record, groups: [record.groups[1]!, {
+        ...record.groups[1]!, labels: ["2/3", "u"], odds: record.groups[1]!.odds.map((odd) => ({
+          ...odd, marketOddsId: "wide-split-total"
+        }))
+      }, {
+        betTypeIds: ["1"], labels: ["0/1"], odds: [
+          { marketOddsId: "wide-split-handicap", priceText: "0.80", status: null, greyedOut: "false", lineText: "0/1" },
+          { marketOddsId: "wide-split-handicap", priceText: "-0.90", status: null, greyedOut: "false", lineText: null }
+        ]
+      }] };
+
+      const result = normalizeObservedFootballCatalog(provider, [input], {
+        observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
+      });
+
+      expect(result.markets.map((market) => [market.marketType, market.line])).toEqual([["FT_TOTAL", "2.5"]]);
+      expect(result.events).toHaveLength(1);
+      expect(result.quotes).toHaveLength(2);
+    });
 
   it("normalizes explicit first-half handicap and total groups without relabelling their period", () => {
     const periodMarkets: CmdCatalogInputRecord = { ...structuredClone(record), groups: [

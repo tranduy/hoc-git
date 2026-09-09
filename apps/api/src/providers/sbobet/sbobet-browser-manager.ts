@@ -86,6 +86,7 @@ export async function extractSbobetRecords(page: Page): Promise<readonly SbobetC
         const lineText = marketType === "FT_AH"
           ? text(row?.querySelector(".rate-asian") ?? null).match(/[+-]?\d+(?:\.\d+)?(?:\s*[\/-]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null : undefined;
         return { selectionId, selection, priceText: text(odd.querySelector(".odd-val")),
+        ...(marketType === "FT_1X2" ? { priceFormat: "DECIMAL" as const } : {}),
         ...(marketType === "FT_AH" ? { lineText } : {}),
         locked: odd.querySelector(".odd-lock") !== null || text(odd.querySelector(".odd-val")) === ""
       }; });

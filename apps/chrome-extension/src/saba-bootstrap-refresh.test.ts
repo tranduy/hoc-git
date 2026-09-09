@@ -9,8 +9,8 @@ describe("retrySabaBootstrapRefresh", () => {
     await retrySabaBootstrapRefresh(refresh, () => false,
       async (delayMs) => { delays.push(delayMs); });
 
-    expect(delays).toEqual([0, 1_000, 5_000, 15_000, 30_000]);
-    expect(refresh).toHaveBeenCalledTimes(5);
+    expect(delays).toEqual([0, 15_000, 30_000]);
+    expect(refresh).toHaveBeenCalledTimes(3);
   });
 
   it("continues after an early main-frame probe cannot see the SABA socket", async () => {
@@ -20,7 +20,7 @@ describe("retrySabaBootstrapRefresh", () => {
 
     await expect(retrySabaBootstrapRefresh(refresh, () => false,
       async () => undefined)).resolves.toBeUndefined();
-    expect(refresh).toHaveBeenCalledTimes(5);
+    expect(refresh).toHaveBeenCalledTimes(3);
   });
 
   it("stops retrying as soon as the SABA socket baseline is complete", async () => {
@@ -33,5 +33,13 @@ describe("retrySabaBootstrapRefresh", () => {
 
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(delays).toEqual([0]);
+  });
+
+  it("does not refresh a retired source after its delayed retry wakes", async () => {
+    let current = true;
+    const refresh = vi.fn(async () => undefined);
+    await retrySabaBootstrapRefresh(refresh, () => false,
+      async (delayMs) => { if (delayMs > 0) current = false; }, () => current);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });

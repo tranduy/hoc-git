@@ -155,11 +155,129 @@ describe("BTI bounded cached delivery", () => {
     expect(JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!)).toMatchObject({
       detailCachedEvents: 30, detailPendingEvents: 0, detailEvictedEvents: 0 });
   });
+
+  it("publishes a newly received price before old cached replay while keeping replay fair", async () => {
+    const { h, ids, initial } = await seededCache(40);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await h.refresh();
+    const changed = h.cache().find((item: any) => item.eventId === ids[0]);
+    const body = JSON.parse(changed.body);
+    changed.requestedAtMs = Date.now();
+    changed.observedAtMs = Date.now();
+    body.fieldlineBtiDetails[0].requestedAtMs = changed.requestedAtMs;
+    body.fieldlineBtiDetails[0].observedAtMs = changed.observedAtMs;
+    changed.body = JSON.stringify(body);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await h.refresh();
+    const clocks = detailBodies(result).flatMap((entry: any) => entry.fieldlineBtiDetails);
+    expect(clocks[0]).toMatchObject({ eventId: ids[0], observedAtMs: START + 2_000, generation: initial.generation });
+    expect(clocks.some((row: any) => row.eventId !== ids[0] && row.observedAtMs === START)).toBe(true);
+  });
+
+  it("does not consume fresh delivery priority when a background roster finishes after publication", async () => {
+    const { h, ids } = await seededCache(40);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await h.refresh();
+    await vi.advanceTimersByTimeAsync(13_000);
+    h.setList(async (path) => {
+      const league: Row = [];
+      league[12] = ids.map((id) => [id, null, null, null, null, false]);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return { ok: true, text: async () => JSON.stringify({ serializedData: path.includes('prematch') ? [league] : [] }) };
+    });
+    const publication = h.refresh();
+    await vi.advanceTimersByTimeAsync(300);
+    await publication;
+    const changed = h.cache().find((item: any) => item.eventId === ids[0]);
+    const body = JSON.parse(changed.body);
+    changed.requestedAtMs = changed.observedAtMs = Date.now();
+    body.fieldlineBtiDetails[0].requestedAtMs = body.fieldlineBtiDetails[0].observedAtMs = Date.now();
+    changed.body = JSON.stringify(body);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await h.refresh();
+    const clocks = detailBodies(result).flatMap((entry: any) => entry.fieldlineBtiDetails);
+    expect(clocks[0]).toMatchObject({ eventId: ids[0], observedAtMs: START + 15_300 });
+  });
 });
 
 describe("BTI private collector regression", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it("delivers current detail while a replacement roster is still waiting on the provider", async () => {
+    const h = harness();
+    const first = await h.refresh();
+    await h.settle();
+    await vi.advanceTimersByTimeAsync(13_000);
+    h.setList(async () => new Promise(() => {}));
+    let result: any;
+    void h.refresh().then((value: any) => { result = value; });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(result?.generation).toBe(first.generation);
+    expect(detailBodies(result)[0].fieldlineBtiDetails[0].observedAtMs).toBe(START + 14_000);
+    const reads = h.listReads();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await h.refresh()).generation).toBe(first.generation);
+    expect(h.listReads()).toBe(reads);
+  });
+
+  it("pauses all owned requests after 429 and respects Retry-After across maintenance ticks", async () => {
+    const h = harness(Array.from({ length: 12 }, (_, index) => `e${index}`));
+    h.setDetail(async () => ({ ok: false, status: 429,
+      headers: { get: () => "60" }, text: async () => "" }));
+    await h.refresh();
+    await h.settle();
+    const reads = h.listReads();
+    expect(h.requests.length).toBeLessThanOrEqual(3);
+    for (let tick = 0; tick < 10; tick += 1) {
+      await vi.advanceTimersByTimeAsync(4_000);
+      await h.refresh();
+    }
+    expect(h.requests.length).toBeLessThanOrEqual(3);
+    expect(h.listReads()).toBe(reads);
+    expect(JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!)).toMatchObject({
+      requestStatus: 429, requestPaused: true });
+    h.setDetail(async () => ({ ok: true, text: async () => '{"data":[]}' }));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await h.refresh();
+    await h.settle();
+    expect(h.requests.length).toBeGreaterThan(3);
+  });
+
+  it("stops unauthorized roster retries until native session credentials change", async () => {
+    const h = harness();
+    h.setList(async () => ({ ok: false, status: 401 }));
+    expect((await h.refresh()).status).toBe("catalog-failed");
+    const reads = h.listReads();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect((await h.refresh()).status).toBe("catalog-failed");
+    expect(h.listReads()).toBe(reads);
+    h.setContext("synthetic-renewed-session");
+    h.setList(undefined);
+    expect((await h.refresh()).status).toBe("catalog-requested");
+  });
+
+  it("paces a healthy detail queue instead of bursting through every owner", async () => {
+    const h = harness(Array.from({ length: 40 }, (_, index) => `e${index}`));
+    await h.refresh();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(h.requests.length).toBeLessThanOrEqual(6);
+    await vi.advanceTimersByTimeAsync(6_001);
+    expect(new Set(h.requests.map(({ eventId }) => eventId)).size).toBe(40);
+  });
+
+  it("keeps provider cooldown across an extension collector upgrade in the same session", async () => {
+    const h = harness();
+    h.setDetail(async () => ({ ok: false, status: 429, headers: { get: () => "300" } }));
+    await h.refresh();
+    await h.settle();
+    const reads = h.listReads();
+    h.root.__fieldlineBtiDetailStateV10.collectorVersion = 12;
+    await vi.advanceTimersByTimeAsync(5_000);
+    await h.refresh();
+    expect(h.listReads()).toBe(reads);
+    expect(h.requests).toHaveLength(1);
+  });
 
   it("retires a previous collector's workers while keeping same-session receipt evidence", async () => {
     const h = harness();
@@ -323,7 +441,7 @@ describe("BTI private collector regression", () => {
   it("continues discovery beyond one bounded queue on subsequent existing ticks", async () => {
     const h = harness(Array.from({ length: 140 }, (_, index) => `e${index}`));
     await h.refresh();
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 9; index += 1) {
       await vi.advanceTimersByTimeAsync(3_000);
       await h.refresh();
     }
@@ -553,12 +671,15 @@ describe("BTI private collector regression", () => {
     await h.settle();
     await h.nextRoster();
     await h.settle();
-    expect(h.requests).toHaveLength(2);
+    expect(h.requests).toHaveLength(1);
+    await h.nextRoster();
+    await h.settle();
+    expect(h.requests).toHaveLength(1);
     await h.nextRoster();
     await h.settle();
     expect(h.requests).toHaveLength(2);
-    await h.nextRoster();
-    await h.settle();
+    await vi.advanceTimersByTimeAsync(59_000);
+    await h.refresh();
     expect(h.requests).toHaveLength(3);
   });
 

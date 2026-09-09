@@ -122,12 +122,25 @@ interface PendingBody {
   readonly chunkCount: number;
   readonly fragments: Map<number, string>;
   readonly reservation: NetworkBodyAssemblyReservation;
+  readonly firstReceivedAtMs: number;
   byteCount: number;
 }
 
-type SourceEpochFence =
+type SourceEpochFence = (
   | { readonly kind: "LEGACY"; faulted: boolean }
-  | { readonly kind: "CANONICAL"; readonly sessionId: string; generation: number; faulted: boolean };
+  | { readonly kind: "CANONICAL"; readonly sessionId: string; generation: number; faulted: boolean }
+) & { firstFault?: NetworkBodyAssemblyFault };
+
+export interface NetworkBodyAssemblyFault {
+  readonly reason: "BODY_TTL_EXPIRED" | "MALFORMED_WRAPPER" | "DOCUMENT_IDENTITY_MISSING" |
+    "IDENTITY_MISMATCH" | "CHUNK_COUNT_MISMATCH" | "DUPLICATE_FRAGMENT_CONFLICT" |
+    "BODY_BYTES_LIMIT" | "SOURCE_BODY_COUNT_LIMIT" | "SOURCE_BYTES_LIMIT" | "RESERVATION_MISSING";
+  readonly faultAtMs: number;
+  readonly receivedFragments: number;
+  readonly expectedFragments: number | null;
+  readonly receivedBytes: number;
+  readonly bodyAgeMs: number;
+}
 
 export interface NetworkBodyAssemblerOptions {
   readonly laneToken?: AuthorityLaneToken;
@@ -148,6 +161,18 @@ export interface NetworkBodyAssemblerStats {
   readonly pendingBytes: number;
   readonly quarantinedBodies: number;
   readonly blockedSourceEpochs: number;
+  readonly lastFault?: NetworkBodyAssemblyFault;
+}
+
+export interface NetworkBodyPromotion {
+  readonly assembler: NetworkBodyAssembler;
+  readonly commit: () => void;
+  readonly rollback: () => void;
+}
+
+export interface NetworkBodyAssemblyDiagnostic {
+  readonly active: Pick<NetworkBodyAssemblerStats, "pendingBodies" | "pendingBytes" | "blockedSourceEpochs" | "lastFault"> | null;
+  readonly candidate: Pick<NetworkBodyAssemblerStats, "pendingBodies" | "pendingBytes" | "blockedSourceEpochs" | "lastFault"> | null;
 }
 
 export class NetworkBodyAssembler {
@@ -186,6 +211,46 @@ export class NetworkBodyAssembler {
     return this.#authorityLaneToken;
   }
 
+  /** Transfers the same candidate identity's pending receipts during its CAS promotion.
+   * Reservations keep their original expiry and byte budget; payload strings are not copied.
+   * The caller must commit/rollback synchronously before exposing the new decode lane. */
+  preparePromotion(laneToken: AuthorityLaneToken): NetworkBodyPromotion {
+    if (this.#disposed || this.#authorityLaneToken?.phase !== "CANDIDATE" ||
+      !Object.isFrozen(laneToken) || laneToken.phase !== "ACTIVE" ||
+      laneToken.accountId !== this.#authorityLaneToken.accountId ||
+      laneToken.nonce <= this.#authorityLaneToken.nonce) {
+      throw new Error("NETWORK_BODY_PROMOTION_INVALID");
+    }
+    const promoted = new NetworkBodyAssembler({ laneToken, budget: this.#budget,
+      ttlMs: this.#ttlMs, maxBodyBytes: this.#maxBodyBytes,
+      maxPendingBodiesPerSource: this.#maxPendingBodiesPerSource,
+      maxPendingBytesPerSource: this.#maxPendingBytesPerSource });
+    let committed = false;
+    const move = (from: NetworkBodyAssembler, to: NetworkBodyAssembler): void => {
+      for (const [key, body] of from.#pending) to.#pending.set(key, body);
+      for (const [key, fence] of from.#epochFenceBySource) to.#epochFenceBySource.set(key, fence);
+      to.#pendingBytes = from.#pendingBytes;
+      from.#pending.clear();
+      from.#epochFenceBySource.clear();
+      from.#pendingBytes = 0;
+      from.#disposed = true;
+    };
+    return {
+      assembler: promoted,
+      commit: () => {
+        if (committed || this.#disposed) throw new Error("NETWORK_BODY_PROMOTION_ALREADY_FINISHED");
+        move(this, promoted);
+        committed = true;
+      },
+      rollback: () => {
+        if (!committed) return;
+        this.#disposed = false;
+        move(promoted, this);
+        committed = false;
+      }
+    };
+  }
+
   ingest(envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope | null {
     if (this.#disposed) return null;
     if (envelope.transport !== "HTTP_RESPONSE" || envelope.payload.encoding !== "UTF8") return envelope;
@@ -197,7 +262,7 @@ export class NetworkBodyAssembler {
     // normal single-envelope HTTP response.
     if (!parsed.success) {
       if (!isPotentialNetworkChunk(raw)) return envelope;
-      this.#faultDeclaredSourceEpoch(envelope.sourceId, envelope.sourceEpoch);
+      this.#faultDeclaredSourceEpoch(envelope.sourceId, envelope.sourceEpoch, "MALFORMED_WRAPPER");
       return null;
     }
 
@@ -211,7 +276,8 @@ export class NetworkBodyAssembler {
     const requestDocumentKey = "requestDocumentKey" in envelope.request &&
       typeof envelope.request.requestDocumentKey === "string" ? envelope.request.requestDocumentKey : null;
     if (requestFrameKey === null || requestDocumentKey === null) {
-      this.#faultAdmittedSourceEpoch(envelope.sourceId, envelope.sourceEpoch, admission);
+      this.#faultAdmittedSourceEpoch(envelope.sourceId, envelope.sourceEpoch, admission,
+        "DOCUMENT_IDENTITY_MISSING", chunk.chunkCount);
       return null;
     }
     const observerRequestId = "observerRequestId" in envelope.request &&
@@ -224,7 +290,8 @@ export class NetworkBodyAssembler {
     let state = this.#pending.get(key);
     let fragmentReserved = false;
     if (state !== undefined && (state.identity !== identity || state.chunkCount !== chunk.chunkCount)) {
-      this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
+      this.#faultSourceEpoch(envelope.sourceId, sourceEpoch,
+        state.identity !== identity ? "IDENTITY_MISMATCH" : "CHUNK_COUNT_MISMATCH", state);
       return null;
     }
 
@@ -233,7 +300,10 @@ export class NetworkBodyAssembler {
       if (fragmentBytes > this.#maxBodyBytes ||
         this.#pendingCount(envelope.sourceId) >= this.#maxPendingBodiesPerSource ||
         this.#pendingByteCount(envelope.sourceId) + fragmentBytes > this.#maxPendingBytesPerSource) {
-        this.#faultAdmittedSourceEpoch(envelope.sourceId, envelope.sourceEpoch, admission);
+        const reason = fragmentBytes > this.#maxBodyBytes ? "BODY_BYTES_LIMIT"
+          : this.#pendingCount(envelope.sourceId) >= this.#maxPendingBodiesPerSource
+            ? "SOURCE_BODY_COUNT_LIMIT" : "SOURCE_BYTES_LIMIT";
+        this.#faultAdmittedSourceEpoch(envelope.sourceId, envelope.sourceEpoch, admission, reason, chunk.chunkCount);
         return null;
       }
       const reservation = this.#budget.reserve(fragmentBytes, this.#ttlMs);
@@ -245,24 +315,26 @@ export class NetworkBodyAssembler {
       fragmentReserved = true;
       state = { key, sourceId: envelope.sourceId, sourceEpoch,
         identity, envelope, chunkCount: chunk.chunkCount, fragments: new Map<number, string>(),
-        reservation, byteCount: 0 };
+        reservation, firstReceivedAtMs: this.#budget.now(), byteCount: 0 };
       this.#pending.set(key, state);
     }
 
     const prior = state.fragments.get(chunk.chunkIndex);
     if (prior !== undefined) {
-      if (prior !== chunk.bodyFragment) this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
+      if (prior !== chunk.bodyFragment) this.#faultSourceEpoch(envelope.sourceId, sourceEpoch,
+        "DUPLICATE_FRAGMENT_CONFLICT", state);
       return null;
     }
     if (state.byteCount + fragmentBytes > this.#maxBodyBytes ||
       this.#pendingByteCount(envelope.sourceId) + fragmentBytes > this.#maxPendingBytesPerSource) {
-      this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
+      this.#faultSourceEpoch(envelope.sourceId, sourceEpoch,
+        state.byteCount + fragmentBytes > this.#maxBodyBytes ? "BODY_BYTES_LIMIT" : "SOURCE_BYTES_LIMIT", state);
       return null;
     }
     if (!fragmentReserved) {
       const reservationUpdate = this.#budget.update(state.reservation, fragmentBytes, this.#ttlMs);
       if (reservationUpdate === "MISSING") {
-        this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
+        this.#faultSourceEpoch(envelope.sourceId, sourceEpoch, "RESERVATION_MISSING", state);
         return null;
       }
       if (reservationUpdate === "PRESSURE") return null;
@@ -280,9 +352,21 @@ export class NetworkBodyAssembler {
 
   stats(): NetworkBodyAssemblerStats {
     this.#sweep();
+    let lastFault: NetworkBodyAssemblyFault | undefined;
+    for (const fence of this.#epochFenceBySource.values()) {
+      if (fence.firstFault !== undefined &&
+        (lastFault === undefined || fence.firstFault.faultAtMs > lastFault.faultAtMs)) lastFault = fence.firstFault;
+    }
     return { pendingBodies: this.#pending.size, pendingBytes: this.#pendingBytes,
       quarantinedBodies: 0, blockedSourceEpochs: [...this.#epochFenceBySource.values()]
-        .filter((fence) => fence.faulted).length };
+        .filter((fence) => fence.faulted).length,
+      ...(lastFault === undefined ? {} : { lastFault }) };
+  }
+
+  isSourceEpochFaulted(sourceId: string, sourceEpoch: string | undefined): boolean {
+    this.#sweep();
+    const fence = this.#epochFenceBySource.get(sourceId);
+    return fence !== undefined && fence.faulted && fenceMatchesSourceEpoch(fence, sourceEpoch ?? "legacy");
   }
 
   resetSource(sourceId: string): void {
@@ -319,24 +403,35 @@ export class NetworkBodyAssembler {
     this.#budget.release(pending.reservation);
   }
 
-  #faultSourceEpoch(sourceId: string, sourceEpoch: string): void {
+  #faultSourceEpoch(sourceId: string, sourceEpoch: string, reason: NetworkBodyAssemblyFault["reason"],
+    body?: PendingBody, expectedFragments?: number): void {
     const fence = this.#epochFenceBySource.get(sourceId);
-    if (fence !== undefined && fenceMatchesSourceEpoch(fence, sourceEpoch)) fence.faulted = true;
+    if (fence !== undefined && fenceMatchesSourceEpoch(fence, sourceEpoch)) {
+      if (!fence.faulted && fence.firstFault === undefined) {
+        const faultAtMs = this.#budget.now();
+        fence.firstFault = Object.freeze({ reason, faultAtMs, receivedFragments: body?.fragments.size ?? 0,
+          expectedFragments: body?.chunkCount ?? expectedFragments ?? null, receivedBytes: body?.byteCount ?? 0,
+          bodyAgeMs: body === undefined ? 0 : Math.max(0, faultAtMs - body.firstReceivedAtMs) });
+      }
+      fence.faulted = true;
+    }
     for (const pending of [...this.#pending.values()]) {
       if (pending.sourceId === sourceId && pending.sourceEpoch === sourceEpoch) this.#removePending(pending);
     }
   }
 
-  #faultDeclaredSourceEpoch(sourceId: string, sourceEpoch: string | undefined): void {
+  #faultDeclaredSourceEpoch(sourceId: string, sourceEpoch: string | undefined,
+    reason: NetworkBodyAssemblyFault["reason"]): void {
     const admission = this.#sourceEpochAdmission(sourceId, sourceEpoch);
     if (admission === "REJECTED" || !this.#commitSourceEpoch(sourceId, sourceEpoch, admission)) return;
-    this.#faultSourceEpoch(sourceId, sourceEpoch ?? "legacy");
+    this.#faultSourceEpoch(sourceId, sourceEpoch ?? "legacy", reason);
   }
 
   #faultAdmittedSourceEpoch(sourceId: string, sourceEpoch: string | undefined,
-    admission: "CURRENT" | "ADVANCE" | "NEW"): void {
+    admission: "CURRENT" | "ADVANCE" | "NEW", reason: NetworkBodyAssemblyFault["reason"],
+    expectedFragments: number): void {
     if (!this.#commitSourceEpoch(sourceId, sourceEpoch, admission)) return;
-    this.#faultSourceEpoch(sourceId, sourceEpoch ?? "legacy");
+    this.#faultSourceEpoch(sourceId, sourceEpoch ?? "legacy", reason, undefined, expectedFragments);
   }
 
   #sourceEpochAdmission(sourceId: string, sourceEpoch: string | undefined):
@@ -376,13 +471,14 @@ export class NetworkBodyAssembler {
     }
     current.generation = proposed.generation;
     current.faulted = false;
+    delete current.firstFault;
     return true;
   }
 
   #sweep(): void {
     for (const pending of [...this.#pending.values()]) {
       if (!this.#budget.isLive(pending.reservation)) {
-        this.#faultSourceEpoch(pending.sourceId, pending.sourceEpoch);
+        this.#faultSourceEpoch(pending.sourceId, pending.sourceEpoch, "BODY_TTL_EXPIRED", pending);
       }
     }
   }

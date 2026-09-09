@@ -117,15 +117,17 @@ function sabaPushOpen(sequence: number, streamId: string, sourceEpoch = "worker-
   return sabaPushEnvelope(sequence, streamId, '{"state":"OPEN"}', "WS_STATE", sourceEpoch);
 }
 
-function sabaPushBaseline(sequence: number, streamId: string, sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
+function sabaPushBaseline(sequence: number, streamId: string, sourceEpoch = "worker-a:0", eventCount = 1): ChromeBridgeEnvelope {
   const encode = (record: Record<string, unknown>): readonly unknown[] => Object.entries(record)
     .flatMap(([key, value]) => [sabaPushFields.indexOf(key), value]);
   const rows = [["f", 0, sabaPushFields], [0, "reset"],
     encode({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
-    encode({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
-      kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
-    encode({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
-      oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+    ...Array.from({ length: eventCount }, (_, index) => [
+      encode({ type: "m", matchid: index + 2, leagueid: 1, hteamnameen: `Home ${index}`, ateamnameen: `Away ${index}`,
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encode({ type: "o", oddsid: index + 3, matchid: index + 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 })
+    ]).flat(),
     [0, "done"]];
   return sabaPushEnvelope(sequence, streamId,
     `42${JSON.stringify(["m", "b1", rows, `revision-${sequence}`])}`, "WS_FRAME", sourceEpoch);
@@ -186,6 +188,46 @@ function ksportHttpEnvelope(sequence: number, partition: "live" | "today", gener
       providerPartition: partition === "live" ? "KSPORT_LIVE" : "KSPORT_TODAY",
       providerContentIntent: "FOOTBALL_FULL_CATALOG", requestStartSequence: 0 },
     payload: { encoding: "UTF8", body: JSON.stringify([{ "1": "League", "2": events }]) } };
+}
+
+function ksportEarlyEnvelope(sequence: number, sourceEpoch = "worker-a:0", tabId = 8): ChromeBridgeEnvelope {
+  const base = ksportHttpEnvelope(sequence, "today", 1, [], `chrome:KSPORT:${tabId}`, tabId, sourceEpoch);
+  return { ...base, request: { ...base.request, hostname: "be.sb21.net",
+    streamId: `sbobet-early:${tabId}:${sequence}`, reconcileCutoffSequence: sequence - 1 },
+  payload: { encoding: "UTF8", body: JSON.stringify({ kind: "SBOBET_EARLY_CATALOG", generation: sourceEpoch,
+    requestStartSequence: sequence - 1, observedAtMs: base.observedAtMs, rosterComplete: true, body: [] }) } };
+}
+
+function sabaCompleteCollector(sequence: number, sourceEpoch = "worker-a:0", eventCount = 0): ChromeBridgeEnvelope {
+  const generation = `saba:collector:${sourceEpoch}:${sequence}`;
+  const rosterMatchIds = Array.from({ length: eventCount }, (_, index) => `saba-collected-${index}`);
+  const periods = ["TODAY", "EARLY"].map((period) => ({ period,
+    rosterMatchIds: period === "TODAY" ? rosterMatchIds : [], rosterCount: period === "TODAY" ? eventCount : 0 }));
+  return { ...sabaDomEnvelope(sequence, sourceEpoch, 0), payload: { encoding: "UTF8",
+    body: JSON.stringify({ schemaVersion: 2, snapshotId: generation, chunkIndex: 0, chunkCount: 1,
+      sweepId: generation, sweepComplete: true, sweepFrameKey: "sports-frame", sweepDocumentKey: "sports-document",
+      records: [...rosterMatchIds.map((ownerMatchId, captureOrdinal) => ({ kind: "CAPTURE",
+        collectorGeneration: generation, period: "TODAY", ownerMatchId, captureKind: "ROSTER",
+        kickoffDate: { kind: "UNKNOWN" }, capturedAtMs: 100_000 + sequence,
+        capturedMonotonicMs: 50, captureOrdinal,
+        record: { ...record, matchId: ownerMatchId, providerTimezoneOffsetMinutes: 480,
+          teamNames: [`${ownerMatchId} home`, `${ownerMatchId} away`],
+          groups: record.groups.map(group => ({ ...group, odds: group.odds.map(odd => ({ ...odd,
+            marketOddsId: `${ownerMatchId}-market` })) })) } })),
+        ...rosterMatchIds.map(ownerMatchId => ({ kind: "OWNER_COMPLETE", collectorGeneration: generation,
+          period: "TODAY", ownerMatchId, safeControlOutcome: "NO_ELIGIBLE_CONTROL", restored: true })),
+        ...periods.map((period) => ({ kind: "PERIOD_COMPLETE", collectorGeneration: generation, ...period })),
+        { kind: "TERMINAL", collectorGeneration: generation, periods,
+          owners: rosterMatchIds.map(ownerMatchId => ({ period: "TODAY", ownerMatchId })),
+          todayRestoration: { selected: true, rosterMatchIds, rosterCount: eventCount },
+          unresolvedOwners: [], failedOwners: [] }] }) } };
+}
+
+function seedKsport(plane: ChromeCatalogDataPlane, live: readonly number[], today: readonly number[] = [],
+  context: Parameters<ChromeCatalogDataPlane["ingest"]>[1] = {}, generation = 1): void {
+  expect(plane.ingest(ksportEnvelope(0, "live", live, "worker-a:0", generation), context)).toBe(false);
+  expect(plane.ingest(ksportEnvelope(1, "today", today, "worker-a:0", generation), context)).toBe(false);
+  expect(plane.ingest(ksportEarlyEnvelope(2), context)).toBe(true);
 }
 
 function chunkedNetworkBody(base: ChromeBridgeEnvelope, sequence: number, chunkIndex: number,
@@ -300,8 +342,7 @@ const activeSaba: CatalogSourceStatus = { id: SABA, alias: "SABA", provider: "SA
 
 async function catalogWith(eventIds: readonly number[]): Promise<ObservedProviderCatalog> {
   const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
-  plane.ingest(ksportEnvelope(1, "live", eventIds));
-  plane.ingest(ksportEnvelope(2, "today", []));
+  seedKsport(plane, eventIds);
   return plane.read(SBOBET);
 }
 
@@ -456,12 +497,12 @@ describe("ChromeCatalogDataPlane", () => {
     expect(feeds.snapshot(APSPORT)).toMatchObject({ state: "LIVE", sourceEpoch: "worker-a:0",
       activeGeneration: "apsport:7:2", recoveryStage: "NONE" });
     expect((await plane.read(APSPORT)).markets).toEqual(expect.arrayContaining([
-      expect.objectContaining({ providerMarketId: "501-hidden-total" })
+      expect.objectContaining({ providerMarketId: "tsport:80:501-hidden-total", marketType: "SH_TOTAL", line: "1.5" })
     ]));
     expect(feeds.sweep(new Set([APSPORT]))).toEqual([]);
   });
 
-  it("promotes a late-attached SABA candidate from two stable complete DOM generations", async () => {
+  it("admits validated SABA native quotes before collector completion while refusing unproven DOM", async () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const feeds = new ProviderFeedRegistry({ now: () => 100_002 });
     const onIngestRejected = vi.fn();
@@ -471,15 +512,26 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(sabaDomEnvelope(1), { connectionGeneration: 1 })).toBe(false);
     const accepted = plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 });
     expect(onIngestRejected.mock.calls.map((call) => call[1])).toEqual([
-      "ADAPTER_DECODE_EMPTY:saba-ws-catalog-v1"
+      "ADAPTER_DECODE_EMPTY:saba-ws-catalog-v1", "ADAPTER_DECODE_EMPTY:saba-ws-catalog-v1"
     ]);
-    expect(accepted).toBe(true);
+    expect(accepted).toBe(false);
+    expect(coordinator.snapshot(SABA).active).toBeNull();
+    await expect(plane.read(SABA)).rejects.toThrow();
+    expect(plane.ingest(sabaPushOpen(3, "1"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaPushBaseline(4, "1"), { connectionGeneration: 1 })).toBe(true);
+    const native = await plane.read(SABA);
+    expect(native.events.map(event => event.providerEventId)).toEqual(["2"]);
+    expect(native.quotes).toHaveLength(2);
+    expect(feeds.snapshot(SABA).activeGeneration).toBe("worker-a:0:saba:1:4");
+    expect(plane.ingest(sabaCompleteCollector(5), { connectionGeneration: 1 })).toBe(true);
+    expect((await plane.read(SABA)).events).toEqual(native.events);
+    expect((await plane.read(SABA)).quotes).toEqual(native.quotes);
     expect(coordinator.snapshot(SABA)).toMatchObject({
       active: expect.objectContaining({ sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0" }),
       candidate: null
     });
     expect(feeds.snapshot(SABA)).toMatchObject({
-      state: "LIVE", activeGeneration: "worker-a:0:dom:2"
+      state: "LIVE", activeGeneration: expect.not.stringContaining(":dom:")
     });
     await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA", events: expect.any(Array) });
   });
@@ -556,22 +608,24 @@ describe("ChromeCatalogDataPlane", () => {
     expect((await plane.read(APSPORT)).events).toHaveLength(20);
   });
 
-  it("does not let a small new-epoch SABA socket baseline replace the complete DOM catalog", async () => {
+  it("retains a fresh SABA roster until a smaller replacement proves complete Today and Early inventory", async () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const feeds = new ProviderFeedRegistry({ now: () => 100_010 });
     const onIngestRejected = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 100_010,
       authorityCoordinator: coordinator, feedRegistry: feeds, onIngestRejected });
 
-    expect(plane.ingest(sabaDomEnvelope(1), { connectionGeneration: 1 })).toBe(false);
-    expect(plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(sabaCompleteCollector(0), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(sabaPushOpen(1, "1"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaPushBaseline(2, "1", "worker-a:0", 20), { connectionGeneration: 1 })).toBe(true);
     expect((await plane.read(SABA)).events).toHaveLength(20);
+    const retained = await plane.read(SABA);
 
     expect(plane.ingest(sabaPushOpen(3, "1", "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
-    expect(plane.ingest(sabaPushBaseline(4, "1", "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaDomEnvelope(4, "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
 
     expect(onIngestRejected.mock.calls.map((call) => call[1])).toContain(
-      "SABA_REPLACEMENT_COVERAGE_INCOMPLETE"
+      "ADAPTER_DECODE_EMPTY:saba-ws-catalog-v1"
     );
     expect(coordinator.snapshot(SABA)).toMatchObject({
       active: expect.objectContaining({ sourceEpoch: "worker-a:0" }),
@@ -580,14 +634,21 @@ describe("ChromeCatalogDataPlane", () => {
     expect((await plane.read(SABA)).events).toHaveLength(20);
 
     expect(plane.ingest(sabaDomEnvelope(5, "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
-    expect(plane.ingest(sabaDomEnvelope(6, "worker-a:1"), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(sabaDomEnvelope(6, "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
+    expect((await plane.read(SABA)).events).toHaveLength(20);
+    // A reset/done owns its live partition; completed Today and Early inventory
+    // independently proves that this replacement epoch covers prematch too.
+    expect(plane.ingest(sabaPushBaseline(7, "1", "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
+    expect((await plane.read(SABA)).events).toEqual(retained.events);
+    expect((await plane.read(SABA)).quotes).toEqual(retained.quotes);
+    expect(plane.ingest(sabaCompleteCollector(8, "worker-a:1"), { connectionGeneration: 1 })).toBe(true);
     expect(coordinator.snapshot(SABA)).toMatchObject({
       active: expect.objectContaining({ sourceEpoch: "worker-a:1" }), candidate: null
     });
-    expect((await plane.read(SABA)).events).toHaveLength(20);
+    expect((await plane.read(SABA)).events).toHaveLength(1);
   });
 
-  it("promotes a stable SABA DOM replacement despite repeated small socket baselines and removes expired events",
+  it("replaces a SABA roster only after a complete collector, never from a stable smaller viewport",
     async () => {
       const coordinator = new ProviderAuthorityCoordinator();
       const feeds = new ProviderFeedRegistry({ now: () => 100_020 });
@@ -595,62 +656,127 @@ describe("ChromeCatalogDataPlane", () => {
       const plane = new ChromeCatalogDataPlane({ now: () => 100_020,
         authorityCoordinator: coordinator, feedRegistry: feeds, onIngestRejected });
 
-      expect(plane.ingest(sabaDomEnvelope(1, "worker-a:0", 100),
+      expect(plane.ingest(sabaCompleteCollector(0), { connectionGeneration: 1 })).toBe(true);
+      expect(plane.ingest(sabaPushBaseline(1, "1", "worker-a:0", 100),
         { connectionGeneration: 1 })).toBe(true);
       expect((await plane.read(SABA)).events).toHaveLength(100);
+      const retained = await plane.read(SABA);
 
       expect(plane.ingest(sabaPushOpen(2, "1", "worker-a:1"),
         { connectionGeneration: 1 })).toBe(false);
-      expect(plane.ingest(sabaPushBaseline(3, "1", "worker-a:1"),
+      expect(plane.ingest(sabaDomEnvelope(3, "worker-a:1", 20),
         { connectionGeneration: 1 })).toBe(false);
       expect(plane.ingest(sabaDomEnvelope(4, "worker-a:1", 20),
         { connectionGeneration: 1 })).toBe(false);
       expect(plane.ingest(sabaPushOpen(5, "2", "worker-a:1"),
         { connectionGeneration: 1 })).toBe(false);
-      expect(plane.ingest(sabaPushBaseline(6, "2", "worker-a:1"),
+      expect(plane.ingest(sabaDomEnvelope(6, "worker-a:1", 20),
         { connectionGeneration: 1 })).toBe(false);
       expect(plane.ingest(sabaDomEnvelope(7, "worker-a:1", 20),
+        { connectionGeneration: 1 })).toBe(false);
+      expect((await plane.read(SABA)).events).toHaveLength(100);
+      // Native reset/done remains private until both prematch periods complete.
+      expect(plane.ingest(sabaPushBaseline(8, "2", "worker-a:1", 20),
+        { connectionGeneration: 1 })).toBe(false);
+      expect((await plane.read(SABA)).events).toEqual(retained.events);
+      expect((await plane.read(SABA)).quotes).toEqual(retained.quotes);
+      expect(plane.ingest(sabaCompleteCollector(9, "worker-a:1"),
         { connectionGeneration: 1 })).toBe(true);
 
       expect(coordinator.snapshot(SABA)).toMatchObject({
-        active: expect.objectContaining({ sourceEpoch: "worker-a:1" }), candidate: null
+        active: expect.objectContaining({ sourceEpoch: "worker-a:1" })
       });
       const replacement = await plane.read(SABA);
       expect(replacement.events).toHaveLength(20);
-      expect(replacement.events).not.toContainEqual(expect.objectContaining({ providerEventId: "saba-event-99" }));
+      expect(replacement.events).not.toContainEqual(expect.objectContaining({ providerEventId: "101" }));
     });
 
-  it("keeps an active SABA DOM generation when a non-authoritative socket frame is malformed", async () => {
+  it("retains collected SABA identities and quote clocks after a socket delta before a smaller epoch replacement", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const rejected = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 100_020,
+      authorityCoordinator: coordinator, onIngestRejected: rejected });
+    expect(plane.ingest(sabaPushBaseline(1, "1"), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(sabaCompleteCollector(2, "worker-a:0", 100), { connectionGeneration: 1 })).toBe(true);
+    const beforeDelta = await plane.read(SABA);
+    expect(beforeDelta.events).toHaveLength(101);
+    const oddsDelta = Object.entries({ type: "o", oddsid: 3, matchid: 2, odds1a: 0.88, odds2a: -0.98 })
+      .flatMap(([key, value]) => [sabaPushFields.indexOf(key), value]);
+    expect(plane.ingest(sabaPushEnvelope(3, "1",
+      `42${JSON.stringify(["m", "b1", [oddsDelta], "revision-2"])}`), { connectionGeneration: 1 }),
+    rejected.mock.calls.at(-1)?.[1]).toBe(true);
+    const retained = await plane.read(SABA);
+    expect(retained.events).toEqual(beforeDelta.events);
+    expect(retained.quotes.filter(quote => quote.providerEventId.startsWith("saba-collected-")))
+      .toEqual(beforeDelta.quotes.filter(quote => quote.providerEventId.startsWith("saba-collected-")));
+    expect(retained.quotes).toContainEqual(expect.objectContaining({ providerEventId: "2", rawOdds: "0.88" }));
+
+    expect(plane.ingest(sabaPushOpen(4, "2", "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaPushBaseline(5, "2", "worker-a:1", 20), { connectionGeneration: 1 })).toBe(false);
+    expect(rejected.mock.calls.at(-1)?.[1]).toBe("SABA_REPLACEMENT_COVERAGE_INCOMPLETE");
+    expect(coordinator.snapshot(SABA).active?.sourceEpoch).toBe("worker-a:0");
+    expect((await plane.read(SABA)).events).toEqual(retained.events);
+    expect((await plane.read(SABA)).quotes).toEqual(retained.quotes);
+
+    // A complete new Today/Early manifest can explicitly retire the old collected roster.
+    expect(plane.ingest(sabaCompleteCollector(6, "worker-a:1"), { connectionGeneration: 1 })).toBe(true);
+    const replacement = await plane.read(SABA);
+    expect(replacement.events.map(event => event.providerEventId).sort())
+      .toEqual(Array.from({ length: 20 }, (_, index) => String(index + 2)).sort());
+    expect(replacement.quotes.every(quote => !quote.providerEventId.startsWith("saba-collected-"))).toBe(true);
+  });
+
+  it("does not promote a SABA viewport when the socket baseline is missing and a frame is malformed", async () => {
     const feeds = new ProviderFeedRegistry({ now: () => 100_002 });
     const plane = new ChromeCatalogDataPlane({ now: () => 100_002, feedRegistry: feeds });
 
     expect(plane.ingest(sabaDomEnvelope(1), { connectionGeneration: 1 })).toBe(false);
-    expect(plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 })).toBe(true);
-    expect(feeds.snapshot(SABA).activeGeneration).toBe("worker-a:0:dom:2");
+    expect(plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 })).toBe(false);
+    expect(feeds.snapshot(SABA).activeGeneration).toBeNull();
 
     expect(plane.ingest(sabaPushOpen(3, "1"), { connectionGeneration: 1 })).toBe(false);
     expect(plane.ingest(sabaPushEnvelope(4, "1", '42["m","b1",[],1,"extra"]'),
       { connectionGeneration: 1 })).toBe(false);
-    expect(feeds.snapshot(SABA)).toMatchObject({
-      state: "LIVE", activeGeneration: "worker-a:0:dom:2"
-    });
-    await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA" });
+    expect(feeds.snapshot(SABA).activeGeneration).toBeNull();
+    await expect(plane.read(SABA)).rejects.toThrow();
   });
 
-  it("keeps an active SABA DOM generation when its non-authoritative socket closes", async () => {
+  it("does not promote a SABA viewport after its uninitialized socket closes", async () => {
     const feeds = new ProviderFeedRegistry({ now: () => 100_002 });
     const plane = new ChromeCatalogDataPlane({ now: () => 100_002, feedRegistry: feeds });
 
     expect(plane.ingest(sabaDomEnvelope(1), { connectionGeneration: 1 })).toBe(false);
-    expect(plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 })).toBe(false);
     expect(plane.ingest(sabaPushOpen(3, "1"), { connectionGeneration: 1 })).toBe(false);
     expect(plane.ingest(sabaPushEnvelope(4, "1", '{"state":"CLOSED"}', "WS_STATE"),
       { connectionGeneration: 1 })).toBe(false);
 
-    expect(feeds.snapshot(SABA)).toMatchObject({
-      state: "LIVE", activeGeneration: "worker-a:0:dom:2"
-    });
-    await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA" });
+    expect(feeds.snapshot(SABA).activeGeneration).toBeNull();
+    await expect(plane.read(SABA)).rejects.toThrow();
+  });
+
+  it("invalidates SABA socket authority after a DOM price overlay when the native socket closes", async () => {
+    const feeds = new ProviderFeedRegistry({ now: () => 100_010 });
+    const plane = new ChromeCatalogDataPlane({ now: () => 100_010,
+      monotonicNow: () => 10_000, feedRegistry: feeds });
+    expect(plane.ingest(sabaCompleteCollector(0))).toBe(true);
+    expect(plane.ingest(sabaPushOpen(1, "1"))).toBe(false);
+    expect(plane.ingest(sabaPushBaseline(2, "1", "worker-a:0", 2))).toBe(true);
+    const before = await plane.read(SABA);
+    const dom = sabaDomEnvelope(3, "worker-a:0", 1);
+    const visible = { ...record, matchId: "2", leagueId: "1", timeText: "1H0'",
+      teamNames: ["Home 0", "Away 0"], groups: record.groups.map((group) => ({ ...group,
+        odds: group.odds.map((odds) => ({ ...odds, marketOddsId: "3" })) })) };
+    expect(plane.ingest({ ...dom, receivedMonotonicMs: 60, payload: { encoding: "UTF8",
+      body: JSON.stringify({ schemaVersion: 2, snapshotId: "saba:7:visible-price-overlay",
+        chunkIndex: 0, chunkCount: 1, records: [visible] }) } })).toBe(true);
+    const overlaid = await plane.read(SABA);
+    expect(overlaid.quotes.filter(({ providerEventId }) => providerEventId === "3"))
+      .toEqual(before.quotes.filter(({ providerEventId }) => providerEventId === "3"));
+    expect(overlaid.quotes).toContainEqual(expect.objectContaining({ providerEventId: "2", rawOdds: "0.9" }));
+    expect(plane.ingest(sabaPushEnvelope(4, "1", '{"state":"CLOSED"}', "WS_STATE"))).toBe(true);
+    expect(feeds.snapshot(SABA).state).toBe("STALLED");
+    await expect(plane.read(SABA)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
 
   it("keeps unbound HTTP candidate evidence out of authority and decoder state", async () => {
@@ -721,13 +847,14 @@ describe("ChromeCatalogDataPlane", () => {
       return result;
     };
 
-    expect(ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 1)).control)
+    expect(ingest(ksportEnvelope(0, "live", [101], "worker-a:0", 1)).control)
       .toMatchObject({ kind: "ACK" });
     expect(registry.listActiveSources()).toEqual([]);
     expect(control.requestAllSnapshots()).toBe(0);
 
-    expect(ingest(ksportEnvelope(2, "today", [], "worker-a:0", 1)).control)
+    expect(ingest(ksportEnvelope(1, "today", [], "worker-a:0", 1)).control)
       .toMatchObject({ kind: "ACK" });
+    expect(ingest(ksportEarlyEnvelope(2)).control).toMatchObject({ kind: "ACK" });
     expect(coordinator.snapshot(SBOBET).candidate).toBeNull();
     expect(registry.listActiveSources()).toEqual([expect.objectContaining({
       sourceId: "chrome:KSPORT:8", authorityDisposition: "ACTIVE"
@@ -745,6 +872,37 @@ describe("ChromeCatalogDataPlane", () => {
     expect(budget.stats()).toMatchObject({ pendingBodies: 1 });
     registry.releaseConnection(connection);
     expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("recovers an idle retired CMD source on the shared bridge only after a new epoch proves its baseline", async () => {
+    let now = 1_500;
+    const coordinator = new ProviderAuthorityCoordinator();
+    const registry = new ChromeBridgeRegistry({ now: () => now, retireAfterMs: 300_000,
+      authorityCoordinator: coordinator });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, authorityCoordinator: coordinator });
+    const connection = {};
+    registry.subscribe((envelope, context) => { plane.ingest(envelope, context); });
+    const original = { ...cmdHttpEnvelope(1, { t: 100 }), sourceEpoch: "idle-cmd-worker:19" };
+    expect(registry.ingest(original, connection)).toMatchObject({ kind: "ACK" });
+    await expect(plane.read(CMD)).resolves.toMatchObject({ observedAtMs: 1_001 });
+
+    now = 302_000;
+    expect(registry.listActiveSources()).toEqual([]);
+    await expect(plane.read(CMD)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(registry.ingest({ ...original, sequence: 2, observedAtMs: now }, connection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    const replacement = { ...cmdHttpEnvelope(1, { t: 200 }), observedAtMs: now,
+      receivedMonotonicMs: now, sourceEpoch: "idle-cmd-worker:20" };
+    expect(registry.ingest(tabHeartbeat(replacement, now, 0), connection)).toMatchObject({ kind: "ACK" });
+    expect(registry.listActiveSources()).toEqual([]);
+    await expect(plane.read(CMD)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    expect(registry.ingest(replacement, connection)).toMatchObject({ kind: "ACK" });
+    expect(registry.listActiveSources()).toEqual([expect.objectContaining({ lobby: "CMD", authorityDisposition: "ACTIVE" })]);
+    await expect(plane.read(CMD)).resolves.toMatchObject({ observedAtMs: now });
+    expect(registry.ingest({ ...original, sequence: 3, observedAtMs: now + 1 }, connection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    await expect(plane.read(CMD)).resolves.toMatchObject({ observedAtMs: now });
   });
 
   it("attaches a one-envelope HTTP candidate control target before publishing its promotion", () => {
@@ -787,7 +945,8 @@ describe("ChromeCatalogDataPlane", () => {
     expect(coordinator.snapshot(SBOBET).active).toBeNull();
 
     expect(plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 1),
-      { connectionGeneration: 1 })).toBe(true);
+      { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(3), { connectionGeneration: 1 })).toBe(true);
     expect(coordinator.snapshot(SBOBET)).toMatchObject({
       active: expect.objectContaining({ sourceId: "chrome:KSPORT:8", connectionGeneration: 1 }),
       candidate: null,
@@ -803,8 +962,7 @@ describe("ChromeCatalogDataPlane", () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
       feedRegistry: feeds, publish: () => published.push({ sourceId: feeds.snapshot(SBOBET).sourceId,
         activeSourceId: coordinator.snapshot(SBOBET).active?.sourceId ?? null }) });
-    plane.ingest(ksportEnvelope(1, "live", [101]), { connectionGeneration: 1 });
-    expect(plane.ingest(ksportEnvelope(2, "today", []), { connectionGeneration: 1 })).toBe(true);
+    seedKsport(plane, [101], [], { connectionGeneration: 1 });
     published.length = 0;
     const observed: Array<{ readonly state: string; readonly sourceId: string | null;
       readonly activeSourceId: string | null; readonly readableEventId: string | null }> = [];
@@ -821,7 +979,8 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(replacement(3, "live", [202], 2),
       { connectionGeneration: 2 })).toBe(false);
     expect(plane.ingest(replacement(4, "today", [], 2),
-      { connectionGeneration: 2 })).toBe(true);
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(5, "worker-b:0", 9), { connectionGeneration: 2 })).toBe(true);
 
     expect(observed).toEqual([{ state: "LIVE", sourceId: "chrome:KSPORT:9",
       activeSourceId: "chrome:KSPORT:9", readableEventId: "202" }]);
@@ -845,9 +1004,10 @@ describe("ChromeCatalogDataPlane", () => {
       socket: typeof activeSocket) => registry.ingestDetailed(envelope, connection, (context) => {
         control.attachAuthority(context.authorityIdentity, context.authorityObservation, envelope.lobby, socket);
       });
-    ingest(ksportEnvelope(1, "live", [101]), activeConnection, activeSocket);
-    expect(ingest(ksportEnvelope(2, "today", []), activeConnection, activeSocket).control)
+    ingest(ksportEnvelope(0, "live", [101], "worker-a:0", 1), activeConnection, activeSocket);
+    expect(ingest(ksportEnvelope(1, "today", [], "worker-a:0", 1), activeConnection, activeSocket).control)
       .toMatchObject({ kind: "ACK" });
+    expect(ingest(ksportEarlyEnvelope(2), activeConnection, activeSocket).control).toMatchObject({ kind: "ACK" });
     publish.mockClear();
     feeds.rejectSourceId = "chrome:KSPORT:9";
 
@@ -856,6 +1016,8 @@ describe("ChromeCatalogDataPlane", () => {
       ksportHttpEnvelope(sequence, partition, 2, eventIds, "chrome:KSPORT:9", 9, "worker-b:0");
     ingest(replacement(3, "live", [202]), candidateConnection, candidateSocket);
     expect(ingest(replacement(4, "today", []),
+      candidateConnection, candidateSocket).control).toMatchObject({ kind: "ACK" });
+    expect(ingest(ksportEarlyEnvelope(5, "worker-b:0", 9),
       candidateConnection, candidateSocket).control).toMatchObject({ kind: "ACK" });
 
     expect(coordinator.snapshot(SBOBET)).toMatchObject({
@@ -886,8 +1048,7 @@ describe("ChromeCatalogDataPlane", () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
       feedRegistry: feeds, publish });
-    plane.ingest(ksportEnvelope(1, "live", [101]), { connectionGeneration: 1 });
-    expect(plane.ingest(ksportEnvelope(2, "today", []), { connectionGeneration: 1 })).toBe(true);
+    seedKsport(plane, [101], [], { connectionGeneration: 1 });
     publish.mockClear();
 
     const originalDispose = NetworkBodyAssembler.prototype.dispose;
@@ -905,6 +1066,7 @@ describe("ChromeCatalogDataPlane", () => {
     plane.ingest(replacement(3, "live", [202], 2), { connectionGeneration: 2 });
     expect(plane.ingest(replacement(4, "today", [], 2),
       { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(5, "worker-b:0", 9), { connectionGeneration: 2 })).toBe(false);
 
     expect(coordinator.snapshot(SBOBET)).toMatchObject({
       active: expect.objectContaining({ sourceId: "chrome:KSPORT:8" }),
@@ -916,23 +1078,21 @@ describe("ChromeCatalogDataPlane", () => {
     });
     expect(publish).not.toHaveBeenCalled();
 
-    expect(plane.ingest(replacement(5, "live", [303], 3),
+    expect(plane.ingest(replacement(6, "live", [303], 3),
       { connectionGeneration: 2 })).toBe(false);
-    expect(plane.ingest(replacement(6, "today", [], 3),
+    expect(plane.ingest(replacement(7, "today", [], 3),
       { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "303" })]
     });
   });
 
-  it("disposes every pending candidate body when the completed promotion body wins CAS", () => {
+  it("preserves a correctly bound in-flight candidate body when its sibling promotes the same identity", () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const budget = new NetworkBodyAssemblyBudget();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
       networkBodyBudget: budget });
-    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 1), { connectionGeneration: 1 });
-    expect(plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 1),
-      { connectionGeneration: 1 })).toBe(true);
+    seedKsport(plane, [101], [], { connectionGeneration: 1 });
 
     const replacementHttp = ksportHttpEnvelope(3, "live", 2, [202],
       "chrome:KSPORT:9", 9, "worker-b:0");
@@ -944,9 +1104,85 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(ksportHttpEnvelope(4, "live", 2, [202], "chrome:KSPORT:9", 9, "worker-b:0"),
       { connectionGeneration: 2 })).toBe(false);
     expect(plane.ingest(ksportHttpEnvelope(5, "today", 2, [], "chrome:KSPORT:9", 9, "worker-b:0"),
-      { connectionGeneration: 2 })).toBe(true);
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(6, "worker-b:0", 9), { connectionGeneration: 2 })).toBe(true);
     expect(coordinator.snapshot(SBOBET).active?.sourceId).toBe("chrome:KSPORT:9");
+    expect(budget.stats()).toMatchObject({ pendingBodies: 1 });
+    plane.ingest(chunkedNetworkBody(replacementHttp, 7, 1, "candidate-unrelated-pending"),
+      { connectionGeneration: 2 });
     expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("reports a faulted SBO multipart epoch for resync and admits only the replacement baseline", async () => {
+    let now = 1_500;
+    const budget = new NetworkBodyAssemblyBudget({ now: () => now });
+    const rejected = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, networkBodyBudget: budget,
+      onIngestRejected: rejected });
+    seedKsport(plane, [101]);
+    const partial = chunkedNetworkBody(ksportHttpEnvelope(3, "live", 2, [202]), 3, 0, "lost-sbo-body-suffix");
+    expect(plane.ingest(partial)).toBe(false);
+    expect(rejected).toHaveBeenLastCalledWith(partial, "NETWORK_BODY_INCOMPLETE");
+    expect(plane.networkBodyAssembly(SBOBET)).toMatchObject({ active: { pendingBodies: 1, blockedSourceEpochs: 0 } });
+
+    now = 125_000;
+    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    // The fresh native pair is valid, but the prior unfinished body fenced
+    // this epoch. Ordinary same-epoch snapshot requests cannot recover it.
+    const blocked = { ...chunkedNetworkBody(ksportHttpEnvelope(4, "live", 3, [202]),
+      4, 0, "new-sbo-baseline"), observedAtMs: now };
+    expect(plane.ingest(blocked)).toBe(false);
+    expect(plane.networkBodyAssembly(SBOBET)).toMatchObject({ active: { blockedSourceEpochs: 1,
+      lastFault: { reason: "BODY_TTL_EXPIRED", faultAtMs: now, receivedFragments: 1, expectedFragments: 2,
+        bodyAgeMs: 123_500 } } });
+    expect(rejected).toHaveBeenLastCalledWith(blocked, "NETWORK_BODY_UNAVAILABLE");
+    const smallDelta = { ...ksportSocketEnvelope(5, "live", [101]), observedAtMs: now };
+    expect(plane.ingest(smallDelta)).toBe(false);
+    expect(rejected).toHaveBeenLastCalledWith(smallDelta, "FEED_CONTROLLER_REJECTED:ksport-ws-catalog-v1");
+    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    const replacement = (sequence: number, partition: "live" | "today", index: number) => ({
+      ...chunkedNetworkBody(ksportHttpEnvelope(sequence, partition, 4,
+        partition === "live" ? [202] : [], "chrome:KSPORT:8", 8, "worker-a:1"),
+      sequence + index, index, `replacement-sbo-${partition}`), observedAtMs: now });
+    expect(plane.ingest(replacement(0, "live", 0))).toBe(false);
+    expect(plane.ingest(replacement(0, "live", 1))).toBe(false);
+    expect(plane.ingest(replacement(2, "today", 0))).toBe(false);
+    expect(plane.ingest(replacement(2, "today", 1))).toBe(false);
+    const early = ksportEarlyEnvelope(4, "worker-a:1");
+    const earlyAccepted = plane.ingest({ ...early, observedAtMs: now,
+      payload: { encoding: "UTF8", body: JSON.stringify({ ...JSON.parse(early.payload.body), observedAtMs: now }) } });
+    expect({ accepted: earlyAccepted, reason: rejected.mock.lastCall?.[1] }).toMatchObject({ accepted: true });
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({ observedAtMs: now,
+      events: [expect.objectContaining({ providerEventId: "202" })] });
+    expect(plane.networkBodyAssembly(SBOBET)).toMatchObject({ active: { blockedSourceEpochs: 0 } });
+    expect(plane.networkBodyAssembly(SBOBET).active).not.toHaveProperty("lastFault");
+    expect(plane.ingest({ ...blocked, sequence: 6, observedAtMs: now + 1 })).toBe(false);
+    expect(rejected).toHaveBeenLastCalledWith(expect.anything(), "AUTHORITY_EPOCH_RETIRED");
+  });
+
+  it("renews CMD baselines after concurrent HTTP chunks straddle candidate promotion", async () => {
+    let now = 1_500;
+    const budget = new NetworkBodyAssemblyBudget({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, networkBodyBudget: budget });
+    const first = cmdHttpEnvelope(1, { t: 100 });
+    const next = cmdHttpEnvelope(2, { t: 101 });
+    expect(plane.ingest(chunkedNetworkBody(first, 1, 0, "cmd-first-promoting"))).toBe(false);
+    expect(plane.ingest(chunkedNetworkBody(next, 2, 0, "cmd-concurrent-renewal"))).toBe(false);
+    expect(plane.networkBodyAssembly(CMD)).toMatchObject({ active: null,
+      candidate: { pendingBodies: 2, blockedSourceEpochs: 0 } });
+    expect(plane.ingest(chunkedNetworkBody(first, 3, 1, "cmd-first-promoting"))).toBe(true);
+    expect(plane.ingest(chunkedNetworkBody(next, 4, 1, "cmd-concurrent-renewal"))).toBe(true);
+    expect(plane.networkBodyAssembly(CMD)).toEqual({ candidate: null,
+      active: { pendingBodies: 0, pendingBytes: 0, blockedSourceEpochs: 0 } });
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+    now = 32_000;
+    const fresh = { ...cmdHttpEnvelope(5, { t: 102 }), observedAtMs: now };
+    const renewal = (index: number) => ({ ...chunkedNetworkBody(fresh, 5 + index, index,
+      "cmd-after-orphan-timeout"), observedAtMs: now });
+    expect(plane.ingest(renewal(0))).toBe(false);
+    expect(plane.ingest(renewal(1))).toBe(true);
+    await expect(plane.read(CMD)).resolves.toMatchObject({ events: expect.any(Array) });
   });
 
   it("resolves a recovery-owner wait through the injected shared registry", async () => {
@@ -954,8 +1190,7 @@ describe("ChromeCatalogDataPlane", () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, feedRegistry: registry });
     const waiting = registry.waitForFreshBaseline(SBOBET, 1_000, 100);
 
-    plane.ingest(ksportEnvelope(1, "live", [101]));
-    plane.ingest(ksportEnvelope(2, "today", [102]));
+    seedKsport(plane, [101], [102], {});
 
     await expect(waiting).resolves.toMatchObject({ accountId: SBOBET, state: "LIVE",
       lastCompleteBaselineAtMs: 1_002 });
@@ -1010,8 +1245,7 @@ describe("ChromeCatalogDataPlane", () => {
   it("publishes and serves a complete authoritative KSPORT baseline", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
-    expect(plane.ingest(ksportEnvelope(1, "live", [101]))).toBe(false);
-    expect(plane.ingest(ksportEnvelope(2, "today", [102]))).toBe(true);
+    seedKsport(plane, [101], [102], {});
 
     await expect(plane.read(SBOBET)).resolves.toMatchObject({ provider: "SBOBET" });
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({ accountId: SBOBET }), "FRESH");
@@ -1030,7 +1264,8 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
 
     expect(plane.ingest(ksportEnvelope(3, "live", [102], "worker-a:0", 100))).toBe(false);
-    expect(plane.ingest(ksportEnvelope(4, "today", [], "worker-a:0", 100))).toBe(true);
+    expect(plane.ingest(ksportEnvelope(4, "today", [], "worker-a:0", 100))).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(5))).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "102" })]
     });
@@ -1048,8 +1283,7 @@ describe("ChromeCatalogDataPlane", () => {
 
   it("does not promote a replacement candidate from replayed KSPORT partitions", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
-    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100), { connectionGeneration: 1 });
-    plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100), { connectionGeneration: 1 });
+    seedKsport(plane, [101], [], { connectionGeneration: 1 }, 100);
     const candidate = (sequence: number, partition: "live" | "today",
       eventIds: readonly number[], generation: number): ChromeBridgeEnvelope =>
       ksportHttpEnvelope(sequence, partition, generation, eventIds, "chrome:KSPORT:9", 9, "worker-b:0");
@@ -1065,7 +1299,8 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(candidate(5, "live", [103], 2),
       { connectionGeneration: 2 })).toBe(false);
     expect(plane.ingest(candidate(6, "today", [], 2),
-      { connectionGeneration: 2 })).toBe(true);
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(7, "worker-b:0", 9), { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "103" })]
     });
@@ -1097,8 +1332,7 @@ describe("ChromeCatalogDataPlane", () => {
 
   it("never assembles KSPORT HTTP authority from mixed current/candidate chunks in either direction", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
-    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100), { connectionGeneration: 1 });
-    plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100), { connectionGeneration: 1 });
+    seedKsport(plane, [101], [], { connectionGeneration: 1 }, 100);
     const current = (sequence: number, generation: number, eventId: number) =>
       ksportHttpEnvelope(sequence, "live", generation, [eventId]);
     const candidate = (sequence: number, partition: "live" | "today", generation: number,
@@ -1126,7 +1360,8 @@ describe("ChromeCatalogDataPlane", () => {
 
     // Independent, wholly candidate-owned partitions still recover normally.
     expect(plane.ingest(candidate(9, "live", 3, [903]), { connectionGeneration: 1 })).toBe(false);
-    expect(plane.ingest(candidate(10, "today", 3, []), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(candidate(10, "today", 3, []), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(11, "worker-a:1", 9), { connectionGeneration: 1 })).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "903" })]
     });
@@ -1134,8 +1369,7 @@ describe("ChromeCatalogDataPlane", () => {
 
   it("keeps the committed SBOBET catalog until a complete empty replacement baseline commits", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
-    expect(plane.ingest(ksportEnvelope(1, "live", [101]))).toBe(false);
-    expect(plane.ingest(ksportEnvelope(2, "today", []))).toBe(true);
+    seedKsport(plane, [101], [], {});
 
     expect(plane.ingest(ksportEnvelope(3, "live", []))).toBe(false);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
@@ -1159,7 +1393,8 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
 
     expect(plane.ingest(ksportEnvelope(4, "live", [101]))).toBe(false);
-    expect(plane.ingest(ksportEnvelope(5, "today", [], "worker-a:0", 2))).toBe(true);
+    expect(plane.ingest(ksportEnvelope(5, "today", [], "worker-a:0", 2))).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(6))).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "101" })]
     });
@@ -1169,8 +1404,7 @@ describe("ChromeCatalogDataPlane", () => {
   it("never reports ACTIVE when the same provider feed is too stale to read", async () => {
     let now = 1_500;
     const plane = new ChromeCatalogDataPlane({ now: () => now });
-    plane.ingest(ksportEnvelope(1, "live", [101]));
-    plane.ingest(ksportEnvelope(2, "today", [102]));
+    seedKsport(plane, [101], [102], {});
     // SBOBET now expects evidence once a minute (measured 2026-08-30); the
     // feed only leaves LIVE after that window passes with nothing decoded.
     now = 65_003;
@@ -1182,13 +1416,14 @@ describe("ChromeCatalogDataPlane", () => {
   });
 
   it("does not report SABA active when only TAB_STATE heartbeats follow a stale restored catalog", async () => {
-    const seed = new ChromeCatalogDataPlane({ now: () => 1_500 });
-    seed.ingest(ksportEnvelope(1, "live", [101]));
-    seed.ingest(ksportEnvelope(2, "today", [102]));
-    const restored = await seed.read(SBOBET);
-    const plane = new ChromeCatalogDataPlane({ now: () => 10_000 });
+    const seed = new ChromeCatalogDataPlane({ now: () => 100_002 });
+    expect(seed.ingest(sabaCompleteCollector(0))).toBe(true);
+    seed.ingest(sabaPushOpen(1, "1"));
+    expect(seed.ingest(sabaPushBaseline(2, "1"))).toBe(true);
+    const restored = await seed.read(SABA);
+    const plane = new ChromeCatalogDataPlane({ now: () => 200_000 });
     plane.restore({ ...restored, accountId: SABA, provider: "SABA", observedAtMs: 100 });
-    plane.ingest(tabHeartbeat(sabaEnvelope(2, []), 10_000, 3));
+    plane.ingest(tabHeartbeat(sabaPushOpen(3, "1"), 200_000, 3));
 
     await expect(plane.read(SABA)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
     await expect(plane.overlayStatuses([activeSaba])).resolves.toMatchObject([{
@@ -1199,8 +1434,7 @@ describe("ChromeCatalogDataPlane", () => {
   it("renews authority only from a provider-decoded transport heartbeat", async () => {
     let now = 1_500;
     const plane = new ChromeCatalogDataPlane({ now: () => now });
-    plane.ingest(ksportEnvelope(1, "live", [101]));
-    plane.ingest(ksportEnvelope(2, "today", [102]));
+    seedKsport(plane, [101], [102], {});
 
     // Inside the 30 s contract the catalog is still served; a frame the
     // provider decoder refuses is not evidence and cannot extend it.
@@ -1217,8 +1451,7 @@ describe("ChromeCatalogDataPlane", () => {
   it("keeps the current epoch live until a replacement source completes an authoritative baseline", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
-    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0"), { connectionGeneration: 1 });
-    plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0"), { connectionGeneration: 1 });
+    seedKsport(plane, [101], [], { connectionGeneration: 1 });
 
     expect(plane.ingest(tabHeartbeat(ksportEnvelope(3, "today", [], "worker-a:0"),
       1_100, 3, "worker-b:0"), { connectionGeneration: 2 })).toBe(false);
@@ -1231,7 +1464,8 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read(SBOBET)).resolves.toMatchObject({ observedAtMs: 1_002,
       events: [expect.objectContaining({ providerEventId: "101" })] });
     expect(plane.ingest(ksportEnvelope(5, "today", [], "worker-b:0", 2),
-      { connectionGeneration: 2 })).toBe(true);
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(ksportEarlyEnvelope(6, "worker-b:0"), { connectionGeneration: 2 })).toBe(true);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "FRESH"]);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "103" })]
@@ -1374,8 +1608,7 @@ describe("ChromeCatalogDataPlane", () => {
     let now = 1_500;
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000, publish });
-    plane.ingest(ksportEnvelope(1, "live", [101]));
-    plane.ingest(ksportEnvelope(2, "today", [102]));
+    seedKsport(plane, [101], [102], {});
     const sboHeartbeat: ChromeBridgeEnvelope = { ...tabHeartbeat(ksportEnvelope(3, "today", []), now, 3),
       lobby: "SBO", sourceId: "chrome:SBO:9", tabId: 9 };
 
@@ -1389,8 +1622,7 @@ describe("ChromeCatalogDataPlane", () => {
   it("lets a new complete authoritative generation remove old events", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
     const ten = Array.from({ length: 10 }, (_, index) => 5_600_000 + index);
-    plane.ingest(ksportEnvelope(1, "live", ten));
-    expect(plane.ingest(ksportEnvelope(2, "today", []))).toBe(true);
+    seedKsport(plane, ten, [], {});
 
     expect(plane.ingest(ksportEnvelope(3, "live", [5_600_000]))).toBe(false);
     expect(plane.ingest(ksportEnvelope(4, "today", []))).toBe(true);
@@ -1405,8 +1637,7 @@ describe("ChromeCatalogDataPlane", () => {
     // fault. Only baseline expiry or an explicit replacement retires it.
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
-    plane.ingest(ksportEnvelope(1, "live", [101]));
-    expect(plane.ingest(ksportEnvelope(2, "today", []))).toBe(true);
+    seedKsport(plane, [101], [], {});
     const socket = ksportSocketEnvelope(3, "live", []);
     const closed: ChromeBridgeEnvelope = { ...socket, transport: "WS_STATE",
       payload: { encoding: "UTF8", body: JSON.stringify({ state: "CLOSED" }) } };
@@ -1430,8 +1661,7 @@ describe("ChromeCatalogDataPlane", () => {
     let now = 1_500;
     const onSourceRecoveryNeeded = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => now, onSourceRecoveryNeeded });
-    plane.ingest(ksportEnvelope(1, "live", [101]));
-    plane.ingest(ksportEnvelope(2, "today", [102]));
+    seedKsport(plane, [101], [102], {});
 
     now = 62_004;
     plane.ingest(tabHeartbeat(ksportEnvelope(3, "today", []), now, 3));
@@ -1453,6 +1683,7 @@ describe("ChromeCatalogDataPlane", () => {
     const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: registry,
       onSourceRecoveryNeeded });
 
+    expect(plane.ingest(sabaCompleteCollector(0))).toBe(true);
     expect(plane.ingest(sabaPushOpen(1, "1"))).toBe(false);
     expect(plane.ingest(sabaPushBaseline(2, "1"))).toBe(true);
     await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA", observedAtMs: 100_002 });
@@ -1486,9 +1717,17 @@ describe("ChromeCatalogDataPlane", () => {
     now += 6;
     expect(plane.ingest({ ...sabaPushOpen(6, "2"), observedAtMs: now - 1 })).toBe(false);
     expect(plane.ingest({ ...sabaPushBaseline(7, "2"), observedAtMs: now })).toBe(true);
+    const native = await plane.read(SABA);
+    expect(native.events.map(event => event.providerEventId)).toEqual(["2"]);
+    expect(native.quotes).toHaveLength(2);
+    expect(registry.snapshot(SABA)).toMatchObject({ state: "LIVE", recoveryStage: "NONE",
+      recoveryAttempt: 0, activeGeneration: "worker-a:0:saba:2:7" });
+    expect(plane.ingest({ ...sabaCompleteCollector(8), observedAtMs: now })).toBe(true);
+    expect((await plane.read(SABA)).events).toEqual(native.events);
+    expect((await plane.read(SABA)).quotes).toEqual(native.quotes);
     expect(registry.snapshot(SABA)).toMatchObject({ state: "LIVE", reason: null,
       sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0", recoveryStage: "NONE",
-      recoveryAttempt: 0, activeGeneration: "worker-a:0:saba:2:7" });
+      recoveryAttempt: 0, activeGeneration: "saba:collector:worker-a:0:8" });
     await expect(plane.read(SABA)).resolves.toMatchObject({ observedAtMs: now });
   });
 

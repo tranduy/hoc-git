@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { MaintenanceApi, type MaintenanceStatus } from "../api/maintenance.js";
-import type { ProfitAlert } from "../watch/profit-alert-tracker.js";
+import { isNotifiableProfit, type ProfitAlert } from "../watch/profit-alert-tracker.js";
+import { formatProfitAmount } from "../watch/roi-tone.js";
 
 interface MaintenanceApiLike {
   status(): Promise<MaintenanceStatus>;
@@ -8,7 +9,6 @@ interface MaintenanceApiLike {
 }
 
 const defaultApi = new MaintenanceApi();
-const money = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 });
 
 function RestartIcon() {
   return <svg aria-hidden="true" className="maintenance-restart-icon" viewBox="0 0 24 24">
@@ -63,26 +63,28 @@ export function MaintenanceControls({ api = defaultApi, profitAlerts = [] }: {
     finally { setStarting(false); }
   };
 
-  const notifications = profitAlerts.slice(0, 100);
+  const notifications = profitAlerts.filter(isNotifiableProfit).slice(0, 100);
   return <>
     <div className="maintenance-inline-actions" ref={notificationLayer}>
       <button aria-busy={running} aria-label="Reset sàn" className="maintenance-restart-button"
         disabled={running} onClick={() => void run()} title="Kiểm tra và khôi phục tất cả nguồn" type="button">
         <RestartIcon /><span>{running ? "Đang reset…" : "Reset sàn"}</span>
       </button>
-      <button aria-expanded={notificationsOpen} aria-label={`Kèo profit (${notifications.length})`}
+      <button aria-expanded={notificationsOpen} aria-label={`Lịch sử kèo profit (${notifications.length})`}
+        title="Lịch sử kèo profit đã ghi nhận"
         className="maintenance-bell" onClick={() => setNotificationsOpen((value) => !value)} type="button">
         🔔{notifications.length > 0 && <span>{notifications.length}</span>}
       </button>
       {notificationsOpen && <aside className="maintenance-popover profit-history" aria-label="100 kèo profit gần nhất">
-        <header><strong>Kèo profit trên 5%</strong><small>{notifications.length}/100 kèo</small></header>
+        <header><strong>Lịch sử kèo profit trên 5%</strong><small>{notifications.length}/100 kèo</small></header>
+        <p>Các lần ghi nhận trước đây, cần kiểm tra lại giá hiện tại.</p>
         {notifications.length === 0 ? <p>Chưa có kèo profit trên 5%.</p> : notifications.map((item) =>
           <article className="maintenance-notice profit-history__item" key={item.id}>
             <time>{new Date(item.observedAtMs).toLocaleString("vi-VN")}</time>
             <strong>{item.matchName}</strong>
             <span>{item.marketName}{item.line === null ? "" : ` · Line ${item.line}`}</span>
             <span>{item.legs.map((leg) => `${leg.provider}: ${leg.selection}`).join(" ↔ ")}</span>
-            <b>ROI {(Number(item.roi) * 100).toFixed(2)}% · {money.format(Number(item.worstCaseProfit))} {item.currency}</b>
+            <b>ROI {(Number(item.roi) * 100).toFixed(2)}% · {formatProfitAmount(item.worstCaseProfit, "vi-VN")} {item.currency}</b>
           </article>)}
       </aside>}
     </div>

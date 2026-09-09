@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import type { CatalogRevisionEntry } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { CatalogRevisionStore } from "./catalog-revision-store.js";
@@ -29,6 +30,84 @@ function pricedCatalog(observedAtMs: number, receivedMonotonicMs: number,
 }
 
 describe("CatalogRevisionStore", () => {
+  it("hashes large catalogs in bounded groups with deterministic v2 revision bytes", () => {
+    const referenceRevision = (value: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => {
+      const { observedAtMs: _time, quotes, ...semantic } = value;
+      const projected = { ...semantic,
+        quotes: quotes.map(({ receivedMonotonicMs, sequence, sourceTimestampMs: _source, ...quote }) =>
+          value.provider === "APSPORT" ? { ...quote, receivedMonotonicMs, sequence } : quote),
+        ...(value.nativeMarketObservations === undefined ? {} : {
+          nativeMarketObservations: value.nativeMarketObservations.map(({ observedAtMs: _nativeTime, ...item }) => item)
+        }) };
+      const digest = (record: unknown) => createHash("sha256").update(JSON.stringify(record)).digest("base64url");
+      const catalog = Object.fromEntries(Object.entries(projected).map(([key, records]) => [key,
+        Array.isArray(records) && (key === "nativeMarketObservations" || value.provider === "BTI")
+          ? records.map(digest) : records]));
+      return createHash("sha256").update(JSON.stringify({ revisionFormat: 2, catalog, snapshotState })).digest("base64url");
+    };
+    for (const provider of ["BTI", "APSPORT", "SABA"] as const) {
+      for (const snapshotState of ["FRESH", "STALE"] as const) {
+        for (const includeNative of [false, true]) {
+          const original: ObservedProviderCatalog = { ...pricedCatalog(100, 10, 1), provider,
+            quotes: Array.from({ length: 513 }, (_, index) => ({ ...pricedCatalog(100, 10, 1).quotes[0]!,
+              provider, providerSelectionId: `selection-${index}` })),
+            ...(includeNative ? { nativeMarketObservations: Array.from({ length: 257 }, (_, index) => ({
+              provider, category: "FOOTBALL" as const, providerEventId: "event", providerMarketId: `market-${index}`,
+              nativeType: "unknown", nativeLabel: 'Đội bóng "A"', nativeScope: null, outcomeLabels: [],
+              observedAtMs: 90, disposition: "UNMAPPED" as const, reason: "NATIVE_TYPE_UNMAPPED"
+            })) } : {}) };
+          // Property insertion order is part of the existing digest contract.
+          for (const input of [original, Object.fromEntries(Object.entries(original).reverse()) as unknown as ObservedProviderCatalog]) {
+            const expected = referenceRevision(input, snapshotState);
+            const stringify = vi.spyOn(JSON, "stringify");
+            const store = new CatalogRevisionStore({ now: () => 100 });
+            stores.push(store);
+            try {
+              expect(store.publish(input.accountId, input, { snapshotState, freshnessMs: 20 }).revision).toBe(expected);
+              const largestArray = (value: unknown): number => Array.isArray(value)
+                ? Math.max(value.length, 0, ...value.map(largestArray))
+                : value !== null && typeof value === "object" ? Math.max(0, ...Object.values(value).map(largestArray)) : 0;
+              expect(Math.max(...stringify.mock.calls.map(([value]) => largestArray(value)))).toBeLessThanOrEqual(128);
+            } finally { stringify.mockRestore(); }
+          }
+        }
+      }
+    }
+  });
+
+  it("reuses immutable record digests across reordered arrays and only hashes replacement records", () => {
+    const store = new CatalogRevisionStore({ now: () => 100 });
+    stores.push(store);
+    const label = vi.fn(() => "Total");
+    const first: ObservedProviderCatalog = { ...pricedCatalog(100, 10, 1), provider: "BTI",
+      nativeMarketObservations: [{ provider: "BTI", category: "FOOTBALL", providerEventId: "event-1",
+        providerMarketId: "market-1", nativeType: "total", get nativeLabel() { return label(); },
+        nativeScope: null, outcomeLabels: ["OVER", "UNDER"], observedAtMs: 100,
+        disposition: "NORMALIZED", reason: "FT_TOTAL" }],
+      quotes: [0, 1].map((index) => ({ ...pricedCatalog(100, 10, 1).quotes[0]!, provider: "BTI",
+        providerSelectionId: `selection-${index}` })) };
+    const publish = (value: ObservedProviderCatalog) => store.publish(value.accountId, value,
+      { snapshotState: "FRESH", freshnessMs: 20 });
+    const initial = publish(first);
+    expect(label).toHaveBeenCalledTimes(1);
+    const renewed = publish({ ...first, observedAtMs: 101, quotes: [...first.quotes],
+      nativeMarketObservations: [...first.nativeMarketObservations!] });
+    expect(renewed.revision).toBe(initial.revision);
+    expect(label).toHaveBeenCalledTimes(1);
+    const reversed = publish({ ...first, observedAtMs: 102, quotes: [...first.quotes].reverse() });
+    expect(reversed.revision).not.toBe(initial.revision);
+    expect(label).toHaveBeenCalledTimes(1);
+    const replacement = { ...first, observedAtMs: 103,
+      quotes: [{ ...first.quotes[0]!, rawOdds: "0.96" }, first.quotes[1]!] };
+    const changed = publish(replacement);
+    expect(changed.revision).not.toBe(initial.revision);
+    const cold = new CatalogRevisionStore({ now: () => 100 });
+    stores.push(cold);
+    expect(changed.revision).toBe(cold.publish(replacement.accountId, replacement,
+      { snapshotState: "FRESH", freshnessMs: 20 }).revision);
+    expect(publish({ ...replacement, observedAtMs: 104, quotes: [] }).revision).not.toBe(changed.revision);
+  });
+
   it("publishes a fresh catalog and a new stale revision after its freshness deadline", () => {
     let now = 100;
     const store = new CatalogRevisionStore({ now: () => now });
@@ -92,6 +171,42 @@ describe("CatalogRevisionStore", () => {
     expect(renewed.catalog.quotes[0]).toMatchObject({ receivedMonotonicMs: 20, sequence: 2 });
     expect(renewed.freshUntilMs).toBe(130);
     expect(seen).toHaveLength(1);
+  });
+
+  it("detects replacement native selections and quote status while reusing other records", () => {
+    const store = new CatalogRevisionStore({ now: () => 100 });
+    stores.push(store);
+    const original: ObservedProviderCatalog = { ...pricedCatalog(100, 10, 1), provider: "BTI",
+      nativeMarketObservations: [{ provider: "BTI", category: "FOOTBALL", providerEventId: "event-1",
+        providerMarketId: "market-1", nativeType: "total", nativeLabel: "Total", nativeScope: null,
+        outcomeLabels: ["OVER", "UNDER"], observedAtMs: 100, disposition: "NORMALIZED", reason: "FT_TOTAL",
+        nativeSelections: [{ selectionId: "over", outcomeId: "over", line: "2.5", price: "0.95" }] }] };
+    const publish = (value: ObservedProviderCatalog) => store.publish(value.accountId, value,
+      { snapshotState: "FRESH", freshnessMs: 20 }).revision;
+    const first = publish(original);
+    const nativeChanged = { ...original, observedAtMs: 101, nativeMarketObservations: [{
+      ...original.nativeMarketObservations![0]!,
+      nativeSelections: [{ selectionId: "over", outcomeId: "over", line: "2.5", price: "0.96" }]
+    }] };
+    expect(publish(nativeChanged)).not.toBe(first);
+    expect(publish({ ...original, observedAtMs: 102,
+      quotes: [{ ...original.quotes[0]!, status: "SUSPENDED" }] })).not.toBe(first);
+  });
+
+  it("uses cached stale revisions without traversing the expired catalog again", () => {
+    let now = 100;
+    const store = new CatalogRevisionStore({ now: () => now });
+    stores.push(store);
+    const input = pricedCatalog(100, 10, 1, "APSPORT");
+    const first = store.publish(input.accountId, input, { snapshotState: "FRESH", freshnessMs: 20 });
+    const stringify = vi.spyOn(JSON, "stringify");
+    try {
+      now = 121;
+      store.expire();
+      expect(stringify).not.toHaveBeenCalled();
+      expect(store.get(input.accountId)?.revision).not.toBe(first.revision);
+      expect(store.get(input.accountId)?.snapshotState).toBe("STALE");
+    } finally { stringify.mockRestore(); }
   });
 
   it("does not revise a catalog when only native-market observation clocks advance", () => {

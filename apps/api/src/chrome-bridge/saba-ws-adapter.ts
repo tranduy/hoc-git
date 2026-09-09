@@ -119,9 +119,16 @@ interface PendingCollectorRetention {
 
 export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #quoteClockMapper: SabaQuoteClockMapper | undefined;
+  readonly #requireSocketBaseline: boolean;
+  readonly #allowValidatedDomFallback: boolean;
 
-  constructor(options: { readonly quoteClockMapper?: SabaQuoteClockMapper } = {}) {
+  constructor(options: { readonly quoteClockMapper?: SabaQuoteClockMapper;
+    // Production requires a validated native partition or a main-roster proof.
+    // Collector completeness is separate from whether current quotes are usable.
+    readonly requireSocketBaseline?: boolean; readonly allowValidatedDomFallback?: boolean } = {}) {
     this.#quoteClockMapper = options.quoteClockMapper;
+    this.#requireSocketBaseline = options.requireSocketBaseline === true;
+    this.#allowValidatedDomFallback = options.allowValidatedDomFallback === true;
   }
 
   /**
@@ -154,6 +161,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #collectorAssembler = new SabaCollectorDomAssembler();
   readonly #collectorEpochs = new Map<string, string>();
   readonly #collectorPrematchIds = new Map<string, ReadonlySet<string>>();
+  readonly #completeCollectorGenerations = new Map<string, string>();
+  readonly #collectorCoverageByEpoch = new Map<string, {
+    readonly mainRosterComplete: true; readonly hiddenMarketsComplete: boolean;
+    readonly collectorGeneration: string;
+  }>();
   readonly #pendingCollectorRetentions = new Map<string, PendingCollectorRetention>();
   readonly #parts = new Map<string, NormalizedCatalogPart>();
   readonly #partObservedAtMs = new Map<string, number>();
@@ -166,6 +178,14 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #authoritativeBaselineAtMs = new Map<string, number>();
   readonly #baselineStarvedSinceMs = new Map<string, number>();
   readonly #faultHeldSinceMs = new Map<string, number>();
+
+  collectorCoverage(sourceId: string, epoch: string): {
+    readonly mainRosterComplete: true; readonly hiddenMarketsComplete: boolean;
+    readonly collectorGeneration: string;
+  } | null {
+    const key = `${sourceId}|${epoch}`;
+    return this.#parts.has(`${key}|COLLECTOR`) ? this.#collectorCoverageByEpoch.get(key) ?? null : null;
+  }
 
   seedSchemaContext(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "SABA" || envelope.transport !== "TAB_STATE" ||
@@ -236,6 +256,12 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     for (const key of this.#collectorPrematchIds.keys()) {
       if (key.startsWith(`${sourceId}|`)) this.#collectorPrematchIds.delete(key);
     }
+    for (const key of this.#completeCollectorGenerations.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#completeCollectorGenerations.delete(key);
+    }
+    for (const key of this.#collectorCoverageByEpoch.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#collectorCoverageByEpoch.delete(key);
+    }
     for (const key of this.#parts.keys()) if (key.startsWith(`${sourceId}|`)) this.#parts.delete(key);
     for (const key of this.#partObservedAtMs.keys()) {
       if (key.startsWith(`${sourceId}|`)) this.#partObservedAtMs.delete(key);
@@ -304,6 +330,9 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
           receivedMonotonicMs: envelope.receivedMonotonicMs,
           generationObservedAtMs: envelope.observedAtMs });
         if (candidate === null) return this.#ignore("collector-incomplete-or-invalid");
+        if (candidate.captures.some(({ record }) => record.providerTimezoneOffsetMinutes === null)) {
+          return this.#ignore("collector-timezone-unproven");
+        }
         const normalized = normalizeCollectorCandidate(candidate);
         if (normalized === null) return this.#ignore("collector-market-id-collision");
         if (incompleteNormalizedCatalog(normalized, true)) {
@@ -325,17 +354,27 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
             this.#parts.set(domKey, retained);
           }
         }
-        const establishesCollectorAuthority = this.#domReadySources.has(envelope.sourceId);
-        return this.#update(envelope, "COLLECTOR", normalized, establishesCollectorAuthority
+        const establishesCollectorAuthority = this.#requireSocketBaseline ||
+          this.#domReadySources.has(envelope.sourceId);
+        const updates = this.#update(envelope, "COLLECTOR", normalized, establishesCollectorAuthority
           ? { authoritativeBaseline: true, evidenceMode: "BASELINE",
               generation: candidate.collectorGeneration, provenance: "DOM_FALLBACK" }
           : { evidenceMode: "DELTA", generation: candidate.collectorGeneration,
-              provenance: "DOM_FALLBACK" }, true);
+               provenance: "DOM_FALLBACK" }, true);
+        if (updates.length > 0) this.#collectorCoverageByEpoch.set(epochKey, {
+          mainRosterComplete: true, hiddenMarketsComplete: candidate.hiddenMarketsComplete,
+          collectorGeneration: candidate.collectorGeneration
+        });
+        return updates;
       }
       // The DOM is only the visible viewport, never an authoritative baseline.
       // Publishing it before reset/done makes a healthy reconnect look LIVE
       // with only a handful of events and overwrites the complete catalog.
       const socketReady = [...this.#readyPartitions].some((key) => key.startsWith(`${envelope.sourceId}|`));
+      const collectorReady = this.#completeCollectorGenerations.has(sourceEpochKey(envelope));
+      if (this.#requireSocketBaseline && !this.#allowValidatedDomFallback && !socketReady && !collectorReady) {
+        return this.#ignore("dom-awaiting-socket-baseline");
+      }
       // Keep accepting the current visible DOM after the socket bootstrap. A
       // quiet SABA socket may not publish another catalog frame for minutes;
       // dropping these snapshots made an otherwise healthy catalog expire.
@@ -345,6 +384,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const records = decodePublicDomRecords(this.#assembler, envelope,
         (reason) => { domRefusal = `dom-${reason}`; }, { allowEmptyTimeText: true });
       if (records === null) return this.#ignore(domRefusal);
+      if (this.#requireSocketBaseline && !socketReady && !collectorReady && records.some((record) =>
+        typeof record.providerTimezoneOffsetMinutes !== "number" ||
+        !Number.isInteger(record.providerTimezoneOffsetMinutes) || Math.abs(record.providerTimezoneOffsetMinutes) > 840)) {
+        return this.#ignore("dom-fallback-timezone-unconfirmed");
+      }
       const canonicalRecords = canonicalizeSabaDomMarketIds(records);
       if (canonicalRecords === null) return this.#ignore("dom-market-id-collision");
       const usable = canonicalRecords.filter((record) =>
@@ -354,6 +398,9 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         timezoneOffsetMinutes: 480, sequence: envelope.sequence
       });
       const normalizedDomComplete = !incompleteNormalizedCatalog(normalized, false);
+      if (this.#requireSocketBaseline && !socketReady && !collectorReady && !normalizedDomComplete) {
+        return this.#ignore("dom-fallback-incomplete");
+      }
       let establishesDomAuthority = false;
       if (usable.length >= MIN_STABLE_DOM_EVENTS) {
         // Some SABA deployments expose the complete current event table in the
@@ -370,8 +417,8 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         const previous = this.#domCandidates.get(envelope.sourceId);
         if (!this.#domReadySources.has(envelope.sourceId)) {
           this.#domCandidates.set(envelope.sourceId, identities);
-          if (previous === undefined && usable.length < SINGLE_GENERATION_DOM_EVENTS) {
-            if (!socketReady) {
+          if (previous === undefined && (this.#requireSocketBaseline || usable.length < SINGLE_GENERATION_DOM_EVENTS)) {
+            if (!socketReady && !collectorReady) {
               return this.#ignore(`dom-first-generation-${usable.length}-under-${SINGLE_GENERATION_DOM_EVENTS}`);
             }
           }
@@ -393,7 +440,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
           establishesDomAuthority = true;
         }
         this.#domCandidates.set(envelope.sourceId, identities);
-      } else if (!socketReady) {
+      } else if (!socketReady && !collectorReady) {
         return this.#ignore(`dom-${usable.length}-events-under-${MIN_STABLE_DOM_EVENTS}`);
       }
       if (establishesDomAuthority && normalizedDomComplete) {
@@ -406,6 +453,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const epochKey = sourceEpochKey(envelope);
       const collectorPrematchIds = this.#collectorPrematchIds.get(epochKey);
       const collectorPart = this.#parts.get(epochKey + "|COLLECTOR");
+      // Repeated visible rows prove those prices, not that hidden socket rows
+      // disappeared. Only a completed dedicated collector can qualify the
+      // legacy fallback; production DOM never replaces socket authority.
+      if (this.#requireSocketBaseline && (!this.#allowValidatedDomFallback || socketReady || collectorReady) || socketReady &&
+        (collectorPrematchIds === undefined || collectorPart === undefined)) establishesDomAuthority = false;
       const withCleanSheets = canonicalRecords.reduce<NormalizedCatalogPart>((catalog, record) =>
         augmentSabaDomCleanSheet(catalog, record, {
           observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
@@ -646,7 +698,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const authoritative = applied.fullSnapshot && generation !== undefined &&
         this.#streamStates.get(epochKey)?.activeStreamId === streamId &&
         this.#streamStates.get(epochKey)?.authorizing === true;
-      if (authoritative && applied.records.length === 0) {
+      if (authoritative && applied.records.length === 0 && !this.#requireSocketBaseline) {
         // empty/done is a complete provider replacement, not an empty bridge
         // shard. Remove every retained epoch partition before publishing it.
         for (const key of this.#parts.keys()) {
@@ -782,7 +834,34 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       if (!key.startsWith(`${epochKey}|`) || envelope.observedAtMs - observedAtMs <= MAX_RETAINED_PART_AGE_MS) continue;
       this.#partObservedAtMs.delete(key);
       this.#parts.delete(key);
-      if (key.endsWith("|COLLECTOR")) this.#collectorPrematchIds.delete(epochKey);
+      if (key.endsWith("|COLLECTOR")) {
+        this.#collectorPrematchIds.delete(epochKey);
+        this.#completeCollectorGenerations.delete(epochKey);
+        this.#collectorCoverageByEpoch.delete(epochKey);
+      }
+    }
+    if (this.#requireSocketBaseline) {
+      if (partition === "COLLECTOR" && evidence.authoritativeBaseline === true &&
+        evidence.generation !== undefined) {
+        this.#completeCollectorGenerations.set(epochKey, evidence.generation);
+      }
+      const collectorGeneration = this.#completeCollectorGenerations.get(epochKey);
+      const domBaseline = partition === "DOM" && this.#allowValidatedDomFallback &&
+        evidence.authoritativeBaseline === true;
+      const publicationGeneration = collectorGeneration ?? this.#authoritativeGenerations.get(epochKey) ??
+        (domBaseline ? evidence.generation : undefined);
+      if (publicationGeneration === undefined) return this.#ignore("awaiting-validated-baseline");
+      // Native reset/done proves usable quotes independently of collector coverage.
+      // If a collector exists, a same-epoch reconnect keeps its original
+      // retention time and quote acquisition clocks.
+      if (partition.startsWith("WS:") && evidence.authoritativeBaseline === true &&
+        evidence.generation !== undefined) {
+        if (collectorGeneration !== undefined) {
+          this.#completeCollectorGenerations.set(epochKey, evidence.generation);
+        }
+      } else if (partition !== "COLLECTOR" && !domBaseline) evidence = { evidenceMode: "DELTA",
+        generation: publicationGeneration,
+        ...(evidence.provenance === undefined ? {} : { provenance: evidence.provenance }) };
     }
     const sourceEntries = [...this.#parts].filter(([key]) => key.startsWith(`${epochKey}|`));
     // Collector-owned dates win event identity even when a previously received
@@ -965,7 +1044,8 @@ function normalizeCollectorCandidate(candidate: ValidatedSabaCollectorCandidate)
   if (canonicalRecords === null) return null;
   for (const [captureIndex, capture] of captures.entries()) {
     const options = { observedAtMs: capture.capturedAtMs,
-      receivedMonotonicMs: capture.capturedMonotonicMs, timezoneOffsetMinutes: 480,
+      receivedMonotonicMs: capture.capturedMonotonicMs,
+      timezoneOffsetMinutes: capture.record.providerTimezoneOffsetMinutes ?? 480,
       sequence: capture.captureOrdinal, requireExplicitDateForUndatedKickoff: true,
       ...(capture.kickoffDate.kind === "EXPLICIT" ? {
         explicitProviderDate: capture.kickoffDate.isoDate

@@ -35,6 +35,7 @@ interface SourceEpochAdmission {
   active: string | null;
   readonly retired: Set<string>;
   resyncing: boolean;
+  resyncAttempt?: symbol;
 }
 
 export interface LocalBridgeOptions {
@@ -179,6 +180,13 @@ export class LocalBridge {
     this.#recoveryScheduler.clear(sourceId);
   }
 
+  /** A producer lost deltas before queue admission. Retire its old epoch using
+   * the same recovery path as an API sequence-gap rejection.
+   */
+  requestSourceResync(sourceId: string): void {
+    this.#requestSourceResync(sourceId, this.#sourceEpochs.get(sourceId)?.active ?? null);
+  }
+
   async enqueue(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): Promise<void> {
     if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch ?? null)) return;
     const closeOrdinal = this.#closeOrdinal;
@@ -206,9 +214,9 @@ export class LocalBridge {
     // Every envelope consumes a source sequence ordinal. Dropping ordinary
     // socket/DOM traffic when the bounded queue fills creates an artificial
     // gap, and resyncing that source under the same load repeats forever.
-    // Backpressure all producers at the byte boundary; #emit already has one
-    // serialized lane per source, so this remains bounded without allowing a
-    // busy provider to accumulate unbounded pending work in the bridge.
+    // Backpressure admitted producers at the byte boundary. NetworkObserver
+    // separately bounds the pending payloads in its per-source serial lanes
+    // and requests an epoch resync if those upstream limits are exceeded.
     while (this.queueBytes + entry.bytes > this.#maxQueueBytes) {
       await new Promise<void>((resolve) => this.#queueSpaceWaiters.add(resolve));
       if (this.#closeOrdinal !== closeOrdinal) return;
@@ -443,12 +451,14 @@ export class LocalBridge {
       if (parsed.data.kind === "REJECT") {
         const rejection = parsed.data;
         if (rejection.sourceId === null) return;
-        if (rejection.reason === "SEQUENCE_GAP") {
+        if (rejection.reason === "SEQUENCE_GAP" || rejection.reason === "NETWORK_BODY_UNAVAILABLE") {
           // A bounded/offline queue can legitimately coalesce old frames. If
           // the API restarts while such a hole exists, replaying that same
           // backlog would make the server close every new socket forever.
           // Drop only the rejected source and republish its authoritative
           // snapshot; healthy sources remain queued and connected.
+          // A faulted multipart epoch also needs this reset: another snapshot
+          // in that same epoch cannot cross the API assembler's safety fence.
           const rejected = this.#queue.find((entry) => entry.envelope.sourceId === rejection.sourceId
             && entry.envelope.sequence === rejection.sequence && entry.sentGeneration === generation &&
             controlEpochMatches(entry, rejection.sourceEpoch));
@@ -519,10 +529,12 @@ export class LocalBridge {
   }
 
   #requestSourceResync(sourceId: string, sourceEpoch: string | null): void {
-    const state = this.#sourceEpochs.get(sourceId) ?? { active: sourceEpoch, retired: new Set<string>(),
+    const state: SourceEpochAdmission = this.#sourceEpochs.get(sourceId) ?? { active: sourceEpoch, retired: new Set<string>(),
       resyncing: false };
     this.#sourceEpochs.set(sourceId, state);
-    if (state.resyncing) return;
+    if (state.resyncing && state.resyncAttempt !== undefined) return;
+    const attempt = Symbol("source-resync");
+    state.resyncAttempt = attempt;
     const queuedEpoch = this.#queue.find((entry) => entry.envelope.sourceId === sourceId)?.envelope.sourceEpoch;
     for (const candidate of [state.active, queuedEpoch ?? null, sourceEpoch]) {
       if (candidate !== null && candidate !== undefined) state.retired.add(candidate);
@@ -541,8 +553,15 @@ export class LocalBridge {
       // shared loopback socket open while waiting for it. Closing this socket
       // to repair one source also releases every healthy provider from the API
       // registry and was the cause of the all-source presence churn.
-      await this.#onSourceResync(sourceId);
-    }).catch(() => undefined);
+      await this.#boundedRecovery(sourceId, Promise.resolve(this.#onSourceResync(sourceId)));
+    }).catch(() => {
+      // A failed/timed-out attempt may retry, but old/unknown epochs stay fenced
+      // until replacement traffic arrives. An older failure cannot unlock a
+      // newer resync that started after admitting a replacement epoch.
+      if (this.#sourceEpochs.get(sourceId) === state && state.resyncAttempt === attempt) {
+        delete state.resyncAttempt;
+      }
+    });
   }
 
   #admitSourceEpoch(sourceId: string, sourceEpoch: string | null): boolean {

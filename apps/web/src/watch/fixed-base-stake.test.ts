@@ -34,13 +34,30 @@ function row(marketType: "FT_TOTAL" | "FT_AH" | "FT_1X2", cells: readonly Compar
 }
 
 describe("fixed-base two-way stake planning", () => {
+  it("does not enumerate market cells without two valid required provider constraints", () => {
+    const valid = { currency: "VND", minStake: "1000", maxStake: "200000", stakeStep: "1000",
+      balance: "200000", feeType: "NONE" as const, feeRate: null, verifiedAsOfMs: 900, expiresAtMs: 1100 };
+    for (const constraints of [ {}, { SABA: valid },
+      { SABA: valid, SBOBET: { ...valid, expiresAtMs: 999 } },
+      { SABA: valid, SBOBET: { ...valid, currency: "USD" } },
+      { SABA: valid, SBOBET: { ...valid, verifiedAsOfMs: 1001 } }
+    ]) {
+      const candidate = row("FT_TOTAL", [cell("SABA", "FT_TOTAL", { OVER: "2.5", UNDER: "2.5" }),
+        cell("SBOBET", "FT_TOTAL", { OVER: "2.5", UNDER: "2.5" })]);
+      const cells = candidate.cells; let cellReads = 0;
+      Object.defineProperty(candidate, "cells", { get() { cellReads += 1; return cells; } });
+      expect(buildFixedBaseStakePlan(candidate, selected, { ...policy, requireProviderConstraints: true,
+        providerConstraints: constraints }, 1000)).toBeNull();
+      expect(cellReads).toBe(0);
+    }
+  });
   it.each([
     ["SH_TOTAL", "SECOND_HALF", "football-second-half-including-added-time", "2.25", "OVER", "UNDER"],
     ["CORNER_FT_TOTAL", "FULL_TIME", "football-corners-regulation", "2.75", "OVER", "UNDER"],
     ["CORNER_FH_AH", "FIRST_HALF", "football-corners-first-half", "-0.25", "HOME", "AWAY"],
     ["CARD_FT_AH", "FULL_TIME", "football-cards-regulation", "-0.75", "HOME", "AWAY"],
     ["CARD_FH_TOTAL", "FIRST_HALF", "football-cards-first-half", "3.25", "OVER", "UNDER"]
-  ] as const)("keeps %s quarter-line settlement out of the no-refund ticket set",
+  ] as const)("calculates %s quarter-line settlement including its refund state",
     (marketType, scope, settlementProfile, line, firstSelection, secondSelection) => {
       const expandedCell = (provider: "SABA" | "SBOBET", selection: string): ComparisonCell => {
         const providerEventId = `${provider}-event`;
@@ -58,7 +75,7 @@ describe("fixed-base two-way stake planning", () => {
         cells: [expandedCell("SABA", firstSelection), expandedCell("SBOBET", secondSelection)],
         bestBySelection: {}, margin: null, crossBook: true };
       const plan = buildObservedFixedBaseStakeEstimate(expandedRow, selected, policy);
-      expect(plan).toBeNull();
+      expect(Number(plan?.worstCaseProfit)).toBeGreaterThan(0);
     });
 
   it("rejects selections that are not the exact opposing domain for the market", () => {
@@ -146,7 +163,7 @@ describe("fixed-base two-way stake planning", () => {
     ["FT_TOTAL" as const, "2.75", "OVER", "UNDER"],
     ["FT_AH" as const, "-0.25", "HOME", "AWAY"],
     ["FT_AH" as const, "-0.75", "HOME", "AWAY"]
-  ])("rejects %s line %s because it has partial-refund settlement states", (marketType, line, first, second) => {
+  ])("prices %s line %s with partial-refund settlement states", (marketType, line, first, second) => {
     const left = cell("SABA", marketType, { [first]: "2.2" }, "OPEN", line);
     const right = cell("SBOBET", marketType, { [second]: "2.2" }, "OPEN", line);
     const withLine = (value: ComparisonCell): ComparisonCell => ({
@@ -155,10 +172,10 @@ describe("fixed-base two-way stake planning", () => {
 
     const plan = buildObservedFixedBaseStakeEstimate(row(marketType, [withLine(left), withLine(right)], line), selected, policy);
 
-    expect(plan).toBeNull();
+    expect(Number(plan?.worstCaseProfit)).toBeGreaterThan(0);
   });
 
-  it("does not create an anchored ticket for a negative quarter handicap", () => {
+  it("creates a constrained anchored estimate for a negative quarter handicap", () => {
     const candidate = row("FT_AH", [
       cell("SABA", "FT_AH", { HOME: "3" }, "OPEN", "-0.25"),
       cell("SBOBET", "FT_AH", { AWAY: "2" }, "OPEN", "-0.25")
@@ -172,10 +189,10 @@ describe("fixed-base two-way stake planning", () => {
       provider: "SABA", selection: "HOME", stake: "100000"
     });
 
-    expect(plan).toBeNull();
+    expect(plan?.worstCaseProfit).toBe("10000");
   });
 
-  it("does not rank the observed -0.25 handicap as a no-refund opposing ticket", () => {
+  it("includes the split outcome when estimating the observed -0.25 handicap", () => {
     const withMalayPrice = (value: ComparisonCell): ComparisonCell => ({
       ...value,
       quotes: value.quotes.map((quote) => ({ ...quote, rawFormat: "MALAY" as const }))
@@ -193,7 +210,8 @@ describe("fixed-base two-way stake planning", () => {
       provider: "SBOBET", selection: "AWAY", stake: "500000"
     });
 
-    expect(plan).toBeNull();
+    expect(plan?.settlementScenarios?.some(scenario => scenario.kind === "SPLIT")).toBe(true);
+    expect(Number(plan?.worstCaseProfit)).toBeGreaterThan(0);
   });
 
   it("rejects an Asian handicap pair when provider canonical lines disagree", () => {

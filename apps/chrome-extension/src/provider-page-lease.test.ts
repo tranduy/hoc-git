@@ -170,7 +170,7 @@ describe("provider page lease coordinator", () => {
     expect(renew).not.toHaveBeenCalled();
   });
 
-  it("renews only the oldest due attached lobby in one tick", async () => {
+  it("keeps persisted overdue BTI and IM schedules from replacing their pages", async () => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
     schedules.BTI.nextAttemptAtMs = 2_000;
@@ -187,12 +187,12 @@ describe("provider page lease coordinator", () => {
 
     await coordinator.tick();
 
-    expect(renew).toHaveBeenCalledExactlyOnceWith(BTI);
-    expect(schedules.BTI).toEqual({ lastCompletedAtMs: 4_000, nextAttemptAtMs: 1_204_000 });
+    expect(renew).not.toHaveBeenCalled();
+    expect(schedules.BTI).toEqual({ lastCompletedAtMs: 1_000, nextAttemptAtMs: 2_000 });
     expect(schedules.IM.nextAttemptAtMs).toBe(3_000);
   });
 
-  it.each([TSPORT, KSPORT])("does not periodically navigate $lobby while hidden collection is running", async (source) => {
+  it.each([BTI, TSPORT, KSPORT])("does not periodically navigate $lobby while hidden collection is running", async (source) => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
     schedules[source.lobby].nextAttemptAtMs = 2_000;
@@ -212,7 +212,7 @@ describe("provider page lease coordinator", () => {
     expect(schedules[source.lobby]).toEqual({ lastCompletedAtMs: 1_000, nextAttemptAtMs: 2_000 });
   });
 
-  it.each([TSPORT, KSPORT])("still renews $lobby for observed failure or explicit recovery", async (source) => {
+  it.each([BTI, TSPORT, KSPORT])("still renews $lobby for observed failure or explicit recovery", async (source) => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
     const renew = vi.fn(async () => undefined);
@@ -231,13 +231,14 @@ describe("provider page lease coordinator", () => {
     expect(schedules[source.lobby]).toEqual({ lastCompletedAtMs: 4_000, nextAttemptAtMs: 1_204_000 });
   });
 
-  it("keeps BTI eligible for scheduled renewal", async () => {
+  it("keeps a healthy BTI tab alive across a full day of lease ticks", async () => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
     schedules.BTI.nextAttemptAtMs = 2_000;
     const renew = vi.fn(async () => undefined);
+    let nowMs = 4_000;
     const coordinator = new ProviderPageLeaseCoordinator({
-      now: () => 4_000,
+      now: () => nowMs,
       listAttached: () => [BTI],
       isLoading: async () => false,
       loadState: async () => schedules,
@@ -245,9 +246,8 @@ describe("provider page lease coordinator", () => {
       renew
     });
 
-    await coordinator.tick();
-
-    expect(renew).toHaveBeenCalledExactlyOnceWith(BTI);
+    for (; nowMs <= 24 * 60 * 60_000; nowMs += 30_000) await coordinator.tick();
+    expect(renew).not.toHaveBeenCalled();
   });
 
   it("defers a loading tab for thirty seconds without blocking another tick forever", async () => {
@@ -264,13 +264,13 @@ describe("provider page lease coordinator", () => {
       renew
     });
 
-    await coordinator.tick();
+    await coordinator.renewNow(BTI);
 
     expect(renew).not.toHaveBeenCalled();
     expect(schedules.BTI).toEqual({ lastCompletedAtMs: 1_000, nextAttemptAtMs: 34_000 });
   });
 
-  it("persists a five-minute cooldown after a scheduled renewal failure", async () => {
+  it("persists a five-minute retry time after an observed-failure renewal fails", async () => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
     schedules.BTI.nextAttemptAtMs = 2_000;
@@ -283,11 +283,11 @@ describe("provider page lease coordinator", () => {
       renew: async () => { throw new Error("RENEW_FAILED"); }
     });
 
-    await expect(coordinator.tick()).resolves.toBeUndefined();
+    await expect(coordinator.renewNow(BTI)).rejects.toThrow("RENEW_FAILED");
     expect(schedules.BTI).toEqual({ lastCompletedAtMs: 1_000, nextAttemptAtMs: 304_000 });
   });
 
-  it("coalesces a manual renewal with the same already-running scheduled source", async () => {
+  it("coalesces simultaneous observed-failure renewals for the same source", async () => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
     schedules.BTI.nextAttemptAtMs = 2_000;
@@ -302,7 +302,7 @@ describe("provider page lease coordinator", () => {
       renew
     });
 
-    const scheduled = coordinator.tick();
+    const scheduled = coordinator.renewNow(BTI);
     await vi.waitFor(() => expect(renew).toHaveBeenCalledOnce());
     const manual = coordinator.renewNow(BTI);
     release();

@@ -10,10 +10,14 @@ describe("extension lobby scope", () => {
     expect(lobbyIsInExtensionScope("TSPORT", scope)).toBe(false);
   });
 
-  it("leaves the production extension unrestricted", () => {
+  it("includes the guarded IM collector and every other production provider", () => {
     const scope = extensionLobbyScope("Fieldline Chrome Feed");
 
-    expect(scope).toBeNull();
+    expect(lobbyIsInExtensionScope("IM", scope)).toBe(true);
+    expect(lobbyIsInExtensionScope("BTI", scope)).toBe(true);
+    expect(lobbyIsInExtensionScope("CMD", scope)).toBe(true);
+    expect(lobbyIsInExtensionScope("SABA", scope)).toBe(true);
+    expect(lobbyIsInExtensionScope("KSPORT", scope)).toBe(true);
     expect(lobbyIsInExtensionScope("TSPORT", scope)).toBe(true);
   });
 });

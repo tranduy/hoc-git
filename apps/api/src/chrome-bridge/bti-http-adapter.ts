@@ -59,12 +59,20 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
-    let payload: unknown;
-    try { payload = JSON.parse(envelope.payload.body); } catch { return []; }
     const isDetail = envelope.request.pathnameClass.startsWith("/api/eventpage/events/");
     const generation = parseGeneration(envelope.request.streamId);
     if (generation === null) return [];
-    if (isDetail) payload = hydrateDetailIdentity(payload, this.#parts.get(envelope.sourceId)?.lists);
+    const retained = this.#parts.get(envelope.sourceId);
+    const latestComparison = retained?.latestGeneration == null ? 1 :
+      compareGeneration(generation.order, retained.latestGeneration);
+    // Continuous replay repairs a lost forward or API restart. Once this
+    // decoder has committed a list, repeating its large body cannot update it.
+    if (latestComparison < 0 || (!isDetail && latestComparison === 0 &&
+      (envelope.request.pathnameClass !== OPTIONAL_LIST_PATH || retained!.lists.has(OPTIONAL_LIST_PATH)))) return [];
+    let payload: unknown;
+    try { payload = JSON.parse(envelope.payload.body); } catch { return []; }
+    if (isDetail && latestComparison === 0 && retainedDetailReplay(payload, envelope, generation.order, retained!)) return [];
+    if (isDetail) payload = hydrateDetailIdentity(payload, retained?.lists);
     const root = typeof payload === "object" && payload !== null && !Array.isArray(payload)
       ? payload as Record<string, unknown> : null;
     const rosterClock = root?.fieldlineBtiRoster === undefined ? null :
@@ -298,8 +306,24 @@ function withClock(part: BtiPart, clock: { readonly requestedAtMs: number; reado
     }) };
 }
 
-function comparePartClock(left: BtiPart, right: BtiPart): number {
+function comparePartClock(left: Pick<BtiPart, "requestedAtMs" | "observedAtMs">,
+  right: Pick<BtiPart, "requestedAtMs" | "observedAtMs">): number {
   return left.requestedAtMs - right.requestedAtMs || left.observedAtMs - right.observedAtMs;
+}
+
+function retainedDetailReplay(payload: unknown, envelope: ChromeBridgeEnvelope,
+  generation: readonly [number, number], parts: SourceParts): boolean {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
+  const metadata = (payload as Record<string, unknown>).fieldlineBtiDetails;
+  if (!Array.isArray(metadata) || metadata.length === 0) return false;
+  // Restrict this shortcut to the current committed generation. Future
+  // generations must still stage their roster ownership, even for old prices.
+  return metadata.every((value) => {
+    const clock = parseClock(value, envelope, generation);
+    const id = typeof value === "object" && value !== null ? (value as Record<string, unknown>).eventId : null;
+    const previous = typeof id === "string" ? parts.details.get(id) : undefined;
+    return clock !== null && previous !== undefined && comparePartClock(clock, previous) <= 0;
+  });
 }
 
 function hydrateDetailIdentity(payload: unknown, lists: ReadonlyMap<string, BtiPart> | undefined): unknown {

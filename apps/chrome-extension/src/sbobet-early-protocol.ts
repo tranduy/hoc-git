@@ -1,4 +1,5 @@
 import { extractSbobetMoreRoster } from "./sbobet-more-roster.js";
+import { SBOBET_RETRY_AFTER_EXPRESSION } from "./sbobet-request-backoff.js";
 
 const MAX_BODY_BYTES = 12_000_000;
 const REQUIRED_QUERY: Readonly<Record<string, string>> = { sportId: "1", sportType: "1_1", oddsStyle: "ma" };
@@ -101,8 +102,7 @@ export function buildSbobetEarlyFetchExpression(request: SbobetEarlyRequest, exe
       if (controller.signal.aborted || location.origin !== input.executionOrigin) return { status: 0 };
       if (response.status !== 200) {
         const retry = response.headers?.get('retry-after');
-        return { status: response.status, ...(typeof retry === 'string' && /^\\d+$/u.test(retry)
-          ? { retryAfterMs: Math.min(Number(retry) * 1000, 300000) } : {}) };
+        return { status: response.status, retryAfterMs: ${SBOBET_RETRY_AFTER_EXPRESSION}(retry) };
       }
       if (Number(response.headers?.get('content-length')) > input.maxBytes || !response.body) {
         controller.abort();

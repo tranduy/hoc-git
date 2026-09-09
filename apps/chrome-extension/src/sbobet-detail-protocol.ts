@@ -1,4 +1,5 @@
 import type { SbobetDetailBatch, SbobetPrematchEvent } from "./sbobet-catalog-refresh.js";
+import { SBOBET_RETRY_AFTER_EXPRESSION } from "./sbobet-request-backoff.js";
 
 export type SbobetDetailBinding = {
   readonly sourceGeneration: number;
@@ -67,10 +68,8 @@ export function buildSbobetDetailFetchExpression(template: SbobetDetailTemplate 
       const response = await fetch(input.url, { method: 'GET', headers: input.headers,
         credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal });
       if (response.status !== 200) {
-        const retryAfter = response.headers?.get('retry-after');
-        const seconds = typeof retryAfter === 'string' && /^\\d+$/u.test(retryAfter) ? Number(retryAfter) : null;
         return { status: response.status, marketContainerComplete: false,
-          ...(seconds !== null && Number.isFinite(seconds) ? { retryAfterMs: seconds * 1000 } : {}) };
+          retryAfterMs: ${SBOBET_RETRY_AFTER_EXPRESSION}(response.headers?.get('retry-after')) };
       }
       const text = await response.text();
       if (controller.signal.aborted || text.length > 4000000) return { status: 200, marketContainerComplete: false };

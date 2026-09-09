@@ -7,6 +7,31 @@ describe("CMD public catalog DOM snapshot", () => {
   beforeAll(async () => { browser = await chromium.launch({ headless: true }); });
   afterAll(async () => { await browser.close(); });
 
+  it.each([
+    ["04:29:28AM Sep09,2026GMT+7", 420],
+    ["04:29:28AM Sep 09, 2026 GMT +8", 480],
+    ["", null],
+    ["04:29:28AM Sep 09, 2026 GMT +99", null]
+  ])("captures only the explicit public clock timezone: %s", async (clock, offset) => {
+    const page = await browser.newPage();
+    await page.setContent(`<span id="systemTime" class="c-header__time">${clock}</span>
+      <section class="c-odds-table--sport1"><div class="c-league" data-leagueid="1">
+      <span class="c-league__name">League</span><div class="c-match" data-matchid="2">
+      <span class="c-match-time">09/09 12:30AM</span><span class="c-team-name">Home</span>
+      <span class="c-team-name">Away</span></div></div></section>`);
+    const records = JSON.parse(await page.evaluate(CMD_PUBLIC_CATALOG_EXPRESSION) as string);
+    expect(records[0]).toHaveProperty("providerTimezoneOffsetMinutes", offset);
+    if (offset !== null) {
+      await page.evaluate(() => {
+        const other = document.createElement("span"); other.className = "c-header__time";
+        other.textContent = "04:29:28AM Sep09,2026GMT+9"; document.body.prepend(other);
+      });
+      expect(JSON.parse(await page.evaluate(CMD_PUBLIC_CATALOG_EXPRESSION) as string)[0])
+        .toHaveProperty("providerTimezoneOffsetMinutes", null);
+    }
+    await page.close();
+  });
+
   it("extracts full-time and first-half two-way markets from the legacy CMD row", async () => {
     const page = await browser.newPage();
     await page.setContent(`

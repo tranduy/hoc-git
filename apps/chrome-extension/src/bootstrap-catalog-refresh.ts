@@ -9,7 +9,7 @@ import type { ChromeLobbyId } from "@tool-chenh/contracts";
  * events with 19 upcoming to 68 with 4 and stayed there - its pre-match list
  * gone, which is most of what another book can be compared against.
  */
-const BOOTSTRAP_CATALOG_LOBBIES: ReadonlySet<ChromeLobbyId> = new Set<ChromeLobbyId>(["SABA", "IM", "TSPORT"]);
+const BOOTSTRAP_CATALOG_LOBBIES: ReadonlySet<ChromeLobbyId> = new Set<ChromeLobbyId>(["SABA", "IM", "TSPORT", "KSPORT"]);
 
 export interface AttachedLobby {
   readonly lobby: ChromeLobbyId;

@@ -2,9 +2,10 @@ import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/c
 import { describe, expect, it } from "vitest";
 import type { ComparisonCell, ComparisonEvent, ComparisonRow, ObservedTicketRow } from "../catalog/comparison.js";
 import type { FixedBaseStakePlan, FixedBaseStakePolicy } from "./fixed-base-stake.js";
-import { eventEdgeSummary, nextRankingDeadlineMs, rankTicketsForEvent, sortRankedEvents, topRankedTicketItems,
+import { eventEdgeSummary, nextRankingDeadlineMs, ObservedStakeEstimateCache, rankTicketsForEvent, sortRankedEvents, topRankedTicketItems,
   type RankedEvent } from "./ranked-tickets.js";
 import type { VerifiedTicketEvidence } from "./ticket-preflight-coordinator.js";
+import { roiTone } from "./roi-tone.js";
 
 const nowMs = 10_000;
 const policy: FixedBaseStakePolicy = { currency: "VND", baseStake: "100000", minStake: "30000",
@@ -58,6 +59,69 @@ function comparisonEvent(): ComparisonEvent {
     providerEventIds: { SABA: "event-a", SBOBET: "event-b" }, observedRows: [observedOnly], rows, bestMargin: 0.25 };
 }
 
+describe("observed stake estimate reuse", () => {
+  it("keeps an active plan warm across the measured 22,740-row inventory scan", () => {
+    const cache = new ObservedStakeEstimateCache();
+    const providers = new Set(["SABA", "SBOBET"] as const);
+    const activeRow = row(1);
+    const original = cache.estimate("active-first", activeRow, providers, policy);
+    expect(original).not.toBeNull();
+    // Null estimates also occupy the active ranking scan; they must not evict
+    // a valid row merely because the expanded inventory exceeds the old cap.
+    const unavailableRow = { ...row(2), cells: [] };
+    for (let index = 1; index < 22_740; index++) {
+      cache.estimate(`active-${index}`, unavailableRow, providers, policy);
+    }
+    expect(cache.estimate("active-first", structuredClone(activeRow), providers, policy)).toBe(original);
+    expect(cache.size).toBe(22_740);
+  });
+  it("bounds retained history and replaces the latest calculation for one row", () => {
+    const cache = new ObservedStakeEstimateCache(2);
+    const providers = new Set(["SABA", "SBOBET"] as const);
+    const first = cache.estimate("first", row(1), providers, policy);
+    cache.estimate("second", row(2), providers, policy);
+    expect(cache.estimate("first", structuredClone(row(1)), providers, policy)).toBe(first);
+    cache.estimate("third", row(3), providers, policy);
+    expect(cache.size).toBe(2);
+    expect(cache.estimate("first", row(1), providers, policy)).toBe(first);
+    cache.estimate("first", row(1), providers, { ...policy, baseStake: "200000" });
+    expect(cache.size).toBe(2);
+    expect(cache.estimate("first", row(1), providers, policy)).not.toBe(first);
+  });
+  it("reuses the plan across structural clones but invalidates exact calculation inputs", () => {
+    const event = { ...comparisonEvent(), key: "cache-price-regression", rows: [row(1)] };
+    const input = { event, verified: new Map(), movements: [], selectedProviders: new Set(["SABA", "SBOBET"] as const),
+      observationPolicy: policy, nowMs };
+    const original = rankTicketsForEvent(input)[0]!.plan;
+    expect(original).not.toBeNull();
+    expect(rankTicketsForEvent({ ...input, event: structuredClone(event) })[0]!.plan).toBe(original);
+    const changed = structuredClone(event);
+    const changedRow = { ...changed.rows[0]!, cells: changed.rows[0]!.cells.map(c => ({ ...c,
+      quotes: c.quotes.map(q => ({ ...q, rawOdds: "2.1" })) })) };
+    const changedPlan = rankTicketsForEvent({ ...input, event: { ...changed, rows: [changedRow] } })[0]!.plan;
+    expect(changedPlan).not.toBe(original);
+    expect(Number(changedPlan?.worstCaseProfit)).toBeLessThan(Number(original?.worstCaseProfit));
+    const resized = rankTicketsForEvent({ ...input, observationPolicy: { ...policy, baseStake: "200000" } })[0]!.plan;
+    expect(resized).not.toBe(original);
+    expect(resized?.totalStake).toBe("400000");
+    const suspended = { ...event, rows: event.rows.map(r => ({ ...r,
+      cells: r.cells.map(c => ({ ...c, market: { ...c.market, status: "SUSPENDED" as const } })) })) };
+    expect(rankTicketsForEvent({ ...input, event: suspended })[0]!.plan).toBeNull();
+    expect(rankTicketsForEvent({ ...input, selectedProviders: new Set(["SABA"] as const) })[0]!.plan).toBeNull();
+    expect(rankTicketsForEvent({ ...input, observationPolicy: { ...policy, requireProviderConstraints: true,
+      providerConstraints: {} } })[0]!.plan).toBeNull();
+    for (const changedQuote of [
+      { rawFormat: "HK" as const }, { providerSelectionId: "new-native-selection" },
+      { status: "SUSPENDED" as const }, { providerMarketId: "wrong-native-market" }
+    ]) {
+      const changedEvent = { ...event, rows: event.rows.map(r => ({ ...r, cells: r.cells.map(c => ({ ...c,
+        quotes: c.quotes.map(q => ({ ...q, ...changedQuote })) })) })) };
+      const refreshed = rankTicketsForEvent(input)[0]!.plan;
+      expect(rankTicketsForEvent({ ...input, event: changedEvent })[0]!.plan).not.toBe(refreshed);
+    }
+  });
+});
+
 describe("nextRankingDeadlineMs", () => {
   const apCatalog = (observedAtMs: number, isLive: boolean) => ({
     dataMode: "LIVE" as const, accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT" as const,
@@ -86,6 +150,20 @@ describe("nextRankingDeadlineMs", () => {
       .toBe(25_000);
   });
 
+  it("keeps cross-event receipt offsets when scheduling mixed live and prematch deadlines", () => {
+    const oldLive = cell("APSPORT", "-0.5", { isLive: true, receivedMonotonicMs: 1_000 });
+    const latestPrematch = cell("APSPORT", "-1.5", { receivedMonotonicMs: 21_000 }).quotes
+      .map(quote => ({ ...quote, providerEventId: "another-event" }));
+    const current = { ...apCatalog(21_000, true), quotes: [...oldLive.quotes, ...latestPrematch] };
+    const event = { ...comparisonEvent(), event: { ...providerEvent, isLive: true }, catalogs: [current] };
+    // The untouched live event expired at 6,000; only the other event's 36,000 deadline remains.
+    expect(nextRankingDeadlineMs({ events: [event], verified: new Map(), nowMs: 22_000 })).toBe(36_000);
+    const recent = { ...current, quotes: [...oldLive.quotes.map(quote => ({ ...quote,
+      receivedMonotonicMs: 18_000 })), ...latestPrematch] };
+    expect(nextRankingDeadlineMs({ events: [{ ...event, catalogs: [recent] }], verified: new Map(),
+      nowMs: 22_000 })).toBe(23_000);
+  });
+
   it("wakes for a kickoff and a verified ticket's expiry, earliest first", () => {
     const event = { ...comparisonEvent(), catalogs: [] };
 
@@ -103,6 +181,20 @@ describe("nextRankingDeadlineMs", () => {
 });
 
 describe("rankTicketsForEvent", () => {
+  it("reads each global sort value once and preserves exact decimal order", () => {
+    const event = comparisonEvent(); let roiReads = 0; let profitReads = 0; let movementReads = 0;
+    const tickets = Array.from({ length: 48 }, (_, index) => {
+      const candidatePlan = plan(`sort-${index}`, "10000", "0.1");
+      Object.defineProperty(candidatePlan, "roi", { get() { roiReads += 1; return `0.10000000000000000${index % 3}`; } });
+      Object.defineProperty(candidatePlan, "worstCaseProfit", { get() { profitReads += 1; return String(index); } });
+      return { key: `sort-${index}`, eventKey: event.key, row: row(index + 1), plan: candidatePlan,
+        state: "OBSERVATION" as const, reason: null, get movementMagnitude() { movementReads += 1; return "0"; }, gapsBySelection: {} };
+    });
+    const ranked = topRankedTicketItems([{ event, tickets, bestVerifiedProfit: null }], 48);
+    expect(ranked.map(item => Number(item.ticket.key.slice(5)))).toEqual(
+      [2, 1, 0].flatMap(remainder => Array.from({ length: 48 }, (_, i) => 47 - i).filter(i => i % 3 === remainder)));
+    expect(roiReads).toBe(48); expect(profitReads).toBe(48); expect(movementReads).toBe(48);
+  });
   it("globally ranks up to 25 real two-book tickets instead of collapsing them by event", () => {
     const event = comparisonEvent();
     const tickets = Array.from({ length: 27 }, (_, index) => {
@@ -202,6 +294,58 @@ describe("rankTicketsForEvent", () => {
 
     expect(ranked.slice(0, 3).map((ticket) => ticket.row.key)).toEqual(["row-2", "row-3", "row-1"]);
   });
+  it("keeps the screenshot's 1.99 versus Malay -0.99 SH total break-even at a 500,000 base neutral", () => {
+    const cells = (["SABA", "SBOBET"] as const).map(provider => {
+      const original = cell(provider, "1.5");
+      return { ...original, market: { ...original.market, marketType: "SH_TOTAL" as const, scope: "SECOND_HALF" as const,
+        settlementProfile: "football-second-half-including-added-time" }, quotes: original.quotes.map((quote, index) => ({
+          ...quote, marketType: "SH_TOTAL" as const, scope: "SECOND_HALF" as const,
+          selection: index === 0 ? "OVER" as const : "UNDER" as const,
+          rawOdds: provider === "SABA" && index === 0 ? "1.99" : provider === "SBOBET" && index === 1 ? "-0.99" : "1.1",
+          rawFormat: provider === "SBOBET" && index === 1 ? "MALAY" as const : "DECIMAL" as const
+        })) };
+    });
+    const exactRow: ComparisonRow = { ...row(1), key: "SH_TOTAL|SECOND_HALF|1.5", marketType: "SH_TOTAL", scope: "SECOND_HALF", line: "1.5", cells };
+    const event = { ...comparisonEvent(), key: "lausanne-servette-neutral", rows: [exactRow] };
+    const tickets = rankTicketsForEvent({ event, verified: new Map(), movements: [], selectedProviders: new Set(["SABA", "SBOBET"]),
+      observationPolicy: { ...policy, baseStake: "500000", maxStake: "1000000", balance: "1000000", stakeStep: "1" }, nowMs });
+    expect(tickets[0]!.plan).toMatchObject({ worstCaseProfit: "0", roi: "0", totalStake: "995000" });
+    const summary = eventEdgeSummary({ event, tickets, bestVerifiedProfit: null })!;
+    expect(roiTone(summary.roiPercent, summary.worstCaseProfit)).toBe("neutral");
+    // The displayed 2.0101 is rounded. If it were the exact native decimal,
+    // the best whole-VND hedge would lose 0.5 VND; it must remain negative.
+    const truncated = { ...exactRow, cells: cells.map(c => ({ ...c, quotes: c.quotes.map(q =>
+      q.rawFormat === "MALAY" ? { ...q, rawOdds: "2.0101", rawFormat: "DECIMAL" as const } : q) })) };
+    const literalTickets = rankTicketsForEvent({ event: { ...event, rows: [truncated] }, verified: new Map(), movements: [],
+      selectedProviders: new Set(["SABA", "SBOBET"]), observationPolicy: { ...policy, baseStake: "500000", maxStake: "1000000",
+        balance: "1000000", stakeStep: "1" }, nowMs });
+    expect(literalTickets[0]!.plan?.worstCaseProfit).toBe("-0.5");
+    const literalSummary = eventEdgeSummary({ event, tickets: literalTickets, bestVerifiedProfit: null })!;
+    expect(roiTone(literalSummary.roiPercent, literalSummary.worstCaseProfit)).toBe("negative");
+  });
+
+  it("indexes each movement once across events and keeps exact event/row identity and maximum magnitude", () => {
+    let identityReads = 0;
+    const movement = (eventKey: string, rowKey: string, magnitude: string) => ({
+      key: `${eventKey}/${rowKey}/${magnitude}`, event: { get key() { identityReads += 1; return eventKey; } },
+      rowKey, provider: "SABA" as const, selection: "HOME", previousDecimal: "2",
+      currentDecimal: "2.2", magnitude, changedAtMs: nowMs
+    });
+    const movements = [movement("event-key", "row-1", "0.1"),
+      movement("event-key", "row-1", "0.3"), movement("event-key", "row-2", "0.2"),
+      movement("other-event", "row-1", "9"), movement("event-key::row-1", "suffix", "8")];
+    const input = { verified: new Map(), movements, selectedProviders: new Set(["SABA", "SBOBET"] as const),
+      observationPolicy: policy, nowMs, limit: 7 };
+    const ranked = rankTicketsForEvent({ ...input, event: comparisonEvent() });
+    expect(ranked.find(({ key }) => key === "row-1")?.movementMagnitude).toBe("0.3");
+    expect(ranked.find(({ key }) => key === "row-2")?.movementMagnitude).toBe("0.2");
+    const other = rankTicketsForEvent({ ...input, event: { ...comparisonEvent(), key: "other-event" } });
+    expect(other.find(({ key }) => key === "row-1")?.movementMagnitude).toBe("9");
+    expect(identityReads).toBe(movements.length);
+    const replacement = rankTicketsForEvent({ ...input, movements: [movement("event-key", "row-1", "0.05")],
+      event: comparisonEvent() });
+    expect(replacement.find(({ key }) => key === "row-1")?.movementMagnitude).toBe("0.05");
+  });
 
   it("demotes expired evidence to a neutral observation", () => {
     const event = comparisonEvent();
@@ -241,8 +385,54 @@ describe("rankTicketsForEvent", () => {
 
     expect(stale[0]).toMatchObject({ key: "ap-row", plan: null, state: "OBSERVATION" });
     expect(stale[0]?.row.cells.find((candidate) => candidate.provider === "APSPORT")?.quotes).toEqual([]);
-    expect(unrelatedUpdate[0]?.plan).not.toBeNull();
+    expect(unrelatedUpdate[0]?.plan).toBeNull();
     expect(confirmed[0]?.plan).not.toBeNull();
+    // A warm arithmetic cache must not revive the same prices past their receipt deadline.
+    const expiredAfterWarm = rankTicketsForEvent({ ...input, nowMs: nowMs + 5_001,
+      event: eventWithAp(freshApCell) });
+    expect(expiredAfterWarm[0]?.plan).toBeNull();
+    expect(expiredAfterWarm[0]?.reason).toBe("APSPORT quote freshness not confirmed");
+  });
+
+  it.each([true, false])("does not revive an untouched APSPORT event when another event renews (live=%s)", isLive => {
+    const own = cell("APSPORT", "-0.5", { isLive, receivedMonotonicMs: 1_000 });
+    const otherQuotes = cell("APSPORT", "-1.5", { isLive, receivedMonotonicMs: 21_000 }).quotes
+      .map(quote => ({ ...quote, providerEventId: "another-event" }));
+    const withReceipt = (apCell: ComparisonCell): ComparisonEvent => ({ ...comparisonEvent(),
+      providers: ["SABA", "APSPORT"],
+      rows: [{ key: "ap-row", marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5",
+        cells: [cell("SABA", "-0.5", { isLive }), apCell],
+        bestBySelection: { HOME: "SABA", AWAY: "APSPORT" }, margin: 0.25, crossBook: true }],
+      catalogs: [{ dataMode: "LIVE", accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT",
+        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 21_000,
+        snapshotState: "FRESH", rejectedMarketCount: 0, events: [], markets: [],
+        quotes: [...apCell.quotes, ...otherQuotes] }] });
+    const input = { verified: new Map<string, VerifiedTicketEvidence>(), movements: [],
+      selectedProviders: new Set(["SABA", "APSPORT"] as const), observationPolicy: policy, nowMs: 22_000 };
+    expect(rankTicketsForEvent({ ...input, event: withReceipt(own) })[0]).toMatchObject({
+      plan: null, reason: "APSPORT quote freshness not confirmed" });
+    const confirmed = withReceipt(cell("APSPORT", "-0.5", { isLive, receivedMonotonicMs: 21_000 }));
+    expect(rankTicketsForEvent({ ...input, event: confirmed })[0]?.plan).not.toBeNull();
+    const deadline = 21_000 + (isLive ? 5_000 : 15_000);
+    expect(rankTicketsForEvent({ ...input, event: confirmed, nowMs: deadline })[0]?.plan).not.toBeNull();
+    expect(rankTicketsForEvent({ ...input, event: confirmed, nowMs: deadline + 1 })[0]?.plan).toBeNull();
+  });
+
+  it.each([true, false])("expires unchanged quotes after a membership-only AP publication (live=%s)", isLive => {
+    const own = cell("APSPORT", "-0.5", { isLive, receivedMonotonicMs: 1_000 });
+    const event: ComparisonEvent = { ...comparisonEvent(), event: { ...providerEvent, isLive: true },
+      providers: ["SABA", "APSPORT"],
+      rows: [{ key: "ap-row", marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5",
+        cells: [cell("SABA", "-0.5", { isLive }), own],
+        bestBySelection: { HOME: "SABA", AWAY: "APSPORT" }, margin: 0.25, crossBook: true }],
+      catalogs: [{ dataMode: "LIVE", accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT",
+        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 21_000,
+        observedMonotonicMs: 21_000, snapshotState: "FRESH", rejectedMarketCount: 0,
+        events: [], markets: [], quotes: own.quotes }] };
+    const input = { event, verified: new Map<string, VerifiedTicketEvidence>(), movements: [],
+      selectedProviders: new Set(["SABA", "APSPORT"] as const), observationPolicy: policy, nowMs: 22_000 };
+    expect(rankTicketsForEvent(input)[0]).toMatchObject({ plan: null, reason: "APSPORT quote freshness not confirmed" });
+    expect(nextRankingDeadlineMs({ events: [event], verified: input.verified, nowMs: input.nowMs })).toBeNull();
   });
 
   it("indexes APSPORT freshness once instead of rescanning the whole catalog for every quote", () => {

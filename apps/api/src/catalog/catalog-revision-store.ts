@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import type { CatalogRevisionEntry } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
+import { CatalogRevisionHasher } from "./catalog-revision-hasher.js";
 
 export interface StoredCatalogRevision extends CatalogRevisionEntry {
   readonly sequence: number;
@@ -15,21 +15,6 @@ export interface CatalogRevisionBaseline {
 
 type Listener = (entry: StoredCatalogRevision) => void;
 
-function revisionFor(catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE"): string {
-  const { observedAtMs: _observedAtMs, quotes, ...semanticCatalog } = catalog;
-  const semanticQuotes = quotes.map(({ receivedMonotonicMs, sequence,
-    sourceTimestampMs: _sourceTimestampMs, ...quote }) => catalog.provider === "APSPORT"
-    ? { ...quote, receivedMonotonicMs, sequence }
-    : quote);
-  const semanticNativeMarketObservations = catalog.nativeMarketObservations?.map(
-    ({ observedAtMs: _nativeObservedAtMs, ...observation }) => observation);
-  return createHash("sha256").update(JSON.stringify({
-    catalog: { ...semanticCatalog, quotes: semanticQuotes,
-      ...(semanticNativeMarketObservations === undefined ? {}
-        : { nativeMarketObservations: semanticNativeMarketObservations }) }, snapshotState
-  })).digest("base64url");
-}
-
 function publicEntry(entry: StoredCatalogRevision): CatalogRevisionEntry {
   return { accountId: entry.accountId, revision: entry.revision,
     observedAtMs: entry.observedAtMs, snapshotState: entry.snapshotState };
@@ -39,6 +24,7 @@ export class CatalogRevisionStore {
   readonly #now: () => number;
   readonly #entries = new Map<string, StoredCatalogRevision>();
   readonly #listeners = new Set<Listener>();
+  readonly #hasher = new CatalogRevisionHasher();
   #sequence = 0;
   #expiryTimer: ReturnType<typeof setTimeout> | undefined;
   #closed = false;
@@ -57,7 +43,7 @@ export class CatalogRevisionStore {
     }
     const current = this.#entries.get(accountId);
     if (current !== undefined && catalog.observedAtMs < current.observedAtMs) return current;
-    const revision = revisionFor(catalog, options.snapshotState);
+    const revision = this.#hasher.revisionFor(catalog, options.snapshotState);
     if (current?.revision === revision && catalog.observedAtMs === current.observedAtMs) return current;
     if (current?.revision === revision) {
       const renewed: StoredCatalogRevision = {
@@ -106,7 +92,7 @@ export class CatalogRevisionStore {
       entry.snapshotState === "FRESH" && entry.freshUntilMs !== null && entry.freshUntilMs <= now);
     for (const current of expired) {
       const entry: StoredCatalogRevision = {
-        ...current, revision: revisionFor(current.catalog, "STALE"),
+        ...current, revision: this.#hasher.revisionFor(current.catalog, "STALE"),
         snapshotState: "STALE", sequence: ++this.#sequence, freshUntilMs: null
       };
       this.#entries.set(entry.accountId, entry);

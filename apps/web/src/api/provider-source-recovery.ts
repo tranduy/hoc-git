@@ -13,15 +13,9 @@ export class ProviderSourceRecoveryApi implements ProviderSourceRecoveryApiLike 
 
   async recover(provider: RecoverableProvider, mode: ProviderRecoveryMode): Promise<void> {
     if (mode === "MANUAL") return this.#hardRefresh(provider);
-    try {
-      await this.#requestFreshSnapshot(provider);
-    } catch (error) {
-      // APSPORT owns a periodic authenticated roster refresh and a backend
-      // same-tab hard-recovery actor. Let those converge instead of navigating
-      // the tab from every open catalog UI after a short snapshot timeout.
-      if (provider === "SBOBET" || provider === "APSPORT") throw error;
-      await this.#hardRefresh(provider);
-    }
+    // The backend owns escalation. A delayed failure in any open dashboard
+    // is not authority to restore a provider that may already have recovered.
+    await this.#requestFreshSnapshot(provider);
   }
 
   async #requestFreshSnapshot(provider: RecoverableProvider): Promise<void> {
@@ -31,6 +25,7 @@ export class ProviderSourceRecoveryApi implements ProviderSourceRecoveryApiLike 
     const acceptedLobbies = new Set(providerLobbies(provider));
     const source = sources.filter((candidate) => (candidate.state === "LIVE" || candidate.state === "STALE") &&
       acceptedLobbies.has(candidate.lobby)).sort((left, right) =>
+        Number(right.authorityDisposition === "ACTIVE") - Number(left.authorityDisposition === "ACTIVE") ||
         right.lastAcceptedAtMs - left.lastAcceptedAtMs)[0];
     if (source === undefined) throw new Error("SOURCE_NOT_ATTACHED");
 
@@ -61,6 +56,7 @@ interface BridgeSource {
   readonly sourceId: string;
   readonly state: string;
   readonly lastAcceptedAtMs: number;
+  readonly authorityDisposition: "ACTIVE" | "CANDIDATE" | null;
 }
 
 function providerLobbies(provider: RecoverableProvider): readonly string[] {
@@ -74,8 +70,10 @@ function bridgeSources(value: unknown): readonly BridgeSource[] {
   return value.sources.flatMap((source): BridgeSource[] => {
     if (!isObject(source) || typeof source.lobby !== "string" || typeof source.sourceId !== "string" ||
       typeof source.state !== "string" || typeof source.lastAcceptedAtMs !== "number") return [];
+    if (source.authorityDisposition !== undefined && source.authorityDisposition !== "ACTIVE" &&
+      source.authorityDisposition !== "CANDIDATE") return [];
     return [{ lobby: source.lobby, sourceId: source.sourceId, state: source.state,
-      lastAcceptedAtMs: source.lastAcceptedAtMs }];
+      lastAcceptedAtMs: source.lastAcceptedAtMs, authorityDisposition: source.authorityDisposition ?? null }];
   });
 }
 

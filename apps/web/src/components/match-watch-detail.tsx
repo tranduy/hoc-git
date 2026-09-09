@@ -22,13 +22,14 @@ import {
 import { formatDisplayDecimal } from "../catalog/display-format.js";
 import type { ProviderId } from "@tool-chenh/contracts";
 import { ArbitrageAlertToast } from "./arbitrage-alert-toast.js";
-import { buildObservedFixedBaseStakeEstimate,
-  type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
+import { type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
-import type { RankedTicket } from "../watch/ranked-tickets.js";
+import { nextRankingDeadlineMs, rankTicketsForEvent, topRankedTicketItems,
+  type RankedTicket } from "../watch/ranked-tickets.js";
 import { RankedTicketTable, renderableRankedTickets } from "./ranked-ticket-table.js";
 import { ProviderBrand } from "./provider-brand.js";
 import { RoiBadge } from "./roi-badge.js";
+import { formatProfitAmount, roiPercentFromRatio } from "../watch/roi-tone.js";
 import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
 import { sortProviderItems } from "../catalog/provider-order.js";
 import { defaultTicketRealtimeCheckApi, type TicketRealtimeCheckApiLike } from "../api/ticket-realtime-check.js";
@@ -44,32 +45,51 @@ export interface ComparisonBook {
   readonly hasExactEvent: boolean;
 }
 
-function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stakePolicy }: {
+function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stakePolicy, clock }: {
   readonly comparison: ComparisonEvent;
   readonly selectedProviders: ReadonlySet<ProviderId>;
   readonly lagSignals: readonly LagSignal[];
   readonly stakePolicy: FixedBaseStakePolicy;
+  readonly clock: () => number;
 }) {
-  const money = (value: string): string => `${Number(value).toLocaleString("en-US")} VND`;
-  const pairedTickets = comparison.observedRows.flatMap((observedRow) => {
-    const verifiedRow = comparison.rows.find((candidate) => candidate.key === observedRow.key);
-    const displayRow = verifiedRow ?? observedTicketAsComparisonRow(observedRow);
-    const signal = lagSignals.find((candidate) => candidate.row.key === observedRow.key);
-    const plan = signal?.plan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy);
-    if (plan === null || plan.legs.length !== 2 || plan.legs[0]!.provider === plan.legs[1]!.provider ||
-      plan.legs[0]!.selection === plan.legs[1]!.selection) return [];
-    return [{ observedRow, displayRow, signal, plan }];
-  });
+  const [, updateClock] = useState(0);
+  const nowMs = clock();
+  useEffect(() => {
+    const deadlineMs = nextRankingDeadlineMs({ events: [comparison], verified: new Map(), nowMs });
+    if (deadlineMs === null) return;
+    // AP prices remain valid at the deadline itself; wake just after it.
+    const timer = window.setTimeout(() => updateClock(value => value + 1), Math.max(16, deadlineMs + 1 - clock()));
+    return () => window.clearTimeout(timer);
+  }, [clock, comparison, nowMs]);
+  const money = (value: string): string => `${formatProfitAmount(value)} VND`;
+  const event = { ...comparison, rows: comparison.observedRows.map(observedRow =>
+    comparison.rows.find(candidate => candidate.key === observedRow.key) ?? observedTicketAsComparisonRow(observedRow)) };
+  const tickets = rankTicketsForEvent({ event, selectedProviders, observationPolicy: stakePolicy,
+    verified: new Map(), movements: [], nowMs, limit: event.rows.length });
+  const pairedTickets = topRankedTicketItems([{ event, tickets, bestVerifiedProfit: null }], event.rows.length);
   if (pairedTickets.length === 0) return null;
   return <><h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
-    <div className="watch-odds-tickets">{pairedTickets.map(({ observedRow, displayRow, signal, plan }) => {
+    <div className="watch-odds-tickets">{pairedTickets.map(({ ticket }) => {
+    const { row: displayRow, plan } = ticket;
+    const observedRow = displayRow;
+    if (plan === null) return <article className="watch-odds-ticket" key={ticket.key}>
+      <header className="watch-odds-ticket__header"><div><strong>{ticketMarketLabel(displayRow.marketType)}</strong>
+        <small>{displayRow.line === null ? "Không line" : `Kèo ${displayRow.line}`}</small></div></header>
+      <p role="status">{ticket.reason === "APSPORT quote freshness not confirmed"
+        ? "APSPORT: chờ xác nhận giá mới" : "Đã ghép kèo; chờ đủ giá đối ứng để tính tiền"}</p>
+      <div className="watch-odds-grid">{[...new Set(displayRow.cells.map(cell => cell.provider))]
+        .filter(provider => selectedProviders.has(provider)).map(provider => <ProviderBrand compact key={provider} provider={provider} />)}</div>
+    </article>;
+    // A historical signal must never substitute prices for this fresh estimate.
+    const signal = lagSignals.find(candidate => candidate.event.key === comparison.key && candidate.row.key === ticket.key &&
+      candidate.plan.fingerprint === plan.fingerprint && candidate.plan.worstCaseProfit === plan.worstCaseProfit);
     const orderedLegs = sortProviderItems(plan.legs, (leg) => leg.provider);
     return <article className={signal === undefined ? "watch-odds-ticket" : "watch-odds-ticket watch-odds-ticket--profitable"}
       key={observedRow.key}>
       <header className="watch-odds-ticket__header">
         <div><strong>{ticketMarketLabel(observedRow.marketType)}</strong>
           <small>{observedRow.line === null ? "Không line" : `Kèo ${observedRow.line}`}</small></div>
-        <div className="watch-odds-ticket__edge"><RoiBadge roiPercent={Number(plan.roi) * 100} size="sm" />
+        <div className="watch-odds-ticket__edge"><RoiBadge roiPercent={roiPercentFromRatio(plan.roi)} worstCaseProfit={plan.worstCaseProfit} size="sm" />
           <small>{signal === undefined ? "Đang theo dõi" : "Đủ điều kiện · lãi ≥ 20.000 VND"}</small></div>
       </header>
       <div className="watch-odds-grid">{orderedLegs.map((leg) => {
@@ -86,7 +106,7 @@ function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stak
       })}</div>
       <footer className="watch-odds-ticket__plan" aria-label={`Gross preflight ${observedRow.marketType}${observedRow.line === null ? "" : ` line ${observedRow.line}`}`}>
         <><div>{orderedLegs.map((leg) => <span key={leg.selection}><small>#{leg.provider} · {selectionLabel(comparison.event, leg.selection)} @ {formatDisplayDecimal(leg.decimalOdds)}</small>
-          <b>{money(leg.stake)} {leg.role.toLowerCase()}</b></span>)}</div><div className="watch-odds-ticket__result"><strong>Worst {money(plan.worstCaseProfit)}</strong><RoiBadge roiPercent={Number(plan.roi) * 100} size="sm" /></div></>
+          <b>{money(leg.stake)} {leg.role.toLowerCase()}</b></span>)}</div><div className="watch-odds-ticket__result"><strong>Worst {money(plan.worstCaseProfit)}</strong><RoiBadge roiPercent={roiPercentFromRatio(plan.roi)} worstCaseProfit={plan.worstCaseProfit} size="sm" /></div></>
       </footer>
     </article>;
   })}</div></>;
@@ -370,7 +390,7 @@ export function MatchWatchDetail({
         <section className="watch-prices watch-prices--compact-grid" aria-labelledby="current-prices-heading">
           {currentComparison !== undefined && effectiveBooks.some((book) => book.connected && selectedProviders.has(book.provider))
             ? <CompactComparisonGrid comparison={currentComparison} lagSignals={lagSignals}
-              selectedProviders={selectedProviders} stakePolicy={stakePolicy} /> : <><h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
+              selectedProviders={selectedProviders} stakePolicy={stakePolicy} clock={clock} /> : <><h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
             <div className="provider-columns">
             <article className="provider-column">
               <header><strong>{initialCatalog.provider} live feed</strong><span>Read-only</span></header>

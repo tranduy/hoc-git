@@ -30,6 +30,7 @@ interface ProviderPageLeaseCoordinatorOptions {
 }
 
 interface ExactProviderRenewalOptions {
+  readonly canRenew?: (source: RenewableSource) => boolean;
   readonly isAttached: (source: RenewableSource) => boolean;
   readonly get: (tabId: number) => Promise<TabDescriptor>;
   readonly attachBootstrap: (tab: TabDescriptor, lobby: RenewableLobby) => Promise<void>;
@@ -66,7 +67,9 @@ function isPeriodicRenewalLobby(lobby: RenewableLobby): boolean {
   // SBO's persisted 20-minute renewal matched the 2026-09-08 14:44 epoch
   // reset and erased its in-progress More inventory. Observed-failure
   // recovery still reaches renewNow() through isRenewableLobby above.
-  return lobby !== "TSPORT" && lobby !== "KSPORT" && isRenewableLobby(lobby);
+  // BTI's full Early/detail cache also belongs to its live document. A healthy
+  // page must outlive the old 20-minute timer; observed auth failure still renews.
+  return lobby !== "BTI" && lobby !== "TSPORT" && lobby !== "KSPORT" && isRenewableLobby(lobby);
 }
 
 export function parseProviderPageLeaseState(value: unknown): ProviderPageLeaseState | null {
@@ -258,6 +261,7 @@ export async function renewExactProviderTab(
   source: RenewableSource,
   options: ExactProviderRenewalOptions
 ): Promise<void> {
+  if (options.canRenew?.(source) === false) throw new Error("SOURCE_REQUEST_BACKOFF");
   if (!options.isAttached(source)) throw new Error("PROVIDER_SOURCE_NOT_ATTACHED");
   const candidate = await options.get(source.tabId);
   if (candidate.id !== source.tabId || typeof candidate.url !== "string") {
@@ -269,6 +273,7 @@ export async function renewExactProviderTab(
     !trustedProviderOrigin(source.lobby, safeUrl(current.url))) {
     throw new Error("PROVIDER_SOURCE_REPLACED");
   }
+  if (options.canRenew?.(source) === false) throw new Error("SOURCE_REQUEST_BACKOFF");
   options.beginSourceEpoch(source.sourceId);
   // Navigation can create the provider's catalog socket and issue its one
   // complete roster request before tabs.onUpdated reports `complete`. Arm CDP
@@ -276,6 +281,7 @@ export async function renewExactProviderTab(
   // below. Attaching only after waitForReady permanently missed those first
   // frames and left APSPORT with orphan deltas but no authoritative baseline.
   await options.attachBootstrap({ ...current, url: renewalUrl }, source.lobby);
+  if (options.canRenew?.(source) === false) throw new Error("SOURCE_REQUEST_BACKOFF");
   if (!options.isAttached(source)) throw new Error("PROVIDER_SOURCE_REPLACED");
   await options.update(source.tabId, renewalUrl);
   const ready = await options.waitForReady(source.tabId, source.lobby);

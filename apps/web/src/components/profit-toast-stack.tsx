@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { ProfitAlert } from "../watch/profit-alert-tracker.js";
+import { isNotifiableProfit, type ProfitAlert } from "../watch/profit-alert-tracker.js";
 
 interface SoundLike { play(volume?: number): Promise<void> | void }
 
@@ -15,6 +15,7 @@ export function ProfitToastStack({ alerts, sound, enabled = true, volume = 1 }: 
 
   useEffect(() => {
     for (const alert of alerts) {
+      if (!isNotifiableProfit(alert)) continue;
       if (seen.current.has(alert.id)) continue;
       seen.current.add(alert.id);
       if (enabled) void sound.play(volume);

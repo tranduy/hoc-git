@@ -87,15 +87,22 @@ const marketPositions = {
   1: { line: 10, home: 40, away: 41 },
   3: { line: 12, home: 42, away: 43 },
   7: { line: 14, home: 44, away: 45 },
-  8: { line: 16, home: 46, away: 47 }
+  8: { line: 16, home: 46, away: 47 },
+  "MAIN:2": { line: null, home: 48, away: 49 },
+  "FH:2": { line: null, home: 65, away: 66 },
+  5: { line: null, home: 17, away: 18, draw: 19 },
+  "FH:5": { line: null, home: 20, away: 21, draw: 22 }
 } as const;
 
 const deltaCommands = new Map<number, { readonly betType: keyof typeof marketPositions;
-  readonly kind: "LINE" | "ODDS" }>([
+  readonly kind: "LINE" | "ODDS" | "RESULT" } | { readonly kind: "VISIBILITY" }>([
   [28, { betType: 1, kind: "LINE" }], [30, { betType: 1, kind: "ODDS" }],
   [33, { betType: 3, kind: "LINE" }], [35, { betType: 3, kind: "ODDS" }],
   [38, { betType: 7, kind: "LINE" }], [40, { betType: 7, kind: "ODDS" }],
-  [43, { betType: 8, kind: "LINE" }], [45, { betType: 8, kind: "ODDS" }]
+  [43, { betType: 8, kind: "LINE" }], [45, { betType: 8, kind: "ODDS" }],
+  [48, { betType: "MAIN:2", kind: "ODDS" }], [115, { betType: "FH:2", kind: "ODDS" }],
+  [51, { betType: 5, kind: "RESULT" }], [54, { betType: "FH:5", kind: "RESULT" }],
+  [118, { kind: "VISIBILITY" }]
 ]);
 
 export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
@@ -164,9 +171,11 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     const isAtomicFull = providerFunctionCode === 1 && root.dataPresent && root.today !== undefined && root.f !== undefined;
     const observation = isAtomicFull ? boundBaselineObservation(envelope) : null;
     const sameProviderVersion = state.providerVersion !== null && root.t === state.providerVersion;
+    // Incremental responses can advance the cursor beyond the last full. A new
+    // complete receipt at that cursor still renews its bound baseline evidence.
     const renewsSameProviderVersion = root.a && sameProviderVersion && !state.gap && state.rows !== null &&
       state.generation !== null && observation !== null &&
-      state.baselineObservation?.providerVersion === root.t &&
+      state.baselineObservation !== null &&
       state.baselineObservation.requestDocumentKey === observation.requestDocumentKey &&
       state.baselineObservation.observerSessionId === observation.observerSessionId &&
       observation.observerRequestOrdinal > state.baselineObservation.observerRequestOrdinal;
@@ -293,7 +302,7 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
       if (state.rows === null || state.generation === null) return this.#ignore("no-baseline-retained");
       const nextRows = new Map(state.rows);
       let changed = false;
-      for (const delta of root.data) {
+      for (const delta of root.data.flatMap(expandPackedPriceUpdate)) {
         const outcome = applyDelta(nextRows, delta, envelope);
         if (outcome === "INVALID") return this.#ignore(`delta-invalid-of-${root.data.length}`);
         changed = outcome === "APPLIED" || changed;
@@ -520,10 +529,23 @@ function isKnownMetadataRow(value: readonly unknown[]): boolean {
   return true;
 }
 
+/** Public ProcessUpdateHdpOUOEOdds command 116 packs FT/FH handicap,
+ * FT/FH total, then FT/FH Odd/Even pairs in positions 3 through 14. */
+function expandPackedPriceUpdate(delta: readonly unknown[]): unknown[][] {
+  // Public native handlers 117 and 57 carry H/A/D, not H/D/A.
+  if (delta[1] === 1 && delta[2] === 117) return [
+    [delta[0], 1, 51, delta[3], delta[4], delta[5]], [delta[0], 1, 54, delta[6], delta[7], delta[8]]
+  ];
+  if (delta[1] === 1 && delta[2] === 57) return [[delta[0], 1, 54, delta[7], delta[8], delta[9]]];
+  if (delta[1] !== 1 || delta[2] !== 116) return [[...delta]];
+  return [30, 40, 35, 45, 48, 115].map((command, index) =>
+    [delta[0], 1, command, delta[3 + index * 2], delta[4 + index * 2]]);
+}
+
 function retainPendingDeltaData(data: readonly unknown[][]): readonly unknown[][] | null {
   if (data.length > MAX_PRE_BASELINE_OPERATIONS) return null;
   const retained: unknown[][] = [];
-  for (const delta of data) {
+  for (const delta of data.flatMap(expandPackedPriceUpdate)) {
     if (delta.length < 4 || delta[1] !== 1 || typeof delta[2] !== "number") return null;
     const eventId = providerId(delta[0]);
     const command = deltaCommands.get(delta[2]);
@@ -531,9 +553,15 @@ function retainPendingDeltaData(data: readonly unknown[][]): readonly unknown[][
     // An operation this source cannot characterize is held back on its own;
     // dropping the batch around it loses the ones it can.
     if (command === undefined) continue;
-    if (command.kind === "LINE") {
+    if (command.kind === "VISIBILITY") {
+      if (delta.length < 6 || !delta.slice(3, 6).every(nativeHideFlag)) return null;
+      retained.push([eventId, 1, delta[2], ...delta.slice(3, 6)]);
+    } else if (command.kind === "LINE") {
       if (finiteLine(delta[3]) === null && !closedMarketValue(delta[3])) return null;
       retained.push([eventId, 1, delta[2], delta[3]]);
+    } else if (command.kind === "RESULT") {
+      if (delta.length < 6 || delta.slice(3, 6).some(value => finiteResultOdd(value) === null && !closedMarketValue(value))) return null;
+      retained.push([eventId, 1, delta[2], ...delta.slice(3, 6)]);
     } else {
       const usable = (value: unknown): boolean => finiteOdd(value) !== null || closedMarketValue(value);
       if (delta.length < 5 || !usable(delta[3]) || !usable(delta[4])) return null;
@@ -586,11 +614,34 @@ function finiteOdd(value: unknown): string | null {
   return Number.isFinite(number) && number !== 0 && Math.abs(number) <= 1 ? String(number) : null;
 }
 
+function finiteResultOdd(value: unknown): string | null {
+  if ((typeof value !== "number" && typeof value !== "string") || value === "") return null;
+  const price = Number(value);
+  return Number.isFinite(price) && price > 1 ? String(price) : null;
+}
+
 function finiteLine(value: unknown): string | null {
   if ((typeof value !== "number" && typeof value !== "string") || value === "") return null;
   const parts = String(value).split("/").map(Number);
   if (parts.length > 2 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 100)) return null;
   return String(parts.reduce((sum, part) => sum + part, 0) / parts.length);
+}
+
+function mainGroupBlockReason(row: readonly unknown[], nativeType: string): CmdCatalogInputRecord["groups"][number]["normalizationBlockReason"] {
+  if (nativeType === "5" || nativeType === "FH:5") {
+    // DataFormat.IsX12InetHide is the actual result display gate. ForMMR is
+    // an odds-mode selector, and MatchStatus is VAR/injury commentary.
+    if (row[55] === true || row[55] === 1) return "NATIVE_MARKET_HIDDEN";
+    if (row[55] !== false && row[55] !== 0) return "NATIVE_MARKET_PERMISSION_UNPROVEN";
+  } else if (nativeType !== "DOUBLE_CHANCE" && (row[79] === 1 || row[79] === true)) {
+    // The native converter skips normal Malay conversion for MR line odds.
+    return "NATIVE_MR_ODDS_UNPROVEN";
+  }
+  return undefined;
+}
+
+function nativeHideFlag(value: unknown): boolean {
+  return value === 0 || value === 1 || typeof value === "boolean";
 }
 
 function decodeRecord(row: readonly unknown[]): CmdCatalogInputRecord | null {
@@ -603,7 +654,6 @@ function decodeRecord(row: readonly unknown[]): CmdCatalogInputRecord | null {
   const date = publicText(row[56], 16);
   if (eventId === null || leagueId === null || leagueName === null || home === null || away === null ||
     clock === null || date === null) return null;
-  const suspended = row[79] === 1 || row[79] === true;
   const groups: CmdCatalogInputRecord["groups"][number][] = [];
   for (const betType of [1, 3, 7, 8] as const) {
     const positions = marketPositions[betType];
@@ -623,9 +673,35 @@ function decodeRecord(row: readonly unknown[]): CmdCatalogInputRecord | null {
     // 87 against 74.
     const owner = betType === 7 ? row[64] : row[24];
     const lineOwner = owner === 1 || owner === true ? 0 : 1;
-    groups.push({ betTypeIds: [String(betType)], labels: [line], odds: [first, second].map((price, index) => ({
-      marketOddsId: marketId, priceText: price, status: null, greyedOut: suspended ? "true" : null,
+    groups.push({ betTypeIds: [String(betType)], labels: [line], normalizationBlockReason: mainGroupBlockReason(row, String(betType)),
+      odds: [first, second].map((price, index) => ({
+      marketOddsId: marketId, priceText: price, status: null, greyedOut: null,
       ...(handicap && index === lineOwner ? { lineText: String(row[positions.line]) } : {})
+    })) });
+  }
+  for (const betType of ["MAIN:2", "FH:2"] as const) {
+    const positions = marketPositions[betType];
+    const prices = [finiteOdd(row[positions.home]), finiteOdd(row[positions.away])];
+    if (prices.some((price) => price === null)) continue;
+    groups.push({ betTypeIds: [betType], labels: ["ODD", "EVEN"], normalizationBlockReason: mainGroupBlockReason(row, betType), odds: prices.map((price) => ({
+      marketOddsId: `${eventId}:native:${betType}`, priceText: price!, status: null,
+      greyedOut: null
+    })) });
+  }
+  // Public DataFormat gives the slot meanings, and GetX12OddsFormat renders
+  // decimal directly through GetOddsFormat2 independently of the Malay setting.
+  for (const betType of [5, "FH:5"] as const) {
+    const positions = marketPositions[betType];
+    const valid = [positions.home, positions.draw, positions.away].flatMap((position, index) => {
+      const price = finiteResultOdd(row[position]);
+      return price === null ? [] : [{ price, outcome: ["HOME", "DRAW", "AWAY"][index]! }];
+    });
+    if (valid.length === 0) continue;
+    const normalizationBlockReason = mainGroupBlockReason(row, String(betType));
+    groups.push({ betTypeIds: [String(betType)], labels: valid.map(value => value.outcome), normalizationBlockReason,
+      odds: valid.map(({ price }) => ({
+      marketOddsId: `${eventId}:native:${betType}`, priceText: price, priceFormat: "DECIMAL",
+      status: normalizationBlockReason === undefined ? "OPEN" : null, greyedOut: null
     })) });
   }
   const live = row[25] === 1 || row[25] === true || /(?:^|\s)\dH(?:\s|\d|$)|LIVE/iu.test(clock);
@@ -648,8 +724,25 @@ function applyDelta(rows: Map<string, RetainedRow>, delta: readonly unknown[],
   const retained = rows.get(eventId);
   if (retained === undefined) return "IGNORED";
   const next = [...retained.row];
+  if (command.kind === "VISIBILITY") {
+    if (delta.length < 6 || !delta.slice(3, 6).every(nativeHideFlag)) return "INVALID";
+    // Native ProcessUpdateHideStatus (118), including buffered receipts.
+    next[50] = delta[3]; next[55] = delta[4]; next[54] = delta[5];
+    rows.set(eventId, { row: next, observedAtMs: envelope.observedAtMs,
+      receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
+    return "APPLIED";
+  }
   const positions = marketPositions[command.betType];
+  if (command.kind === "RESULT") {
+    if (!("draw" in positions) || delta.length < 6 ||
+      delta.slice(3, 6).some(value => finiteResultOdd(value) === null && !closedMarketValue(value))) return "INVALID";
+    next[positions.home] = delta[3]; next[positions.away] = delta[4]; next[positions.draw] = delta[5];
+    rows.set(eventId, { row: next, observedAtMs: envelope.observedAtMs,
+      receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
+    return "APPLIED";
+  }
   if (command.kind === "LINE") {
+    if (positions.line === null) return "INVALID";
     if (finiteLine(delta[3]) === null && !closedMarketValue(delta[3])) return "INVALID";
     next[positions.line] = delta[3];
   } else {
@@ -746,7 +839,7 @@ function nativeMainGroups(row: readonly unknown[], record: CmdCatalogInputRecord
     const position = marketPositions[betType];
     if ([position.line, position.home, position.away].every(index => row[index] === null || row[index] === undefined)) continue;
     const decoded = record.groups.find(group => group.betTypeIds[0] === String(betType));
-    groups.push(decoded ?? { betTypeIds: [String(betType)], labels: [text(row[position.line])],
+    groups.push(decoded ?? { betTypeIds: [String(betType)], labels: [text(row[position.line])], normalizationBlockReason: mainGroupBlockReason(row, String(betType)),
       odds: [position.home, position.away].map(index => ({ marketOddsId: `${record.matchId}:${betType}`,
         priceText: text(row[index]), status: null, greyedOut: null })) });
   }
@@ -758,8 +851,13 @@ function nativeMainGroups(row: readonly unknown[], record: CmdCatalogInputRecord
     ["DOUBLE_CHANCE", [84, 85, 86], ["1X", "12", "X2"]]
   ] as const) {
     if (positions.every(index => row[index] === null || row[index] === undefined)) continue;
-    groups.push({ betTypeIds: [nativeType], labels, odds: positions.map(index => ({
-      marketOddsId: `${record.matchId}:native:${nativeType}`, priceText: text(row[index]), status: null, greyedOut: null })) });
+    const normalizationBlockReason = mainGroupBlockReason(row, nativeType);
+    const result = nativeType === "5" || nativeType === "FH:5";
+    groups.push({ betTypeIds: [nativeType], labels, normalizationBlockReason, odds: positions.map(index => ({
+      marketOddsId: `${record.matchId}:native:${nativeType}`, priceText: text(row[index]),
+      status: result && normalizationBlockReason === undefined ? finiteResultOdd(row[index]) !== null ? "OPEN"
+        : closedMarketValue(row[index]) || row[index] === 0 ? "CLOSED" : null : null, greyedOut: null,
+      ...(nativeType === "5" || nativeType === "FH:5" ? { priceFormat: "DECIMAL" as const } : {}) })) });
   }
   return groups;
 }

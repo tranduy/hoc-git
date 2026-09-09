@@ -14,6 +14,34 @@ function proof(cursor: bigint): CatalogCommitProof {
 }
 
 describe("ChromeBridgeControlPlane", () => {
+  it("rejects a faulted body only to its exact current active or candidate epoch", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const socket = { send: vi.fn(), readyState: 1 };
+    const identity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(identity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(identity, first, "SABA", socket);
+    const fault = { sourceId: identity.sourceId, sourceEpoch: identity.sourceEpoch, sequence: 7 };
+    const fullEnvelope = { ...fault, kind: "NETWORK", payload: { encoding: "UTF8", body: "private native body" } };
+    expect(plane.rejectNetworkBody(fullEnvelope)).toBe(1);
+    expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ version: 1, kind: "REJECT", ...fault,
+      reason: "NETWORK_BODY_UNAVAILABLE" }));
+    coordinator.promote(first.token, proof(1n));
+    expect(plane.rejectNetworkBody(fault)).toBe(1);
+    const replacement = { ...identity, sourceEpoch: "observer-a:1" };
+    const next = coordinator.observe(replacement, "CANDIDATE_DATA");
+    if (next.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(replacement, next, "SABA", socket);
+    coordinator.promote(next.token, proof(2n));
+    socket.send.mockClear();
+    expect(plane.rejectNetworkBody(fault)).toBe(0);
+    expect(plane.rejectNetworkBody({ ...fault, sourceId: "chrome:SABA:999" })).toBe(0);
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(plane.rejectNetworkBody({ ...fault, sourceEpoch: replacement.sourceEpoch })).toBe(1);
+  });
+
   it("sends the configured prematch window only to APSPORT snapshot requests", () => {
     const plane = new ChromeBridgeControlPlane({ apsportPrematchWindowHours: 24 });
     const apsportSocket = { send: vi.fn(), readyState: 1 };

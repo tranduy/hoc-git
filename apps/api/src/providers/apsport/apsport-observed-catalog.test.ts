@@ -24,7 +24,8 @@ describe("APSPORT observed catalog", () => {
     });
 
     const catalog = await reader.read("apsport-account");
-    expect(catalog).toMatchObject({ provider: "APSPORT", category: "FOOTBALL", rejectedMarketCount: 0 });
+    expect(catalog).toMatchObject({ provider: "APSPORT", category: "FOOTBALL", rejectedMarketCount: 0,
+      observedAtMs: 2_000, observedMonotonicMs: 100 });
     expect(catalog.events[0]).toMatchObject({ participantA: "Bodo Glimt", participantB: "St Gilloise", isLive: true });
     expect(catalog.markets[0]).toMatchObject({
       provider: "APSPORT", marketType: "FT_AH", line: "-0.5",

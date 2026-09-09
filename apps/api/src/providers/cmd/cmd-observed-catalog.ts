@@ -21,6 +21,8 @@ export interface ObservedProviderCatalog {
   readonly category: "FOOTBALL" | "LOL";
   readonly comparisonState: "AWAITING_SECOND_PROVIDER";
   readonly observedAtMs: number;
+  /** Receipt-clock anchor paired with observedAtMs; retained quotes keep their own clocks. */
+  readonly observedMonotonicMs?: number;
   readonly rejectedMarketCount: number;
   readonly nativeMarketObservations?: readonly NativeMarketObservation[];
   readonly events: readonly ProviderEvent[];

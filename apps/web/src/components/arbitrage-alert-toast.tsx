@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { WatchArbitrageAlert } from "../watch/arbitrage-alert.js";
 import { formatDisplayDecimal } from "../catalog/display-format.js";
 import { RoiBadge } from "./roi-badge.js";
+import { formatProfitAmount, roiPercentFromRatio } from "../watch/roi-tone.js";
 
 function money(value: string, currency: string): string {
-  return `${Number(value).toLocaleString("en-US")} ${currency}`;
+  return `${formatProfitAmount(value)} ${currency}`;
 }
 
 export function ArbitrageAlertToast({
@@ -40,7 +41,7 @@ export function ArbitrageAlertToast({
       <b>{leg.role}</b> · <b>#{leg.provider}</b> · {leg.selection} · odds {formatDisplayDecimal(leg.decimalOdds)} · stake {money(leg.stake, visibleAlert.currency)}
       <span> · Profit {money(leg.profit, visibleAlert.currency)}</span>
     </li>)}</ol>
-    <div className="arbitrage-toast__result"><b>Total stake {money(visibleAlert.totalStake, visibleAlert.currency)}</b> · Worst-case profit {money(visibleAlert.worstCaseProfit, visibleAlert.currency)} <RoiBadge roiPercent={Number(visibleAlert.roi) * 100} size="sm" /></div>
+    <div className="arbitrage-toast__result"><b>Total stake {money(visibleAlert.totalStake, visibleAlert.currency)}</b> · Worst-case profit {money(visibleAlert.worstCaseProfit, visibleAlert.currency)} <RoiBadge roiPercent={roiPercentFromRatio(visibleAlert.roi)} worstCaseProfit={visibleAlert.worstCaseProfit} size="sm" /></div>
     <small>Provider preflight is required before placement.</small>
   </aside>;
 }

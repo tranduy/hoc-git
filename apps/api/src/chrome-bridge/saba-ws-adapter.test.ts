@@ -656,7 +656,7 @@ describe("SabaWsCatalogAdapter", () => {
     expect(refreshed[0]).not.toHaveProperty("authoritativeBaseline");
   });
 
-  it("lets two stable full-page DOM generations supersede a small socket partition", () => {
+  it("keeps a proven socket partition when stable visible DOM adds a different subset", () => {
     const rows = [["f", 0, fields], [0, "reset"],
       encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
       encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
@@ -686,8 +686,17 @@ describe("SabaWsCatalogAdapter", () => {
       provenance: "DOM_FALLBACK", evidenceMode: "DELTA"
     })]);
     expect(adapter.decode(dom(6))).toEqual([expect.objectContaining({
-      provenance: "DOM_FALLBACK", evidenceMode: "BASELINE", authoritativeBaseline: true
+      provenance: "DOM_FALLBACK", evidenceMode: "DELTA"
     })]);
+    const thirdDom = adapter.decode(dom(7))[0]!;
+    expect(thirdDom).not.toHaveProperty("authoritativeBaseline");
+    const catalog = thirdDom.value as { events: Array<{ providerEventId: string }>;
+      quotes: Array<{ providerEventId: string; receivedMonotonicMs: number; sequence: number }> };
+    expect(catalog.events).toHaveLength(21);
+    expect(catalog.events).toContainEqual(expect.objectContaining({ providerEventId: "2" }));
+    expect(catalog.quotes.filter(quote => quote.providerEventId === "2"))
+      .toEqual([expect.objectContaining({ receivedMonotonicMs: 50, sequence: 4 }),
+        expect.objectContaining({ receivedMonotonicMs: 50, sequence: 4 })]);
   });
 
   it("retires hidden socket partitions older than SABA's maximum baseline age", () => {

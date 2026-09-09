@@ -1,8 +1,10 @@
 // Reuse IM's signed GetSE/GetEBI lane. The epoch is supplied by the
 // observer and includes source, bridge and document identity.
-export function buildImCatalogRefreshExpression(generation: string): string {
+export function buildImCatalogRefreshExpression(generation: string,
+  options: { readonly allowDetails?: boolean } = {}): string {
   return `(async () => {
     const generation = ${JSON.stringify(generation)};
+    const allowDetails = ${JSON.stringify(options.allowDetails !== false)};
     const root = document.documentElement;
     const startedAt = Date.now();
     // Origin-scoped diagnostic pause leaves the provider's own requests and
@@ -66,7 +68,7 @@ export function buildImCatalogRefreshExpression(generation: string): string {
         for (const controller of manager.state.controllers) controller.abort();
         for (const resolve of manager.state.waiters) resolve();
       }
-      manager.state = { generation, retired: false, controllers: new Set(), owners: new Map(),
+      manager.state = { generation, allowDetails, retired: false, controllers: new Set(), owners: new Map(),
         catalogs: [], mainOperation: null, waiters: new Set(), leaseUntil: 0, rosterAtMs: 0,
         rosterFailures: 0, detailFailures: 0, rosterVersion: 0, publishedRosterVersion: 0,
         retryAfterMs: 0, lastFailure: null, pump: null };
@@ -80,12 +82,20 @@ export function buildImCatalogRefreshExpression(generation: string): string {
       }
       return true;
     };
-    const recordFailure = (path, status, nativeStatusCode, errorCategory) => {
-      if (!current() || errorCategory === 'RATE_LIMITED') return;
+    const recordFailure = (path, status, nativeStatusCode, errorCategory, retryAfterMs = 0, failureStage = null,
+      elapsedMs = null, headAtMs = null) => {
+      if ((!current() && allowDetails) || errorCategory === 'RATE_LIMITED') return;
       if (status === 429 || nativeStatusCode !== null && nativeStatusCode !== 100) {
         state.retryAfterMs = Math.max(state.retryAfterMs || 0, Date.now() + 30_000);
       }
-      state.lastFailure = { path, status, nativeStatusCode, errorCategory, observedAtMs: Date.now() };
+      state.lastFailure = { path, status, nativeStatusCode, errorCategory, observedAtMs: Date.now(),
+        ...(!allowDetails ? { retryAfterMs, failureStage, elapsedMs, headAtMs } : {}) };
+      if (!allowDetails) {
+        (state.safeFailures || (state.safeFailures = [])).push(state.lastFailure);
+        // The safe wrapper's lexical observer persists a failure before a peer
+        // finishes, including when this document is subsequently destroyed.
+        if (typeof fieldlineImSafeRecordFailure === 'function') fieldlineImSafeRecordFailure(state.lastFailure);
+      }
     };
     const rateLimited = () => Date.now() < (state.retryAfterMs || 0);
     const sign = (path, mode) => new Promise((resolve, reject) => {
@@ -109,8 +119,18 @@ export function buildImCatalogRefreshExpression(generation: string): string {
     const request = async (path, body) => {
       const controller = new AbortController();
       state.controllers.add(controller);
-      const timer = setTimeout(() => controller.abort(), 8000);
-      let status = null, nativeStatusCode = null, errorCategory = 'SIGNATURE';
+      // Live GetSE responses can take nearly eight seconds before body transfer
+      // completes. The roster-only lane remains inside the observer's 20s budget.
+      let status = null, nativeStatusCode = null, errorCategory = 'SIGNATURE', retryAfterMs = 0;
+      let timeoutStage = null;
+      // A deadline says only that the request did not finish. Recording when the
+      // response head arrived separates a provider that never answered from one
+      // whose body was merely slow, which is the difference between backing off
+      // and asking for less at a time.
+      const requestStartedAtMs = Date.now();
+      let respondedAtMs = null;
+      const requestStage = () => ['SIGNATURE', 'NETWORK', 'BODY_READ'].includes(errorCategory) ? errorCategory : null;
+      const timer = setTimeout(() => { timeoutStage = requestStage(); controller.abort(); }, allowDetails ? 8000 : 15000);
       try {
         // Public main-9992f20.js w() (121671/125309) reads session storage
         // per request and signs authenticated catalog paths with mode2. Its
@@ -136,15 +156,26 @@ export function buildImCatalogRefreshExpression(generation: string): string {
             'x-sc': encodeURI(signature), 'x-v': '91938',
             'x-platform': String(window.global?.PlatForm || ''), ['x-' + 'token']: token, ...nativeHeaders },
           body: JSON.stringify(body) });
+        respondedAtMs = Date.now();
         status = Number.isInteger(response.status) ? response.status : null;
+        if (!allowDetails) {
+          const retryAfter = response.headers?.get?.('retry-after');
+          if (retryAfter) {
+            const seconds = Number(retryAfter);
+            const until = Number.isFinite(seconds) ? Date.now() + Math.max(0, seconds) * 1000 : Date.parse(retryAfter);
+            if (Number.isFinite(until)) retryAfterMs = until;
+          }
+        }
         if (status === 429 && current()) state.retryAfterMs = Math.max(state.retryAfterMs || 0, Date.now() + 30_000);
         errorCategory = 'BODY_READ';
         const text = await response.text();
         const observedAtMs = Date.now();
-        if (!current() || controller.signal.aborted) throw new Error('retired');
         errorCategory = 'INVALID_JSON';
         const parsed = JSON.parse(text);
         nativeStatusCode = Number.isSafeInteger(parsed?.StatusCode) ? parsed.StatusCode : null;
+        // Retired responses cannot publish, but a received native denial must
+        // still reach the safe wrapper's persistent breaker.
+        if (!current() || controller.signal.aborted) throw new Error('retired');
         if (response.ok === false || status !== null && status !== 200) {
           errorCategory = 'HTTP_STATUS'; throw new Error('native-failure');
         }
@@ -152,7 +183,10 @@ export function buildImCatalogRefreshExpression(generation: string): string {
         return { parsed, observedAtMs, status };
       } catch (error) {
         recordFailure(path, status, nativeStatusCode, controller.signal.aborted ? 'REQUEST_TIMEOUT'
-          : status !== null && status !== 200 ? 'HTTP_STATUS' : errorCategory);
+          : status !== null && status !== 200 ? 'HTTP_STATUS' : errorCategory, retryAfterMs,
+          controller.signal.aborted ? timeoutStage : requestStage(),
+          Date.now() - requestStartedAtMs,
+          respondedAtMs === null ? null : respondedAtMs - requestStartedAtMs);
         throw error;
       } finally { clearTimeout(timer); state.controllers.delete(controller); }
     };
@@ -188,6 +222,7 @@ export function buildImCatalogRefreshExpression(generation: string): string {
         .sort((a, b) => a.lastAttemptAtMs - b.lastAttemptAtMs);
     };
     state.pump = () => {
+      if (!allowDetails) { notify(); return; }
       if (!current() || rateLimited() || Date.now() > state.leaseUntil) { notify(); return; }
       while (manager.physical.size < 2) {
         const batch = eligible().slice(0, 1);
@@ -228,8 +263,16 @@ export function buildImCatalogRefreshExpression(generation: string): string {
     state.pump();
     if (rateLimited()) return backoffResult();
     if (!state.mainOperation) {
-      const operation = Promise.all([1, 2].map(async (Market) => ({ market: Market,
-        ...await request('/api/EventV6/GetSE', { ...common, Market }) }))).then((catalogs) => {
+      if (!allowDetails) { state.safeFailures = []; state.lastFailure = null; }
+      const pair = [1, 2].map(async (Market) => ({ market: Market,
+        ...await request('/api/EventV6/GetSE', { ...common, Market }) }));
+      // The safe caller holds an origin lock until both physical requests settle.
+      const paired = allowDetails ? Promise.all(pair) : Promise.allSettled(pair).then(results => {
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) throw failed.reason;
+        return results.map(result => result.value);
+      });
+      const operation = paired.then((catalogs) => {
         if (!current()) throw new Error('retired');
         const invalid = catalogs.find(c => !Array.isArray(c.parsed.sel) || !c.parsed.sel.every(validEvent));
         if (invalid) {
@@ -262,11 +305,12 @@ export function buildImCatalogRefreshExpression(generation: string): string {
     const budget = new Promise(resolve => { budgetTimer = setTimeout(resolve, 8000); });
     const settled = (async () => {
       await state.mainOperation;
-      while (current() && !rateLimited() && Date.now() <= state.leaseUntil && (activeOwners().size > 0 || eligible().length > 0)) {
+      while (allowDetails && current() && !rateLimited() && Date.now() <= state.leaseUntil && (activeOwners().size > 0 || eligible().length > 0)) {
         await new Promise(resolve => state.waiters.add(resolve));
       }
     })();
-    await Promise.race([settled, budget]); clearTimeout(budgetTimer);
+    if (allowDetails) await Promise.race([settled, budget]); else await settled;
+    clearTimeout(budgetTimer);
     if (!current()) return { status: 'retired', responses: [] };
     if (rateLimited()) return backoffResult();
     if (state.rosterVersion <= state.publishedRosterVersion) {
@@ -275,8 +319,12 @@ export function buildImCatalogRefreshExpression(generation: string): string {
     state.publishedRosterVersion = state.rosterVersion;
     const compactMarket = (market) => market && typeof market === 'object' ? {
       mi: market.mi, bti: market.bti, gp: market.gp, fieldlineObservedAtMs: market.fieldlineObservedAtMs,
+      il: typeof market.il === 'boolean' ? market.il : market.il === undefined ? undefined : null,
       ws: Array.isArray(market.ws) ? market.ws.map(item => ({ wsi: item?.wsi, si: item?.si,
-        hdp: item?.hdp, dih: item?.dih, o: item?.o })) : market.ws } : market;
+        hdp: item?.hdp, dih: item?.dih, o: item?.o,
+        // Keep an invalid explicit type distinct from missing legacy metadata.
+        ot: Number.isSafeInteger(item?.ot) ? item.ot : item?.ot === undefined ? undefined : null,
+        s: typeof item?.s === 'string' && item.s.length <= 512 ? item.s : undefined })) : market.ws } : market;
     const responses = state.catalogs.map(catalog => ({ market: catalog.market,
       body: JSON.stringify({ StatusCode: catalog.parsed.StatusCode, sel: catalog.parsed.sel.map(event => {
         const merged = new Map(); const unkeyed = [];

@@ -232,6 +232,49 @@ function observedIdentity(pid, parentPid) {
     commandLine: `"${process.execPath}" "entry-${pid}.mjs"`, birthMarker: `birth-${pid}` };
 }
 
+test("compiled dashboard mode requires its artifact and launches the preview under supervision", async () => {
+  for (const built of [false, true]) {
+    const api = new FastChild(951, true);
+    const web = new FastChild(952, false);
+    const pendingChildren = [api, web];
+    const starts = [];
+    const checkedPaths = [];
+    const timer = { unref: () => undefined };
+    const operation = startLiveStack({
+      repositoryRoot: "C:\\exact-worktree",
+      environment: { CHROME_BRIDGE_KEY: "bridge-key", FIELDLINE_WEB_MODE: "preview" },
+      dependencies: {
+        cleanupStaleStack: async () => undefined,
+        existsSync: (path) => { checkedPaths.push(path); return !path.endsWith(".env") &&
+          (built || !path.endsWith("index.html")); },
+        readFile: async () => { throw new Error("absent"); },
+        resolveLocalAppData: () => "C:\\local-app-data",
+        enforceToolResourceRetention: async () => ({ removedFiles: 0, reclaimedBytes: 0 }),
+        computeBuildIdentity: async () => `sha256:${"a".repeat(64)}`,
+        spawn: (command, args, options) => { starts.push({ args, env: options.env }); return pendingChildren.shift(); },
+        inspectProcessIdentity: async (pid) => observedIdentity(pid, pid === process.pid ? 1 : process.pid),
+        createManagedStackState: (state) => ({ version: 2, ...state }),
+        writeStackState: async () => undefined,
+        waitForFixtureStack: async () => undefined,
+        setInterval: () => timer, clearInterval: () => undefined,
+        registerSignal: () => undefined,
+        stdout: { write: () => undefined }, stderr: { write: () => undefined }, setExitCode: () => undefined
+      }
+    });
+    if (!built) {
+      await assert.rejects(operation, /Missing built entrypoint: .*index.html/u);
+      assert.equal(starts.length, 0);
+    } else {
+      await operation;
+      assert.equal(starts.length, 2);
+      assert.equal(starts[1].args[1], "preview");
+      assert.equal(starts[1].env.NODE_ENV, "production");
+      assert.equal(starts[0].env.NODE_ENV, "development");
+    }
+    assert.equal(checkedPaths.some(path => path.endsWith("index.html")), true);
+  }
+});
+
 test("managed start leaves another checkout-profile browser untouched", async () => {
   const api = new FastChild(751, true);
   const web = new FastChild(752, false);

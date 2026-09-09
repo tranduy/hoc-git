@@ -51,6 +51,14 @@ function detailEnvelope(sequence: number, groups: NativeGroups, requestStartSequ
       observedAtMs: receipt.observedAtMs, marketContainerComplete: true, event: event(groups) }) } };
 }
 
+function emptyEarlyEnvelope(sequence: number, sourceEpoch = "observer-sbo:1"): ChromeBridgeEnvelope {
+  const receipt = base(sequence, sourceEpoch);
+  return { ...receipt, transport: "HTTP_RESPONSE", request: { ...httpRequest(sequence), hostname: "be.sb21.net",
+    streamId: `sbobet-early:8:${sequence}`, reconcileCutoffSequence: sequence - 1 },
+  payload: { encoding: "UTF8", body: JSON.stringify({ kind: "SBOBET_EARLY_CATALOG", generation: sourceEpoch,
+    requestStartSequence: sequence - 1, observedAtMs: receipt.observedAtMs, rosterComplete: true, body: [] }) } };
+}
+
 function socketEnvelope(sequence: number, groups: NativeGroups, sourceEpoch = "observer-sbo:1",
   receiptSequence = sequence): ChromeBridgeEnvelope {
   const message = "MESSAGE\ndestination:/topic/sports/1_1/today/ma/event/vi\n" +
@@ -78,9 +86,10 @@ function harness() {
   const ingest = (envelope: ChromeBridgeEnvelope, connectionGeneration = 1) =>
     plane.ingest(ChromeBridgeEnvelopeSchema.parse(envelope), { connectionGeneration });
   const seed = () => {
-    expect(ingest(mainEnvelope(1, "live", null))).toBe(false);
+    expect(ingest(mainEnvelope(0, "live", null))).toBe(false);
     expect(revisions.get(ACCOUNT_ID)).toBeUndefined();
-    expect(ingest(mainEnvelope(2, "today", { "3": [goal()] }))).toBe(true);
+    expect(ingest(mainEnvelope(1, "today", { "3": [goal()] }))).toBe(false);
+    expect(ingest(emptyEarlyEnvelope(2))).toBe(true);
   };
   return { plane, revisions, notifications, rejected, ingest, seed };
 }
@@ -146,8 +155,9 @@ describe("SBOBET hidden markets through the catalog data plane and revision stor
   it.each(["live", "today"] as const)("publishes a complete native-only %s main pair without inventing comparable prices", (partition) => {
     const { revisions, ingest } = harness();
     const groups = { "777": ["0.91*777h -0.97*777a 77777"] };
-    expect(ingest(mainEnvelope(1, "live", partition === "live" ? groups : null))).toBe(false);
-    expect(ingest(mainEnvelope(2, "today", partition === "today" ? groups : null))).toBe(true);
+    expect(ingest(mainEnvelope(0, "live", partition === "live" ? groups : null))).toBe(false);
+    expect(ingest(mainEnvelope(1, "today", partition === "today" ? groups : null))).toBe(false);
+    expect(ingest(emptyEarlyEnvelope(2))).toBe(true);
 
     expect(revisions.get(ACCOUNT_ID)?.catalog).toMatchObject({ markets: [], quotes: [],
       nativeMarketObservations: [expect.objectContaining({ nativeType: "777", disposition: "UNMAPPED" })] });
@@ -175,8 +185,9 @@ describe("SBOBET hidden markets through the catalog data plane and revision stor
 
   it("publishes native-only socket observations and inventory changes after a complete HTTP baseline", () => {
     const { revisions, notifications, ingest } = harness();
-    expect(ingest(mainEnvelope(1, "live", null))).toBe(false);
-    expect(ingest(mainEnvelope(2, "today", { "777": [goal()] }))).toBe(true);
+    expect(ingest(mainEnvelope(0, "live", null))).toBe(false);
+    expect(ingest(mainEnvelope(1, "today", { "777": [goal()] }))).toBe(false);
+    expect(ingest(emptyEarlyEnvelope(2))).toBe(true);
     const before = revisions.get(ACCOUNT_ID)!;
 
     expect(ingest(socketEnvelope(3, { "777": [goal("0.75")] }))).toBe(true);
@@ -184,14 +195,15 @@ describe("SBOBET hidden markets through the catalog data plane and revision stor
     expect(changed.catalog).toMatchObject({ markets: [], quotes: [], nativeMarketObservations: [
       expect.objectContaining({ nativeType: "777", disposition: "UNMAPPED", observedAtMs: OBSERVED_AT + 300 })
     ] });
-    // Unknown native rows have inventory identity, not a canonical price.
-    // Their observation clock can advance without a semantic price revision.
-    expect(changed.revision).toBe(before.revision);
-    expect(notifications).toHaveLength(1);
+    // Native prices are now retained as evidence even while their contract is
+    // unmapped, so changing a raw price changes inventory content and revision.
+    expect(changed.revision).not.toBe(before.revision);
+    expect(changed.catalog.nativeMarketObservations?.[0]?.nativeSelections?.[0]?.price).toBe("0.75");
+    expect(notifications).toHaveLength(2);
     expect(ingest(socketEnvelope(4, { "777": [goal("0.75"), goal("0.65")] }))).toBe(true);
     expect(revisions.get(ACCOUNT_ID)?.catalog.nativeMarketObservations).toHaveLength(2);
     expect(revisions.get(ACCOUNT_ID)?.revision).not.toBe(before.revision);
-    expect(notifications.map((entry) => entry.sequence)).toEqual([1, 2]);
+    expect(notifications.map((entry) => entry.sequence)).toEqual([1, 2, 3]);
   });
 
   it("withdraws the last published open prices when their exact socket row becomes invalid", () => {
@@ -277,7 +289,8 @@ describe("SBOBET hidden markets through the catalog data plane and revision stor
     expect(ingest(detailEnvelope(4, {}, 3, 1, "observer-sbo:2"), 2)).toBe(false);
     expect(revisions.get(ACCOUNT_ID)?.revision).toBe(current.revision);
     expect(ingest(mainEnvelope(5, "live", null, "observer-sbo:2"), 2)).toBe(false);
-    expect(ingest(mainEnvelope(6, "today", { "3": [goal("0.70")] }, "observer-sbo:2"), 2)).toBe(true);
+    expect(ingest(mainEnvelope(6, "today", { "3": [goal("0.70")] }, "observer-sbo:2"), 2)).toBe(false);
+    expect(ingest(emptyEarlyEnvelope(7, "observer-sbo:2"), 2)).toBe(true);
     const promoted = revisions.get(ACCOUNT_ID)!;
 
     expect(promoted.catalog.markets.map((market) => market.providerMarketId)).toEqual([GOAL_ID]);

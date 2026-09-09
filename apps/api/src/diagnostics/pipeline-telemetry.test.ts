@@ -56,11 +56,23 @@ function readers(revision: StoredCatalogRevision, feed: ProviderFeedSnapshot): P
 }
 
 describe("PipelineTelemetry", () => {
+  it("reports active and candidate body assembly counters without native payload fields", async () => {
+    const telemetry = new PipelineTelemetry({ now: () => 1_000 });
+    const assembly = { active: { pendingBodies: 2, pendingBytes: 48, blockedSourceEpochs: 1 },
+      candidate: { pendingBodies: 1, pendingBytes: 16, blockedSourceEpochs: 0 } };
+    const diagnosticReaders = { listSources: () => [], listAuthorities: () => [], listFeeds: () => [],
+      listCatalogStatuses: async () => [], catalogRevision: () => undefined,
+      networkBodyAssembly: () => assembly };
+    const result = await telemetry.diagnostic(diagnosticReaders, accountId);
+    expect(result?.hops.find(hop => hop.hop === "HOP4_ADAPTER")?.detail.networkBodyAssembly).toEqual(assembly);
+  });
+
   it.each([
     { accountId: "catalog-source:CMD:FOOTBALL", lobby: "CMD", transport: "HTTP_RESPONSE" },
     { accountId: "catalog-source:IM:FOOTBALL", lobby: "IM", transport: "HTTP_RESPONSE" },
     { accountId: "catalog-source:SABA:FOOTBALL", lobby: "SABA", transport: "DOM_SNAPSHOT" },
     { accountId: "catalog-source:SBOBET:FOOTBALL", lobby: "KSPORT", transport: "WS_FRAME" },
+    { accountId: "catalog-source:SBOBET:FOOTBALL", lobby: "KSPORT", transport: "HTTP_RESPONSE" },
     { accountId: "catalog-source:APSPORT:FOOTBALL", lobby: "TSPORT", transport: "WS_FRAME" },
     { accountId: "catalog-source:BTI:FOOTBALL", lobby: "BTI", transport: "HTTP_RESPONSE" }
   ] as const)("requires $transport rather than TAB_STATE at HOP3 for $accountId",
@@ -172,6 +184,27 @@ describe("PipelineTelemetry", () => {
         pendingEvents: 1, failedEvents: 1, queuedEvents: 0, inFlightEvents: 1,
         complete: false, oldestSuccessAgeMs: 45_000 }
     });
+  });
+
+  it("retains bounded SABA collector progress without arbitrary page data", async () => {
+    const telemetry = new PipelineTelemetry({ now: () => 120_000 });
+    const progress = { nativeReady: true, schemaContextReady: true, catalogUsable: true,
+      discoveryPending: false, discoveryAttempted: true, collectorState: "RUNNING",
+      domBlocked: false, probeBlocked: false, currentPeriod: "EARLY",
+      mainRosterComplete: true, hiddenMarketsComplete: false,
+      lastErrorCode: "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT" };
+    telemetry.recordEnvelope({ ...envelope(1, 100_000), lobby: "SABA", sourceId: "chrome:SABA:7",
+      transport: "TAB_STATE", request: { hostname: "provider.invalid",
+        pathnameClass: "/__fieldline_heartbeat__", resourceType: "Tab" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ kind: "WS_ATTACH", sourceGeneration: 1,
+        webSocketCreated: 0, webSockets: 1, ksportTargets: 0, attachedTargets: 0,
+        sabaCollector: { ...progress, arbitraryPageBody: "do-not-retain" } }) } }, "worker-a:0");
+    const result = await telemetry.diagnostic({ listSources: () => [], listAuthorities: () => [],
+      listFeeds: () => [], listCatalogStatuses: async () => [], catalogRevision: () => undefined
+    }, "catalog-source:SABA:FOOTBALL");
+    expect(result?.hops.find((hop) => hop.hop === "HOP3_ENVELOPE")?.detail.wsAttach)
+      .toMatchObject({ sabaCollector: progress });
+    expect(JSON.stringify(result)).not.toContain("do-not-retain");
   });
 
   it("exposes only the bounded current BTI page-health result", async () => {
@@ -358,6 +391,52 @@ describe("ignored-envelope endpoints", () => {
 });
 
 describe("provider refresh outcomes", () => {
+  it("shows bounded IM gate metadata with its original failure clock and clears it on an epoch change", async () => {
+    const telemetry = new PipelineTelemetry({ now: () => 120_000 });
+    const imAccount = "catalog-source:IM:FOOTBALL" as const;
+    const diagnosticReaders = { listSources: () => [], listAuthorities: () => [], listFeeds: () => [],
+      listCatalogStatuses: async () => [], catalogRevision: () => undefined };
+    const evaluation = { target: "top", status: "gate-cooldown", gateReason: "COOLDOWN",
+      retryInMs: 22_000, failureCount: 1, lastFailureAtMs: 92_000, failureStage: "BODY_READ",
+      localFailureCount: 1, elapsedMs: 15_000, headAtMs: 900 };
+    const imEnvelope = { ...envelope(1, 100_000), lobby: "IM" as const, sourceId: "chrome:IM:7",
+      transport: "TAB_STATE" as const, request: { hostname: "imsports.directsb.net",
+        pathnameClass: "/__fieldline_im_catalog_refresh__", resourceType: "Diagnostic" },
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ results: ["top:gate-cooldown"],
+        imRefresh: { observedAtMs: 100_000, evaluations: [{ ...evaluation, private: "must be removed" }] } }) } };
+    telemetry.recordEnvelope(imEnvelope, "worker-a:0");
+    const result = await telemetry.diagnostic(diagnosticReaders, imAccount);
+    expect(result?.hops.find(hop => hop.hop === "HOP4_ADAPTER")?.detail.imRefresh)
+      .toEqual({ observedAtMs: 100_000, evaluations: [evaluation] });
+    telemetry.recordEnvelope({ ...imEnvelope, sequence: 2, observedAtMs: 110_000,
+      payload: { encoding: "UTF8", body: "{}" } }, "worker-a:1");
+    const replaced = await telemetry.diagnostic(diagnosticReaders, imAccount);
+    expect(replaced?.hops.find(hop => hop.hop === "HOP4_ADAPTER")?.detail.imRefresh).toBeNull();
+  });
+
+  it("rejects forged IM metadata on other feeds and sanitizes count, clock, stage and row bounds", async () => {
+    const telemetry = new PipelineTelemetry({ now: () => 120_000 });
+    const diagnosticReaders = { listSources: () => [], listAuthorities: () => [], listFeeds: () => [],
+      listCatalogStatuses: async () => [], catalogRevision: () => undefined };
+    const bad = { target: "child", status: "gate-cooldown", gateReason: "COOLDOWN",
+      retryInMs: -1, failureCount: Number.MAX_VALUE, lastFailureAtMs: 110_001, failureStage: "private",
+      localFailureCount: -1, elapsedMs: Number.MAX_VALUE, headAtMs: "private" };
+    const payload = { encoding: "UTF8" as const, body: JSON.stringify({ imRefresh: {
+      observedAtMs: 110_000, evaluations: Array.from({ length: 40 }, () => bad) } }) };
+    telemetry.recordEnvelope({ ...envelope(1, 110_000), transport: "TAB_STATE", payload }, "worker-a:0");
+    expect((await telemetry.diagnostic(diagnosticReaders, accountId))?.hops
+      .find(hop => hop.hop === "HOP4_ADAPTER")?.detail.imRefresh).toBeNull();
+    telemetry.recordEnvelope({ ...envelope(1, 110_000), lobby: "IM", sourceId: "chrome:IM:7",
+      transport: "TAB_STATE", request: { hostname: "imsports.directsb.net",
+        pathnameClass: "/__fieldline_im_catalog_refresh__", resourceType: "Diagnostic" }, payload }, "worker-a:0");
+    const result = (await telemetry.diagnostic(diagnosticReaders, "catalog-source:IM:FOOTBALL"))?.hops
+      .find(hop => hop.hop === "HOP4_ADAPTER")?.detail.imRefresh as { evaluations: unknown[] };
+    expect(result.evaluations).toHaveLength(32);
+    expect(result.evaluations[0]).toEqual({ target: "child", status: "gate-cooldown", gateReason: "COOLDOWN",
+      retryInMs: null, failureCount: null, lastFailureAtMs: null, failureStage: null,
+      localFailureCount: null, elapsedMs: null, headAtMs: null });
+  });
+
   it("keeps the allowlisted statuses an IM reconciliation reported", async () => {
     // IM discards the page's own traffic by design and lives entirely on
     // extension-driven reconciliation. Those reconciliations were running - 93
@@ -370,7 +449,8 @@ describe("provider refresh outcomes", () => {
         resourceType: "Diagnostic" },
       payload: { encoding: "UTF8", body: JSON.stringify({
         results: ["top:token-unavailable", "im-app:token-unavailable",
-          "im-app:catalog-requested", "im-app:request-failed", "im-app:request-timeout",
+          "im-app:catalog-requested", "im-app:request-failed",
+          "top:gate-lock-held", "top:gate-cooldown", "top:failure-signature",
           "im-app:not-in-allowlist"] }) }
     }, "worker-a:0");
 
@@ -384,6 +464,8 @@ describe("provider refresh outcomes", () => {
 
     expect(result?.hops.find((hop) => hop.hop === "HOP4_ADAPTER")?.detail.refreshOutcomes)
       .toEqual([{ status: "token-unavailable", count: 2 }, { status: "catalog-requested", count: 1 },
-        { status: "request-failed", count: 1 }, { status: "request-timeout", count: 1 }]);
+        { status: "request-failed", count: 1 },
+        { status: "gate-lock-held", count: 1 }, { status: "gate-cooldown", count: 1 },
+        { status: "failure-signature", count: 1 }]);
   });
 });

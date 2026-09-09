@@ -12,11 +12,13 @@ import { decimalOdds, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, observedTicketAsComparisonRow, selectionLabel, ticketMarketLabel,
   type ComparisonEvent, type ComparisonRow, type EventPhase } from "../catalog/comparison.js";
 import { formatDisplayDecimal } from "../catalog/display-format.js";
+import { selectComparisonProviders, summarizeComparisonCounts } from "../catalog/comparison-counts.js";
 import { PROVIDER_DISPLAY_ORDER, sortProviderItems } from "../catalog/provider-order.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
 import { ProfitToastStack } from "../components/profit-toast-stack.js";
 import { ProviderBrand } from "../components/provider-brand.js";
 import { RoiBadge } from "../components/roi-badge.js";
+import { ConditionalRoiNote } from "../components/conditional-roi-note.js";
 import { MaintenanceControls } from "../components/maintenance-controls.js";
 import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
@@ -24,7 +26,7 @@ import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js
 import { PriceMovementTracker, type ObservedPriceMovement } from "../watch/price-movement-tracker.js";
 import { eventEdgeSummary, nextRankingDeadlineMs, rankedEvent, sortRankedEvents, ticketEdgeSummary,
   topRankedTicketItems, type RankedEvent } from "../watch/ranked-tickets.js";
-import { roiTone } from "../watch/roi-tone.js";
+import { formatProfitAmount, roiPercentFromRatio, roiTone } from "../watch/roi-tone.js";
 import { useNotificationSound } from "../watch/use-notification-sound.js";
 import { loadProfitAlerts, ProfitAlertTracker, saveProfitAlerts,
   type ProfitAlert } from "../watch/profit-alert-tracker.js";
@@ -35,13 +37,16 @@ import { TicketPreflightCoordinator, type VerifiedTicketEvidence } from "../watc
 import { ProviderTicketApi, type ProviderTicketApiLike, type ProviderTicketIdentity } from "../api/provider-ticket.js";
 import type { TicketReportApiLike } from "../api/ticket-report.js";
 import { CatalogRevisionCoordinator } from "../catalog/catalog-revision-coordinator.js";
+import { CatalogRevisionCache } from "../catalog/catalog-revision-cache.js";
 import { ComparisonWorkerClient, type HydratedComparisonWorkerOutput } from "../catalog/comparison-worker-client.js";
 import { ProviderSourceRecoveryApi, type ProviderSourceRecoveryApiLike } from "../api/provider-source-recovery.js";
 import { ProviderSourceRecoveryCoordinator, type ProviderAutomaticRecoveryTiming, type ProviderRecoverySnapshot,
   type RecoverableProvider } from "../watch/provider-source-recovery.js";
 
 const defaultAccountApi = new AccountApi();
-const defaultCatalogApi = new CatalogApi();
+// A full provider catalog can exceed 90 MB before compression. Keep the
+// response-header deadline short while allowing its body to cross the tunnel.
+const defaultCatalogApi = new CatalogApi(undefined, 10_000, 30_000, "counts");
 const defaultProviderTicketApi = new ProviderTicketApi();
 const defaultProviderSourceRecoveryApi = new ProviderSourceRecoveryApi();
 const comparisonProviders: readonly ProviderId[] = PROVIDER_DISPLAY_ORDER.filter((provider) => provider !== "FABET");
@@ -82,18 +87,6 @@ interface PinnedEventIdentity {
 
 function formatSummaryOdds(value: string): string {
   return formatDisplayDecimal(value);
-}
-
-function catalogRevision(catalog: LiveCatalogResponse): string {
-  const events = catalog.events.map((event) => [event.providerEventId, event.startAtUtcMs, event.isLive,
-    event.participantA, event.participantB].join(":"));
-  const markets = catalog.markets.map((market) => [market.providerMarketId, market.status, market.line].join(":"));
-  const quotes = catalog.quotes.map((quote) => [quote.providerMarketId, quote.providerSelectionId, quote.rawOdds,
-    quote.status, quote.sequence, quote.sourceTimestampMs].join(":"));
-  const observations = (catalog.nativeMarketObservations ?? []).map((observation) => [observation.providerMarketId,
-    observation.nativeType, observation.disposition, observation.reason, observation.observedAtMs].join(":"));
-  return [catalog.observedAtMs, catalog.snapshotState ?? "FRESH", catalog.rejectedMarketCount,
-    ...events, ...markets, ...quotes, ...observations].join("|");
 }
 
 function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -329,7 +322,7 @@ function ProviderSelector({ accounts, eventCounts, marketCounts, nativeCoverageC
     const detail = providerAccounts.length === 0 ? (loaded ? "not connected" : "loading source…")
       : providerAccounts.some((account) => account.reason === "EXPIRED") ? "nguồn hết hạn"
       : providerAccounts.some((account) => account.reason === "SCHEMA_CHANGED") ? "lỗi schema nguồn"
-      : "nguồn không hoạt động";
+      : "chưa có dữ liệu hợp lệ để ghép";
     const availabilityLabel = providerAccounts.length === 0 ? (loaded ? "unavailable" : "loading") : detail;
     const count = providerAccounts.reduce((total, account) => total + (eventCounts.get(account.id) ?? 0), 0);
     const loadedMarketCounts = providerAccounts.flatMap((account) => {
@@ -429,28 +422,29 @@ function executableStakePolicy(baseStake: string): FixedBaseStakePolicy {
 }
 
 function money(value: string): string {
-  return `${Number(value).toLocaleString("en-US")} VND`;
+  return `${formatProfitAmount(value)} VND`;
 }
 
 function SelectedTicketBalance({ ranked }: { readonly ranked: RankedEvent }) {
   const edge = eventEdgeSummary(ranked);
   const ticket = edge === null ? null : ranked.tickets.find((item) => item.key === edge.ticketKey);
   const plan = ticket?.plan ?? null;
-  if (edge === null || ticket === undefined || plan === null) return null;
+  if (edge === null || ticket === undefined || ticket === null || plan === null) return null;
   const orderedLegs = sortProviderItems(plan.legs, (leg) => leg.provider);
   return <section aria-label="Selected ticket balance" className="selected-ticket-balance">
     <header><div><small>Selected exact two-book ticket</small>
       <h2>{ranked.event.event.participantA} vs {ranked.event.event.participantB}</h2>
       <p>{edge.marketType} · {edge.line === null ? "No line" : `Line ${edge.line}`}</p></div>
       <div className={`selected-ticket-balance__roi ${edge.state === "VERIFIED_PROFIT" ? "selected-ticket-balance__roi--verified" : ""}`}>
-        <RoiBadge roiPercent={edge.roiPercent} size="lg" />
+        <RoiBadge roiPercent={edge.roiPercent} worstCaseProfit={edge.worstCaseProfit} size="lg" />
         <small>{edge.state === "OBSERVATION" ? "READ-ONLY ESTIMATE" : "PREFLIGHT VERIFIED"}</small>
       </div></header>
     <div className="selected-ticket-balance__legs">{orderedLegs.map((leg) => <article key={`${leg.provider}-${leg.selection}`}>
       <ProviderBrand compact provider={leg.provider} /><strong>{selectionLabel(ranked.event.event, leg.selection)} @ {formatDisplayDecimal(leg.decimalOdds)}</strong>
       <span>Stake {money(leg.stake)}</span><small>If this outcome wins: {money(leg.profit)}</small>
     </article>)}</div>
-    <footer><span>Total stake {money(plan.totalStake)}</span><strong>Worst-case: {money(plan.worstCaseProfit)}</strong>
+    <footer><span>Total stake {money(plan.totalStake)}</span><strong className={`selected-ticket-balance__profit--${roiTone(edge.roiPercent, plan.worstCaseProfit)}`}>Worst-case: {money(plan.worstCaseProfit)}</strong>
+      <ConditionalRoiNote row={ticket.row} plan={plan} />
       <small>No order is submitted from this screen.</small></footer>
   </section>;
 }
@@ -497,7 +491,7 @@ function ComparisonTable({ item, baseStake, signals }: { readonly item: Comparis
           <small>#{leg.provider} · {selectionLabel(item.event, leg.selection)} @ {formatDisplayDecimal(leg.decimalOdds)}</small><b>{money(leg.stake)} {leg.role.toLowerCase()}</b>
         </span>)}<span>Total {money(plan.totalStake)}</span>{plan.legs.map((leg) => <span key={`${leg.selection}-profit`}>
           <small>Nếu {selectionLabel(item.event, leg.selection)} thắng</small><b>Lãi/lỗ {money(leg.profit)}</b></span>)}
-          <b>Worst {money(plan.worstCaseProfit)}</b><RoiBadge roiPercent={Number(plan.roi) * 100} size="sm" /></div>}</td></tr>;
+          <b>Worst {money(plan.worstCaseProfit)}</b><RoiBadge roiPercent={roiPercentFromRatio(plan.roi)} worstCaseProfit={plan.worstCaseProfit} size="sm" /></div>}</td></tr>;
     })}
   </tbody></table></div>;
 }
@@ -514,7 +508,7 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
   return <aside className="arbitrage-toast lag-alert-toast" aria-live="assertive">
     <header><strong>PRICE GAP DETECTED</strong><span>10-second alert</span></header>
     <h2>{visible.event.event.participantA} vs {visible.event.event.participantB}</h2>
-    <div className="lag-alert-toast__market">{visible.row.marketType}{visible.row.line === null ? "" : ` · Line ${visible.row.line}`} <RoiBadge roiPercent={Number(visible.plan.roi) * 100} size="sm" /></div>
+    <div className="lag-alert-toast__market">{visible.row.marketType}{visible.row.line === null ? "" : ` · Line ${visible.row.line}`} <RoiBadge roiPercent={roiPercentFromRatio(visible.plan.roi)} worstCaseProfit={visible.plan.worstCaseProfit} size="sm" /></div>
     <p>Worst profit {money(visible.plan.worstCaseProfit)} · verify both legs before execution</p>
   </aside>;
 }
@@ -551,6 +545,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
   const [movements, setMovements] = useState<readonly ObservedPriceMovement[]>([]);
   const [verifiedTickets, setVerifiedTickets] = useState<ReadonlyMap<string, VerifiedTicketEvidence>>(new Map());
+  const verifiedTicketsRef = useRef(verifiedTickets);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [pinnedEvent, setPinnedEvent] = useState<ComparisonEvent | null>(null);
   const [pinnedEventIdentity, setPinnedEventIdentity] = useState<PinnedEventIdentity | null>(null);
@@ -565,6 +560,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   // between. Kept apart from the one above, which ticks every second so the
   // countdowns move and would otherwise drag every fixture's ranking with it.
   const [rankingNowMs, setRankingNowMs] = useState(Date.now());
+  const acceptVerifiedTickets = useCallback((verified: ReadonlyMap<string, VerifiedTicketEvidence>): void => {
+    const previous = verifiedTicketsRef.current;
+    if (previous.size === verified.size && [...verified].every(([key, evidence]) => previous.get(key) === evidence)) return;
+    verifiedTicketsRef.current = verified;
+    setVerifiedTickets(verified);
+    setRankingNowMs(Date.now());
+  }, []);
   const [, setRecoveryRevision] = useState(0);
   const [baseStake, setBaseStake] = useState(() => loadBaseStake(window.localStorage));
   const [baseStakeInput, setBaseStakeInput] = useState(baseStake);
@@ -580,9 +582,19 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   if (profitAlertTracker.current === null) profitAlertTracker.current = new ProfitAlertTracker(profitHistory);
   const notificationSound = useNotificationSound();
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
+  const catalogRevisionsRef = useRef(new CatalogRevisionCache());
+  const catalogRevision = useCallback((catalog: LiveCatalogResponse) => catalogRevisionsRef.current.get(catalog), []);
+  const sameCatalog = useCallback((left: LiveCatalogResponse, right: LiveCatalogResponse) =>
+    catalogRevisionsRef.current.same(left, right), []);
   const matchListRef = useRef<HTMLDivElement>(null);
   const matchListAnchorRef = useRef<ScrollAnchor | null>(null);
   const staleAccountIdsRef = useRef<ReadonlySet<string>>(new Set());
+  // Metadata can retire a quote before its large HTTP catalog has arrived.
+  // Keep that observation floor so an overlapping initial read cannot revive it.
+  const staleObservedAtMsRef = useRef(new Map<string, number>());
+  const catalogIsStale = useCallback((catalog: LiveCatalogResponse): boolean =>
+    catalog.snapshotState === "STALE" || catalog.observedAtMs <=
+      (staleObservedAtMsRef.current.get(catalog.accountId) ?? Number.NEGATIVE_INFINITY), []);
   const restoredCacheAccountIdsRef = useRef(new Set<string>());
   const accountsRef = useRef<readonly AccountStatus[]>([]);
   const sourcesRef = useRef<readonly CatalogSourceStatus[]>([]);
@@ -610,17 +622,41 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   useEffect(() => {
     const worker = new ComparisonWorkerClient({
       onResult: (output: HydratedComparisonWorkerOutput) => {
-        setComparisonEvents(output.displayEvents);
-        latestPreflightGeneration.current = output.generation;
+        // A stale third book must not hide a valid pair from the fresh-only
+        // projection. Keep last-complete display rows only for fully fresh
+        // groups with the same exact fixture/family key.
+        // Display names/kickoff can coincide in different competitions. A
+        // replacement must refer to the same provider-native fixture group.
+        const sourceGroupKey = (item: ComparisonEvent): string => JSON.stringify([
+          item.key, Object.entries(item.providerEventIds).sort(([left], [right]) => left.localeCompare(right))
+        ]);
+        const displayByKey = new Map(output.displayEvents.filter((item) =>
+          item.catalogs.every((catalog) => !staleAccountIdsRef.current.has(catalog.accountId)))
+          .map((item) => [sourceGroupKey(item), item]));
+        setComparisonEvents(output.freshEvents.map((item) => displayByKey.get(sourceGroupKey(item)) ?? item));
+        latestPreflightGeneration.current = output.isLatest === false ? -1 : output.generation;
         const freshCatalogs = catalogsRef.current.filter((catalog) =>
           !staleAccountIdsRef.current.has(catalog.accountId));
-        const providers = new Set<ProviderId>(freshCatalogs.map((catalog) => catalog.provider));
-        const observedAtMs = freshCatalogs.reduce((latest, catalog) =>
-          Math.max(latest, catalog.observedAtMs), 0) || Date.now();
+        const outputCatalogs = output.freshEvents.flatMap(item => item.catalogs);
+        const observedProviders = new Set(outputCatalogs.map(catalog => catalog.provider));
+        const providers = new Set<ProviderId>(freshCatalogs.filter(catalog => observedProviders.has(catalog.provider))
+          .map((catalog) => catalog.provider));
+        const observedAtMs = outputCatalogs.reduce((latest, catalog) =>
+          Math.max(latest, catalog.observedAtMs), 0);
         const candidates = signalTracker.current.update(output.freshEvents, providers,
           executableStakePolicy(baseStakeRef.current), observedAtMs);
         setSignals(filterAccountBackedSignals(candidates, freshCatalogs, accountsRef.current, observedAtMs));
         setMovements(movementTracker.current.update(output.freshEvents, observedAtMs));
+        // Commit the clock with this result. A post-render clock effect ranks
+        // every row a second time after already ranking the new event array.
+        setRankingNowMs(Date.now());
+        // Validated intermediate prices are useful observations, but a pending
+        // catalog generation cannot authorize a current provider preflight.
+        if (output.isLatest === false) {
+          preflightCoordinator.current.clear();
+          acceptVerifiedTickets(new Map());
+          return;
+        }
         const selectedAccounts = freshCatalogs.flatMap((catalog) => {
           const bettor = selectBettingAccount(accountsRef.current, catalog.provider, catalog.category);
           return bettor === null ? [] : [bettor];
@@ -628,7 +664,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         void preflightCoordinator.current.refresh({ events: output.freshEvents,
           selectedAccounts, selectedProviders: providers,
           policy: observedStakePolicy(baseStakeRef.current) }).then((verified) => {
-          if (latestPreflightGeneration.current === output.generation) setVerifiedTickets(verified);
+          if (latestPreflightGeneration.current === output.generation) acceptVerifiedTickets(verified);
         });
       }
     });
@@ -653,10 +689,14 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   };
 
   const readCatalog = useCallback(async (accountId: string): Promise<CatalogReadResult> => {
-    if (catalogApi.readRevision !== undefined) return catalogApi.readRevision(accountId);
+    if (catalogApi.readRevision !== undefined) {
+      const result = await catalogApi.readRevision(accountId);
+      catalogRevisionsRef.current.remember(result.catalog, result.revision);
+      return result;
+    }
     const catalog = await catalogApi.read(accountId);
     return { catalog, revision: catalogRevision(catalog) };
-  }, [catalogApi]);
+  }, [catalogApi, catalogRevision]);
 
   const acceptRealtimeCatalog = useCallback((result: CatalogReadResult): void => {
     const catalog = result.catalog;
@@ -669,9 +709,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const nextCatalogs = [catalog, ...catalogsRef.current.filter((candidate) =>
       candidate.accountId !== catalog.accountId)];
     const nextStale = new Set(staleAccountIdsRef.current);
-    if (catalog.snapshotState === "STALE") nextStale.add(catalog.accountId);
+    if (catalogIsStale(catalog)) nextStale.add(catalog.accountId);
     else nextStale.delete(catalog.accountId);
-    const changed = previous === undefined || catalogRevision(previous) !== catalogRevision(catalog) ||
+    const changed = previous === undefined || !sameCatalog(previous, catalog) ||
       !sameStringSet(staleAccountIdsRef.current, nextStale);
     if (!changed) return;
     catalogsRef.current = nextCatalogs;
@@ -681,7 +721,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     setCatalogs(nextCatalogs);
     setStaleAccountIds(nextStale);
     comparisonWorkerRef.current?.upsert(catalog, nextStale.has(catalog.accountId));
-  }, []);
+  }, [sameCatalog, catalogIsStale]);
   const readCatalogRef = useRef(readCatalog);
   const acceptRealtimeCatalogRef = useRef(acceptRealtimeCatalog);
   readCatalogRef.current = readCatalog;
@@ -691,6 +731,18 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const coordinator = new CatalogRevisionCoordinator({
       read: (accountId) => readCatalogRef.current(accountId),
       onCatalog: (result) => acceptRealtimeCatalogRef.current(result),
+      onStale: (entry) => {
+        staleObservedAtMsRef.current.set(entry.accountId, Math.max(entry.observedAtMs,
+          staleObservedAtMsRef.current.get(entry.accountId) ?? Number.NEGATIVE_INFINITY));
+        const held = catalogsRef.current.find((catalog) => catalog.accountId === entry.accountId);
+        if ((held !== undefined && held.observedAtMs > entry.observedAtMs) ||
+          staleAccountIdsRef.current.has(entry.accountId)) return;
+        const nextStale = new Set(staleAccountIdsRef.current).add(entry.accountId);
+        staleAccountIdsRef.current = nextStale;
+        setStaleAccountIds(nextStale);
+        const generation = comparisonWorkerRef.current?.setStale(entry.accountId, true);
+        if (generation !== undefined) latestPreflightGeneration.current = generation;
+      },
       retryDelayMs: catalogRetryDelayMs,
       minimumPublishIntervalMs: 3_000,
       fallbackMs: 3_000,
@@ -772,7 +824,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         const previous = previousByAccount.get(candidate.accountId);
         if (previous === undefined || candidate.observedAtMs > previous.observedAtMs) return true;
         return candidate.observedAtMs === previous.observedAtMs &&
-          catalogRevision(candidate) === catalogRevision(previous);
+          sameCatalog(candidate, previous);
       });
       for (const candidate of accepted) restoredCacheAccountIdsRef.current.delete(candidate.accountId);
       const supersededIds = new Set(completed.filter((candidate) => !accepted.includes(candidate))
@@ -795,7 +847,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const nextCatalogs = [...accepted, ...preserved];
       const nextStale = new Set(staleAccountIdsRef.current);
       for (const catalog of accepted) {
-        if (catalog.snapshotState === "STALE") nextStale.add(catalog.accountId);
+        if (catalogIsStale(catalog)) nextStale.add(catalog.accountId);
         else nextStale.delete(catalog.accountId);
       }
       for (const id of failedIds) {
@@ -807,7 +859,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       }
       const catalogsChanged = nextCatalogs.length !== catalogsRef.current.length || nextCatalogs.some((catalog) => {
         const previous = previousByAccount.get(catalog.accountId);
-        return previous === undefined || catalogRevision(previous) !== catalogRevision(catalog);
+        return previous === undefined || !sameCatalog(previous, catalog);
       });
       const freshnessChanged = !sameStringSet(staleAccountIdsRef.current, nextStale);
       if (!catalogsChanged && !freshnessChanged) return;
@@ -822,7 +874,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     } finally {
       for (const id of requestedIds) catalogRefreshesInFlight.current.delete(id);
     }
-  }, [catalogSourceApi, readCatalog]);
+  }, [catalogSourceApi, readCatalog, sameCatalog, catalogIsStale]);
 
   useEffect(() => {
     let cancelled = false;
@@ -924,17 +976,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, [catalogRealtime?.baseline, catalogRealtime?.connectionState]);
 
   useEffect(() => {
-    const revision = catalogRealtime?.revision;
-    if (revision !== null && revision !== undefined) {
+    const revisions = catalogRealtime?.revisions ??
+      (catalogRealtime?.revision == null ? [] : [catalogRealtime.revision]);
+    for (const revision of revisions) {
       revisionCoordinatorRef.current?.acceptRevision(revision.entry, revision.sequence);
     }
-  }, [catalogRealtime?.revision]);
+  }, [catalogRealtime?.revision, catalogRealtime?.revisions]);
 
-  // Fresh data is the one thing that moves ranking without a deadline passing,
-  // and it has to carry the clock with it: freshness is measured from now back
-  // to the catalog, so ranking a newly arrived catalog against a clock left
-  // behind by the previous one would read every quote in it as older than it is.
-  useEffect(() => { setRankingNowMs(Date.now()); }, [comparisonEvents, verifiedTickets, movements]);
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
@@ -978,11 +1026,21 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     return [catalog.accountId, marketIds.size] as const;
   })), [catalogs, category]);
   const nativeCoverageCounts = useMemo(() => new Map(catalogs.flatMap((catalog) => {
-    if (catalog.nativeMarketObservations === undefined) return [];
+    if (catalog.nativeCoverageByEvent === undefined && catalog.nativeMarketObservations === undefined) return [];
     const eligibleEventIds = new Set(catalog.events.filter((candidate) => candidate.category === category &&
       (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
       .map((candidate) => candidate.providerEventId));
-    const observations = catalog.nativeMarketObservations.filter((observation) =>
+    if (catalog.nativeCoverageByEvent !== undefined) {
+      const count = { normalized: 0, excluded: 0, unmapped: 0 };
+      for (const item of catalog.nativeCoverageByEvent) {
+        if (!eligibleEventIds.has(item.providerEventId)) continue;
+        count.normalized += item.normalized;
+        count.excluded += item.excluded;
+        count.unmapped += item.unmapped;
+      }
+      return [[catalog.accountId, count] as const];
+    }
+    const observations = (catalog.nativeMarketObservations ?? []).filter((observation) =>
       observation.category === category && eligibleEventIds.has(observation.providerEventId));
     return [[catalog.accountId, {
       normalized: observations.filter((observation) => observation.disposition === "NORMALIZED").length,
@@ -997,32 +1055,34 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     item.event.category === category && !(item.event.category === "FOOTBALL" && item.event.isVirtual !== false) &&
     item.catalogs.every((catalog) => !staleAccountIds.has(catalog.accountId))),
   [comparisonEvents, category, staleAccountIds]);
+  const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
+    selectedIds.has(source.id)).map((source) => source.provider)),
+  [categorySources, selectedIds]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, rankingNowMs) &&
-    matchesEventPhase(item.event, eventPhases)), [events, eventPhases, rankingNowMs]);
+    matchesEventPhase(item.event, eventPhases)).map(item => selectComparisonProviders(item, selectedProviderIds)),
+  [events, eventPhases, rankingNowMs, selectedProviderIds]);
+  const comparisonCounts = useMemo(() => summarizeComparisonCounts(visibleEvents), [visibleEvents]);
   useEffect(() => {
     const deadlineMs = nextRankingDeadlineMs({ events: visibleEvents, verified: verifiedTickets,
       nowMs: rankingNowMs });
     if (deadlineMs === null) return;
     const timer = window.setTimeout(() => setRankingNowMs(Date.now()),
-      Math.max(16, deadlineMs - Date.now()));
+      Math.max(16, deadlineMs + 1 - Date.now()));
     return () => window.clearTimeout(timer);
   }, [rankingNowMs, verifiedTickets, visibleEvents]);
-  const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
-    selectedIds.has(source.id)).map((source) => source.provider)),
-  [categorySources, selectedIds]);
   const rankedEvents = useMemo(() => {
     const sorted = sortRankedEvents(visibleEvents.filter((item) => item.rows.length > 0)
       .map((item) => rankedEvent({ event: item, verified: verifiedTickets, movements,
         selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake),
         nowMs: rankingNowMs, limit: item.rows.length }))
-      .filter((item) => eventEdgeSummary(item) !== null));
+      .filter((item) => item.tickets.some(ticket => ticket.plan !== null || ticket.hasOpposingSources === true)));
     const seen = new Set<string>();
     return sorted.filter((item) => seen.has(item.event.key) ? false : (seen.add(item.event.key), true));
   }, [baseStake, movements, rankingNowMs, selectedProviderIds, verifiedTickets, visibleEvents]);
   const rankedByEvent = new Map(rankedEvents.map((item) => [item.event.key, item]));
   // This workspace is an exact cross-book comparison list. Never pad it with
   // one-book observations: those rows cannot be balanced across two providers.
-  const displayTicketItems = useMemo(() => topRankedTicketItems(rankedEvents, 50), [rankedEvents]);
+  const displayTicketItems = useMemo(() => topRankedTicketItems(rankedEvents, 20), [rankedEvents]);
   const crossBookEventCount = displayTicketItems.length;
   useLayoutEffect(() => {
     const list = matchListRef.current;
@@ -1066,7 +1126,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   const invalidateVerifiedTickets = (): void => {
     preflightCoordinator.current.clear();
-    setVerifiedTickets(new Map());
+    acceptVerifiedTickets(new Map());
+    setRankingNowMs(Date.now());
   };
   const toggle = (id: string): void => {
     invalidateVerifiedTickets();
@@ -1087,7 +1148,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     restoredCacheAccountIdsRef.current.clear();
     setStaleAccountIds(new Set());
     saveCatalogCategory(window.localStorage, next);
-    setSignals([]); setMovements([]); setSelectedKey(null); setPinnedEvent(null); setPinnedEventIdentity(null); setVerifiedTickets(new Map());
+    setSignals([]); setMovements([]); setSelectedKey(null); setPinnedEvent(null); setPinnedEventIdentity(null);
+    acceptVerifiedTickets(new Map()); setRankingNowMs(Date.now());
     preflightCoordinator.current.clear();
     signalTracker.current = new LagSignalTracker();
     movementTracker.current = new PriceMovementTracker();
@@ -1170,19 +1232,23 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       }} ref={matchListRef}><div className="catalog-workspace__list-heading">
         <h2>Exact two-book matches</h2>
       </div>
+      <p aria-label="Tổng kèo ghép" className="catalog-comparison-counts">
+        Kèo hai cửa đối ứng: {comparisonCounts.matchedContractCount.toLocaleString("vi-VN")} nhóm kèo
+        {" · "}{comparisonCounts.crossBookPairCount.toLocaleString("vi-VN")} cặp market giữa hai sàn
+        {" · "}{comparisonCounts.matchedSourceMarketCount.toLocaleString("vi-VN")} market nguồn.
+        {" "}Danh sách hiển thị tối đa 20 vé theo ROI.
+      </p>
       {crossBookEventCount === 0 && <div className="catalog-workspace__empty catalog-workspace__empty--compact">
         <h3>No exact two-book comparison is currently available</h3>
         <p>Only events with the same exact opposing ticket at two different books are listed here.</p></div>}
       <div className="catalog-event-list">
-      {displayTicketItems.length === 0 && <div className="catalog-workspace__empty"><h3>No supported two-way match is currently available</h3>
-        <p>The source returned no open supported two-outcome ticket in the current time window.</p></div>}
       {displayTicketItems.map(({ event: ranked, ticket }) => {
       const item = ranked.event;
       const edge = ticketEdgeSummary(ticket);
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
       const displayOnly = item.catalogs.some((catalog) => staleAccountIds.has(catalog.accountId));
       const selected = isPinnedEvent(item) && highlightTicketKey === ticket.key;
-      const edgeTone = edge === null ? null : roiTone(edge.roiPercent);
+      const edgeTone = edge === null ? null : roiTone(edge.roiPercent, edge.worstCaseProfit);
       const roiClass = displayOnly || selected || edgeTone === null ? "" : ` catalog-event--roi-${edgeTone}`;
       return <article aria-label={`${edge === null ? "Observe" : "Compare"} ${label}`} aria-pressed={selected}
         className={`catalog-event catalog-event--stable catalog-event--dense${displayOnly ? " catalog-event--display-only" : ""}${
@@ -1191,17 +1257,18 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault(); watch(item, ticket.key);
         }} role="button" tabIndex={0}><header><div className="catalog-event__identity"><span>{item.event.competition}</span><h3>{label}</h3>
-        <div className="provider-tags">{(edge?.providers ?? item.providers.slice(0, 2)).map((provider) =>
+        <div className="provider-tags">{(edge?.providers ?? ticket.opposingProviderPairs?.[0] ?? item.providers.slice(0, 2)).map((provider) =>
           <ProviderBrand compact key={provider} provider={provider} />)}
           {displayOnly && <strong className="catalog-event__display-only"
             title="Giá không còn mới, chỉ dùng để tham khảo">GIÁ CŨ · CHỈ XEM</strong>}</div></div>
         {edge === null ? <div className="event-edge-summary event-edge-summary--waiting">
-          <strong>WAITING</strong><small>ONE BOOK / NO EXACT PAIR</small>
-          <span>{item.observedRows.length} supported two-way ticket(s)</span>
-          <b>{item.providers.map((provider) => `#${provider}`).join(" · ")}</b>
+          <strong>ĐÃ GHÉP · CHỜ GIÁ</strong>
+          <small>{ticket.reason === "APSPORT quote freshness not confirmed" ? "Chờ giá mới từ APSPORT" : "Chưa đủ giá hợp lệ để tính ROI"}</small>
+          <span>{ticket.row.marketType} · {ticket.row.line === null ? "Không line" : `Line ${ticket.row.line}`}</span>
         </div> : <div className={`event-edge-summary event-edge-summary--roi-${edgeTone}`}>
-          <RoiBadge className="event-edge-summary__roi" roiPercent={edge.roiPercent} size="lg" />
+          <RoiBadge className="event-edge-summary__roi" roiPercent={edge.roiPercent} worstCaseProfit={edge.worstCaseProfit} size="lg" />
           <span>Estimated balanced profit {money(edge.worstCaseProfit)}</span>
+          {ticket.plan !== null && <ConditionalRoiNote row={ticket.row} plan={ticket.plan} />}
           <span>{edge.marketType} · {edge.line === null ? "No line" : `Line ${edge.line}`}</span>
           <span>{edge.odds.map(formatSummaryOdds).join(" / ")}</span>
         </div>}
@@ -1213,7 +1280,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <aside aria-label="Selected match detail" className="catalog-workspace__detail app-scrollbar">{selectedDetail ??
         (rankedEvents[0] === undefined ? <div className="catalog-workspace__empty"><h2>Waiting for an exact pair</h2>
           <p>The balance panel appears only after the same event, market, line and opposing outcomes exist at two books.</p></div>
-          : <SelectedTicketBalance ranked={rankedEvents[0]} />)}</aside>
+          : eventEdgeSummary(rankedEvents[0]) === null ? <div className="catalog-workspace__empty">
+            <h2>Đã ghép · chờ giá mới</h2><p>Chọn một kèo để xem hai sàn đối ứng. ROI sẽ hiện khi có đủ giá hợp lệ.</p>
+          </div> : <SelectedTicketBalance ranked={rankedEvents[0]} />)}</aside>
     </section>
   </>;
 }

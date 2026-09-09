@@ -1,4 +1,4 @@
-import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
+import { CMD_PUBLIC_CATALOG_EXPRESSION, PUBLIC_PROVIDER_TIMEZONE_EXPRESSION } from "./cmd-dom-snapshot.js";
 import type { SabaCollectorBinding, SabaCollectorOwnerCaptureResult,
   SabaCollectorPageAdapter, SabaCollectorPeriod, SabaCollectorRecord,
   SabaCollectorRosterOwner, SabaCollectorRosterResult,
@@ -129,8 +129,10 @@ export interface SabaHiddenMarketPageAdapterOptions {
   readonly onRestoreRosterMismatch?: (diagnostic: SabaRestoreRosterMismatchDiagnostic) => void;
 }
 
-const rosterMetadataExpression = (token: string): string => `(() => {
+const rosterMetadataExpression = (token: string,
+  timezoneExpression = PUBLIC_PROVIDER_TIMEZONE_EXPRESSION): string => `(() => {
   const token=${JSON.stringify(token)};
+  const providerTimezoneOffsetMinutes=(${timezoneExpression});
   if(globalThis.__fieldlineSabaNavigationProbeDocV1!==token)return {documentToken:'',rows:[]};
   const clean=(value,cap=160)=>{const result=String(value??'').replace(/\\s+/g,' ').trim();return result.length<=cap?result:''};
   const fold=(value)=>clean(value).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/\\u0110/g,'D').replace(/\\u0111/g,'d').toUpperCase();
@@ -139,7 +141,7 @@ const rosterMetadataExpression = (token: string): string => `(() => {
   const shape=(value)=>{const text=fold(value);if(/^\\d{1,2}\\/\\d{1,2}\\s+\\d{1,2}:\\d{2}(?:AM|PM)?$/.test(text))return 'DATED_KICKOFF';if(/^TRUC TIEP\\s+\\d{1,2}:\\d{2}(?:AM|PM)$/.test(text))return 'PREFIXED_KICKOFF';if(/^\\d{1,2}:\\d{2}(?:AM|PM)$/.test(text))return 'UNDATED_KICKOFF';return null};
   const validCalendar=(year,month,day)=>{const leap=year%4===0&&(year%100!==0||year%400===0),days=[31,leap?29:28,31,30,31,30,31,31,30,31,30,31];return month>=1&&month<=12&&day>=1&&day<=days[month-1]};
   const literalDate=(value)=>{const match=/^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(value);if(!match)return null;const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);return validCalendar(year,month,day)?match[1]+'-'+match[2]+'-'+match[3]:null};
-  const zonedDate=(value)=>{const match=/^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2})(?::(\\d{2})(?:\\.(\\d{1,3}))?)?(Z|([+-])(\\d{2}):?(\\d{2}))$/.exec(value);if(!match)return null;const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]),hour=Number(match[4]),minute=Number(match[5]),second=Number(match[6]??0),millisecond=Number((match[7]??'').padEnd(3,'0')),offsetHour=match[8]==='Z'?0:Number(match[10]),offsetMinute=match[8]==='Z'?0:Number(match[11]);if(!validCalendar(year,month,day)||hour>23||minute>59||second>59||offsetHour>14||offsetMinute>59||(offsetHour===14&&offsetMinute!==0))return null;const instant=new Date(0);instant.setUTCFullYear(year,month-1,day);instant.setUTCHours(hour,minute,second,millisecond);const offset=match[8]==='Z'?0:(match[9]==='+'?1:-1)*(offsetHour*60+offsetMinute);const provider=new Date(instant.getTime()-offset*60000+8*60*60000);return String(provider.getUTCFullYear()).padStart(4,'0')+'-'+String(provider.getUTCMonth()+1).padStart(2,'0')+'-'+String(provider.getUTCDate()).padStart(2,'0')};
+  const zonedDate=(value)=>{if(providerTimezoneOffsetMinutes===null)return null;const match=/^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2})(?::(\\d{2})(?:\\.(\\d{1,3}))?)?(Z|([+-])(\\d{2}):?(\\d{2}))$/.exec(value);if(!match)return null;const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]),hour=Number(match[4]),minute=Number(match[5]),second=Number(match[6]??0),millisecond=Number((match[7]??'').padEnd(3,'0')),offsetHour=match[8]==='Z'?0:Number(match[10]),offsetMinute=match[8]==='Z'?0:Number(match[11]);if(!validCalendar(year,month,day)||hour>23||minute>59||second>59||offsetHour>14||offsetMinute>59||(offsetHour===14&&offsetMinute!==0))return null;const instant=new Date(0);instant.setUTCFullYear(year,month-1,day);instant.setUTCHours(hour,minute,second,millisecond);const offset=match[8]==='Z'?0:(match[9]==='+'?1:-1)*(offsetHour*60+offsetMinute);const provider=new Date(instant.getTime()-offset*60000+providerTimezoneOffsetMinutes*60000);return String(provider.getUTCFullYear()).padStart(4,'0')+'-'+String(provider.getUTCMonth()+1).padStart(2,'0')+'-'+String(provider.getUTCDate()).padStart(2,'0')};
   const explicitDate=(row,time)=>{const table=row.closest('.c-odds-table--sport1');const values=[];for(const node of [time,row,table]){if(!node)continue;for(const name of ['data-date','datetime','data-start-time','data-kickoff']){const raw=clean(node.getAttribute(name),80),value=name==='data-date'?literalDate(raw):zonedDate(raw);if(value)values.push(value)}}const unique=[...new Set(values)];return unique.length===1?{kind:'EXPLICIT',isoDate:unique[0]}:{kind:'UNKNOWN'}};
   const aggregate=(row)=>{const names=Array.from(row.querySelectorAll('.c-team-name')).map((node)=>fold(node.textContent));if(names.length!==2)return false;const parse=(value)=>{const match=/^(DOI NHA|DOI KHACH)\\s*-\\s*(\\S(?:.*\\S)?)\\s*-\\s*(\\d+)\\s+TRAN DAU$/.exec(value);return match?{role:match[1],bucket:match[2],count:Number(match[3])}:null};const home=parse(names[0]),away=parse(names[1]);return home?.role==='DOI NHA'&&away?.role==='DOI KHACH'&&home.count>=2&&home.count===away.count&&home.bucket===away.bucket};
   const rows=[];
@@ -158,14 +160,16 @@ const pagePhaseExpression = (token: string, ownerMatchId?: string,
   requireCatalog = true): string => {
   const metadataPrefix = `(() => {
   const probe=(${SABA_NAVIGATION_PROBE_READ_EXPRESSION});
-  const metadata=(${rosterMetadataExpression(token)});`;
+  ${requireCatalog ? `const baseCatalog=(${CMD_PUBLIC_CATALOG_EXPRESSION});
+  const baseRecords=(()=>{try{return JSON.parse(baseCatalog)}catch{return null}})();` : ""}
+  const metadata=(${rosterMetadataExpression(token, requireCatalog
+    ? "baseRecords?.[0]?.providerTimezoneOffsetMinutes ?? null" : PUBLIC_PROVIDER_TIMEZONE_EXPRESSION)});`;
   if (!requireCatalog) return `${metadataPrefix}
   return {probe,metadata,catalog:'[]',more:null,supplementalUnsafe:false,unmatched:[],ownerGroups:[]};
 })()`;
   return `${metadataPrefix}
-  const baseCatalog=(${CMD_PUBLIC_CATALOG_EXPRESSION});
   const supplemental=(()=>{
-    let records;try{records=JSON.parse(baseCatalog)}catch{return{catalog:baseCatalog,unsafe:false}}if(!Array.isArray(records))return{catalog:baseCatalog,unsafe:false};
+    const records=baseRecords;if(!Array.isArray(records))return{catalog:baseCatalog,unsafe:false};
     const privateSelector='form,.betslip,[class*="betslip" i],.account,[class*="account" i],[class*="wallet" i]';
     const normalized=(value)=>String(value??'').replace(/\\s+/g,' ').trim(),bounded=(value,cap)=>{const text=normalized(value);return text.length>0&&text.length<=cap?text:null};
     const blocks=Array.from(document.querySelectorAll('.c-bettype')).filter((block)=>!block.closest('.c-match__odds-group')&&!block.closest(privateSelector));
@@ -233,7 +237,8 @@ function isMoreUnavailable(value: unknown): value is MoreUnavailable {
 
 function recordIdentity(record: SabaCollectorRecord): string {
   return JSON.stringify([record.sportId, record.leagueId, record.leagueName, record.matchId,
-    record.timeText, record.teamNames]);
+    record.timeText, record.providerTimezoneOffsetMinutes === undefined ? 480 : record.providerTimezoneOffsetMinutes,
+    record.teamNames]);
 }
 
 function recordStructure(record: SabaCollectorRecord): string {

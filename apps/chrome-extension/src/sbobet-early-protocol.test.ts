@@ -163,6 +163,6 @@ describe("SBOBET Early bounded page fetch", () => {
     expect(await evaluate(expression, async () => new Response("é".repeat(6_000_001))))
       .toEqual({ status: 0 });
     expect(await evaluate(expression, async () => new Response("private error", { status: 429, headers: { "retry-after": "999" } })))
-      .toEqual({ status: 429, retryAfterMs: 300000 });
+      .toEqual({ status: 429, retryAfterMs: 999000 });
   });
 });

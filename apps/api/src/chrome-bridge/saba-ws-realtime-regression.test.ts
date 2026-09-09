@@ -53,6 +53,20 @@ function domEnvelope(sequence: number): ChromeBridgeEnvelope {
         ] }] }] }) } };
 }
 
+function completeCollector(sequence = 0, sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
+  const generation = `saba:collector:realtime-${sequence}`;
+  const periods = ["TODAY", "EARLY"].map((period) => ({ period, rosterMatchIds: [], rosterCount: 0 }));
+  return { ...envelope([], "collector", sequence, sourceEpoch), transport: "DOM_SNAPSHOT",
+    request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+      snapshotId: `saba:collector:realtime-${sequence}`, chunkIndex: 0, chunkCount: 1,
+      sweepId: generation, sweepComplete: true, sweepFrameKey: "sports", sweepDocumentKey: "document",
+      records: [...periods.map((period) => ({ kind: "PERIOD_COMPLETE", collectorGeneration: generation, ...period })),
+        { kind: "TERMINAL", collectorGeneration: generation, periods, owners: [],
+          todayRestoration: { selected: true, rosterMatchIds: [], rosterCount: 0 },
+          unresolvedOwners: [], failedOwners: [] }] }) } };
+}
+
 describe("SABA websocket realtime regressions", () => {
   it("commits reset/baseline/done atomically, then applies a delta by provider odds id", () => {
     const adapter = new SabaWsCatalogAdapter();
@@ -106,6 +120,8 @@ describe("SABA websocket realtime regressions", () => {
   it("discards the prior source epoch and requires a new complete baseline even at a lower envelope sequence", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100, publish });
+    expect(plane.ingest(completeCollector(), { connectionGeneration: 1 })).toBe(true);
+    publish.mockClear();
     expect(plane.ingest(socketState("OPEN", 99, "worker-a:0"), { connectionGeneration: 1 })).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
       [0, "done"]], "r0100", 100, "worker-a:0"), { connectionGeneration: 1 })).toBe(true);
@@ -121,6 +137,7 @@ describe("SABA websocket realtime regressions", () => {
     expect(plane.ingest(socketState("OPEN", 2, "worker-b:0"), { connectionGeneration: 2 })).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.72, -0.82),
       [0, "done"]], "r0002", 3, "worker-b:0"), { connectionGeneration: 2 })).toBe(true);
+    expect(plane.ingest(completeCollector(4, "worker-b:0"), { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
       quotes: expect.arrayContaining([expect.objectContaining({ providerSelectionId: "30:home", rawOdds: "0.72" })])
     });
@@ -141,6 +158,7 @@ describe("SABA websocket realtime regressions", () => {
     expect(plane.ingest(socketState("OPEN", 2, "worker-b:1"))).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.72, -0.82),
       [0, "done"]], "r0002", 3, "worker-b:1"))).toBe(true);
+    expect(plane.ingest(completeCollector(4, "worker-b:1"))).toBe(true);
     expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({
       accountId: "catalog-source:SABA:FOOTBALL"
     }), "FRESH");
@@ -280,6 +298,8 @@ describe("SABA websocket realtime regressions", () => {
   it("invalidates the old generation when a newer same-epoch stream opens before close", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100, publish });
+    expect(plane.ingest(completeCollector())).toBe(true);
+    publish.mockClear();
     expect(plane.ingest(socketState("OPEN", 1, "worker-a:0", "1"))).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
       [0, "done"]], "r0001", 2))).toBe(true);
@@ -296,10 +316,10 @@ describe("SABA websocket realtime regressions", () => {
 
     expect(plane.ingest(onStream(envelope([["f", 0, fields], [0, "reset"],
       ...eventRows(0.72, -0.82), [0, "done"]], "r0001", 7), "2"))).toBe(true);
-    expect(plane.ingest(socketState("CLOSED", 8, "worker-a:0", "1"))).toBe(false);
+    expect(plane.ingest(socketState("CLOSED", 9, "worker-a:0", "1"))).toBe(false);
     expect(plane.ingest(onStream(envelope([
       encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.02, odds2a: -0.02 })
-    ], "r0004", 9), "1"))).toBe(false);
+    ], "r0004", 10), "1"))).toBe(false);
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
       quotes: expect.arrayContaining([
         expect.objectContaining({ providerSelectionId: "30:home", rawOdds: "0.72" })
@@ -312,6 +332,8 @@ describe("SABA websocket realtime regressions", () => {
     let nowMs = 1_786_449_540_002;
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => nowMs, publish });
+    expect(plane.ingest(completeCollector())).toBe(true);
+    publish.mockClear();
     expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
       [0, "done"]], "r0001", 2))).toBe(true);
@@ -331,6 +353,8 @@ describe("SABA websocket realtime regressions", () => {
     let nowMs = 1_786_449_540_002;
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => nowMs, publish });
+    expect(plane.ingest(completeCollector())).toBe(true);
+    publish.mockClear();
     const rows = [["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99), [0, "done"]];
     const template = envelope(rows, "unused", 2);
     const revisionless: ChromeBridgeEnvelope = { ...template,
@@ -351,6 +375,8 @@ describe("SABA websocket realtime regressions", () => {
   it("retires current authority before malformed reset decoding can renew it", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100, publish });
+    expect(plane.ingest(completeCollector())).toBe(true);
+    publish.mockClear();
     expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
       [0, "done"]], "r0001", 2))).toBe(true);
@@ -380,8 +406,9 @@ describe("SABA websocket realtime regressions", () => {
     })]);
   });
 
-  it("commits a proven complete empty SABA baseline but not a partial empty reset", async () => {
+  it("commits an empty socket baseline only with retained complete collector proof", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100 });
+    expect(plane.ingest(completeCollector())).toBe(true);
     expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
       [0, "done"]], "r0001", 2))).toBe(true);
@@ -398,8 +425,9 @@ describe("SABA websocket realtime regressions", () => {
     });
   });
 
-  it("lets a proven complete empty replacement bridge tombstone every retained bridge partition", async () => {
+  it("keeps another bridge partition when one completed replacement bridge is empty", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100 });
+    expect(plane.ingest(completeCollector())).toBe(true);
     expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
       [0, "done"]], "r0001", 2, "worker-a:0", "b1"))).toBe(true);
@@ -413,13 +441,16 @@ describe("SABA websocket realtime regressions", () => {
     expect(plane.ingest(envelope([[0, "done"]], "r0001", 4,
       "worker-a:0", "b2"))).toBe(true);
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
-      events: [], markets: [], quotes: []
+      events: [expect.objectContaining({ providerEventId: "20" })],
+      quotes: expect.arrayContaining([expect.objectContaining({ providerSelectionId: "30:home", rawOdds: "0.91" })])
     });
   });
 
   it("re-baselines SABA on a newer stream in the same source epoch after close", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100, publish });
+    expect(plane.ingest(completeCollector())).toBe(true);
+    publish.mockClear();
     expect(plane.ingest(socketState("OPEN", 1, "worker-a:0", "1"))).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"],
       ...eventRows(0.91, -0.99), [0, "done"]], "r0001", 2))).toBe(true);
@@ -437,7 +468,7 @@ describe("SABA websocket realtime regressions", () => {
       quotes: expect.arrayContaining([expect.objectContaining({ providerSelectionId: "30:home", rawOdds: "0.72" })])
     });
     const late = envelope([encoded({ type: "o", oddsid: 30, matchid: 20,
-      odds1a: 0.01, odds2a: -0.01 })], "r0003", 6);
+       odds1a: 0.01, odds2a: -0.01 })], "r0003", 7);
     expect(plane.ingest(late)).toBe(false);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH"]);
   });

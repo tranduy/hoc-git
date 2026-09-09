@@ -86,7 +86,85 @@ const activeAssembler = (sourceEpoch = EPOCH) => {
   return assembler;
 };
 
+const mainRosterItems = (): unknown[] => {
+  const full = completeItems();
+  const proof = full.at(-1)!;
+  if (proof.kind !== "TERMINAL") throw new Error("terminal fixture missing");
+  const { unresolvedOwners: _unresolved, failedOwners: _failed, ...manifest } = proof;
+  return [...full.flatMap((item) => item.kind === "CAPTURE" && item.captureKind === "ROSTER" ?
+    [{ ...item, record: { ...item.record, providerTimezoneOffsetMinutes: 480 } }] : []),
+    { ...manifest, kind: "MAIN_ROSTER_TERMINAL", hiddenMarketsComplete: false }];
+};
+
 describe("SabaCollectorDomAssembler", () => {
+  it("validates both main rosters independently of hidden owner completion and preserves acquisition clocks", () => {
+    const items = mainRosterItems();
+    const result = ingest(activeAssembler(), chunk("saba:collector:main-proof", 0, 1, items));
+    expect(result).toMatchObject({ coverage: "MAIN_ROSTER", hiddenMarketsComplete: false,
+      owners: [], sourceId: SOURCE, sourceEpoch: EPOCH });
+    expect(result?.captures).toEqual(items.slice(0, -1));
+  });
+
+  it.each([
+    ["missing capture", (items: any[]) => items.slice(1)],
+    ["duplicate capture", (items: any[]) => [items[0], items[0], ...items.slice(1)]],
+    ["omitted owner", (items: any[]) => [...items.slice(0, -1), { ...items.at(-1), owners: [] }]],
+    ["duplicate owner", (items: any[]) => [...items.slice(0, -1), { ...items.at(-1),
+      owners: [...items.at(-1).owners, items.at(-1).owners[0]] }]],
+    ["missing Early", (items: any[]) => [...items.slice(0, -1), { ...items.at(-1),
+      periods: items.at(-1).periods.slice(0, 1) }]],
+    ["unrestored Today", (items: any[]) => [...items.slice(0, -1), { ...items.at(-1),
+      todayRestoration: { ...items.at(-1).todayRestoration, selected: false } }]],
+    ["restore roster mismatch", (items: any[]) => [...items.slice(0, -1), { ...items.at(-1),
+      todayRestoration: { selected: true, rosterMatchIds: [], rosterCount: 0 } }]],
+    ["hidden proof mixed in", (items: any[]) => [...items, owner("TODAY", "today-1")]],
+    ["fake hidden completion", (items: any[]) => [...items.slice(0, -1), { ...items.at(-1), hiddenMarketsComplete: true }]],
+    ["future capture", (items: any[]) => [{ ...items[0], capturedMonotonicMs: 1_000_000 }, ...items.slice(1)]],
+    ["unproven timezone", (items: any[]) => [{ ...items[0],
+      record: { ...items[0].record, providerTimezoneOffsetMinutes: null } }, ...items.slice(1)]],
+    ["foreign generation", (items: any[]) => [{ ...items[0], collectorGeneration: "foreign" }, ...items.slice(1)]]
+  ])("rejects an invalid main roster atomically: %s", (_label, change) => {
+    expect(ingest(activeAssembler(), chunk("saba:collector:invalid-main", 0, 1,
+      change(mainRosterItems())))).toBeNull();
+  });
+
+  it("accepts explicitly empty main periods without manufacturing hidden completion", () => {
+    const proof = mainRosterItems().at(-1) as Record<string, unknown>;
+    const empty = { ...proof, periods: ["TODAY", "EARLY"].map((period) => ({
+      period, rosterMatchIds: [], rosterCount: 0 })), owners: [],
+      todayRestoration: { selected: true, rosterMatchIds: [], rosterCount: 0 } };
+    expect(ingest(activeAssembler(), chunk("saba:collector:empty-main", 0, 1, [empty])))
+      .toMatchObject({ coverage: "MAIN_ROSTER", hiddenMarketsComplete: false, captures: [], owners: [] });
+  });
+
+  it("accepts a main publication and later full hidden publication without deduping either stage", () => {
+    const assembler = activeAssembler();
+    const mainGeneration = `${GENERATION}:main`;
+    const main = mainRosterItems().map((item) => ({ ...(item as Record<string, unknown>),
+      collectorGeneration: mainGeneration }));
+    expect(ingest(assembler, chunk("saba:collector:staged-main", 0, 1, main,
+      { sweepId: mainGeneration }))).toMatchObject({ coverage: "MAIN_ROSTER" });
+    expect(ingest(assembler, chunk("saba:collector:staged-hidden", 0, 1, completeItems()),
+      100_001, EPOCH, 1_788_800_100_001)).toMatchObject({ coverage: "HIDDEN_COMPLETE", hiddenMarketsComplete: true });
+  });
+
+  it("rejects main chunks from another document or retired epoch", () => {
+    const assembler = activeAssembler();
+    const items = mainRosterItems();
+    expect(ingest(assembler, chunk("saba:collector:main-binding", 0, 2, items.slice(0, 1)))).toBeNull();
+    expect(ingest(assembler, chunk("saba:collector:main-binding", 1, 2, items.slice(1),
+      { sweepDocumentKey: "foreign-document" }), 100_001)).toBeNull();
+    assembler.activateSourceEpoch(SOURCE, "worker-a:14");
+    expect(ingest(assembler, chunk("saba:collector:retired-main", 0, 1, items))).toBeNull();
+  });
+
+  it.each([420, 480, null])("retains explicit public timezone metadata %s through collector validation", (offset) => {
+    const items = completeItems().map((item) => item.kind !== "CAPTURE" ? item : {
+      ...item, record: { ...item.record, providerTimezoneOffsetMinutes: offset }
+    });
+    const result = ingest(activeAssembler(), chunk("saba:collector:timezone", 0, 1, items));
+    expect(result?.captures[0]?.record).toHaveProperty("providerTimezoneOffsetMinutes", offset);
+  });
   it.each([26, 128])("preserves %i unknown public outcomes without treating them as a binary market", (count) => {
     const items = completeItems().map((item) => item.kind !== "CAPTURE" ? item : {
       ...item, record: { ...item.record, groups: [{ betTypeIds: [], labels: ["Unclassified public market"],

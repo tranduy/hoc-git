@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
+  NativeMarketObservationSchema,
   ProviderEventSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema
@@ -16,10 +17,12 @@ const observedCatalogSchema = z.strictObject({
   category: z.enum(["FOOTBALL", "LOL"]),
   comparisonState: z.literal("AWAITING_SECOND_PROVIDER"),
   observedAtMs: z.number().finite().nonnegative(),
+  observedMonotonicMs: z.number().finite().nonnegative().optional(),
   rejectedMarketCount: z.number().int().nonnegative(),
   events: z.array(z.unknown()),
   markets: z.array(z.unknown()),
-  quotes: z.array(z.unknown())
+  quotes: z.array(z.unknown()),
+  nativeMarketObservations: z.array(z.unknown()).optional()
 });
 
 function validateCatalog(value: unknown): ObservedProviderCatalog | null {
@@ -27,8 +30,34 @@ function validateCatalog(value: unknown): ObservedProviderCatalog | null {
   if (!envelope.success ||
     envelope.data.events.some((event) => !ProviderEventSchema.safeParse(event).success) ||
     envelope.data.markets.some((market) => !ProviderMarketSchema.safeParse(market).success) ||
-    envelope.data.quotes.some((quote) => !ProviderQuoteSchema.safeParse(quote).success)) return null;
+    envelope.data.quotes.some((quote) => !ProviderQuoteSchema.safeParse(quote).success) ||
+    envelope.data.nativeMarketObservations?.some((observation) =>
+      !NativeMarketObservationSchema.safeParse(observation).success)) return null;
   return envelope.data as ObservedProviderCatalog;
+}
+
+function* serializedCatalog(catalog: ObservedProviderCatalog): Generator<string> {
+  yield "{";
+  let first = true;
+  // writeFile consumes this iterator with backpressure. Keep only one small
+  // array group serialized instead of a full JSON string plus its UTF-8 copy.
+  for (const [key, value] of Object.entries(catalog)) {
+    if (value === undefined) continue;
+    if (!first) yield ",";
+    first = false;
+    yield JSON.stringify(key) + ":";
+    if (!Array.isArray(value)) {
+      yield JSON.stringify(value);
+      continue;
+    }
+    yield "[";
+    for (let index = 0; index < value.length; index += 128) {
+      if (index > 0) yield ",";
+      yield JSON.stringify(value.slice(index, index + 128)).slice(1, -1);
+    }
+    yield "]";
+  }
+  yield "}";
 }
 
 export interface CatalogStoreLike {
@@ -65,7 +94,7 @@ export class DurableCatalogStore implements CatalogStoreLike {
     const temporary = `${target}.${randomUUID()}.tmp`;
     try {
       await mkdir(this.#root, { recursive: true });
-      await writeFile(temporary, JSON.stringify(validated), { encoding: "utf8", flag: "wx" });
+      await writeFile(temporary, serializedCatalog(validated), { encoding: "utf8", flag: "wx" });
       await rename(temporary, target);
     } catch {
       await rm(temporary, { force: true }).catch(() => undefined);

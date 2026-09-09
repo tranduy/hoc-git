@@ -220,6 +220,17 @@ export class ProviderFeedController {
     this.#lastAuthoritativeEvidenceAtMs = evidence.atMs;
     this.#lastDeltaAtMs = evidence.atMs;
     this.#lastSemanticChangeAtMs = evidence.atMs;
+    // A missed cadence does not invalidate a complete generation. Once a
+    // current semantic delta resumes it, release the recovery latch. Check
+    // wall time as well as the receipt clock so buffered evidence cannot
+    // revive an expired/still-silent feed. Real stream faults clear the
+    // authoritative baseline above and cannot enter this path.
+    if (this.#livePrerequisitesSatisfied(this.#now())) {
+      this.#recoveryStage = "NONE";
+      this.#recoveryAttempt = 0;
+      this.#lastRecoveryRequestedAtMs = null;
+      this.#transition("LIVE", null);
+    }
     return { accepted: true, publish: { catalog: evidence.catalog, snapshotState: "FRESH" }, stateChanged: false };
   }
 

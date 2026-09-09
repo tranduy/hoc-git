@@ -22,6 +22,18 @@ function catalog(provider: "SABA" | "IM", odds: readonly [string, string]): Live
 }
 
 describe("observed price movement tracker", () => {
+  it("retains movement identity and prices without retaining historical catalog graphs", () => {
+    const tracker = new PriceMovementTracker();
+    tracker.update(buildComparisonEvents([catalog("SABA", ["2.2", "1.7"]), catalog("IM", ["2.1", "1.8"])]), 1_000);
+    const changed = buildComparisonEvents([catalog("SABA", ["1.7", "2.2"]), catalog("IM", ["2.1", "1.8"])]);
+    const movement = tracker.update(changed, 1_100)[0]!;
+    expect(movement.event).toEqual({ key: changed[0]!.key });
+    expect(movement).toMatchObject({ previousDecimal: "2.2", currentDecimal: "1.7", changedAtMs: 1_100 });
+    const next = buildComparisonEvents([catalog("SABA", ["1.7", "2.2"]), catalog("IM", ["2.1", "1.8"])]);
+    expect(tracker.update(next, 1_200)[0]).toEqual(movement);
+    expect(tracker.update(next, 61_101)).toEqual([]);
+  });
+
   it("detects and ranks a real observed-ticket move even when settlement profiles differ", () => {
     const tracker = new PriceMovementTracker();
     expect(tracker.update(buildComparisonEvents([catalog("SABA", ["2.2", "1.7"]), catalog("IM", ["2.1", "1.8"])]), 1_000)).toEqual([]);

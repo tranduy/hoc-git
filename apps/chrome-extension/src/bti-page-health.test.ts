@@ -21,7 +21,8 @@ describe("BTI page health", () => {
       detailInFlightEvents: 0, detailOldestReceiptAgeMs: 60_000,
       detailNearTtlMs: 12_000, detailDistantTtlMs: 60_000, detailDueEvents: 0,
       detailDeferredEvents: 0, detailRetainedEventCap: 2048, detailQueueCap: 128,
-      detailOverCapEvents: 0, rosterRefreshFailed: false };
+      detailOverCapEvents: 0, rosterRefreshFailed: false,
+      requestPaused: true, requestStatus: 429, requestRetryInMs: 60_000, authBlocked: false };
     const run = new Function("document", `return ${BTI_PAGE_HEALTH_EXPRESSION}`);
     const value = run({ readyState: "complete", body: { innerText: "BTI football" },
       documentElement: { dataset: { fieldlineBtiRosterCoverage: JSON.stringify(coverage) } } });
@@ -52,6 +53,17 @@ describe("BTI page health", () => {
     expect(btiHardRecoveryAction({ status: "HEALTHY", code: null })).toBe("REFRESH");
     expect(btiHardRecoveryAction({ status: "UNKNOWN", code: null })).toBe("REFRESH");
     expect(btiHardRecoveryAction({ status: "AUTH_ERROR", code: "1008" })).toBe("RENEW");
+  });
+
+  it("does not bypass provider request cooldown by restoring or relaunching its page", async () => {
+    const health = { ...failedPage, rosterCoverage: JSON.stringify({ phase: "FAILED",
+      requestPaused: true, requestStatus: 429, requestRetryInMs: 600_000, authBlocked: false }) };
+    for (const command of ["RELOAD", "RESTORE", "ENSURE"] as const) {
+      expect(btiSourceControlAction(command, health)).toBe("REFRESH_CURRENT");
+    }
+    const reload = vi.fn(async () => undefined);
+    await new BtiPageRecoveryWatchdog({ reload }).observe(health);
+    expect(reload).not.toHaveBeenCalled();
   });
 
   it("does not turn restore and fresh-launch escalation back into another in-page refresh", () => {

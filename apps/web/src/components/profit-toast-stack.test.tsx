@@ -14,6 +14,12 @@ function alert(index: number): ProfitAlert {
 afterEach(cleanup);
 
 describe("profit alert sound", () => {
+  it("does not sound for zero or negative worst-case profit", async () => {
+    const play = vi.fn();
+    render(<ProfitToastStack alerts={[alert(0), { ...alert(1), worstCaseProfit: "-1" }]} sound={{ play }} />);
+    await Promise.resolve();
+    expect(play).not.toHaveBeenCalled();
+  });
   it("plays once for each new profitable ticket without rendering notifications", async () => {
     const play = vi.fn(async () => undefined);
     const view = render(<ProfitToastStack alerts={[alert(1), alert(2)]} sound={{ play }} volume={0.35} />);

@@ -279,6 +279,10 @@ export type MarketType =
   | "FT_AH"
   | "FT_TOTAL"
   | "FH_1X2"
+  | "SH_1X2"
+  | "FT_DOUBLE_CHANCE"
+  | "FH_DOUBLE_CHANCE"
+  | "SH_DOUBLE_CHANCE"
   | "FH_AH"
   | "FH_TOTAL"
   | "SH_AH"
@@ -299,6 +303,7 @@ export type MarketType =
   | "FT_BTTS"
   | "FH_BTTS"
   | "SH_BTTS"
+  | "FT_BOTH_TEAMS_SCORE_BOTH_HALVES"
   | "SENDING_OFF"
   | "HOME_CORNER_FT_TOTAL"
   | "HOME_CORNER_FH_TOTAL"
@@ -320,6 +325,8 @@ export type MarketType =
   | "FT_BOTH_HALVES_UNDER_TOTAL"
   | "HOME_FT_TOTAL"
   | "AWAY_FT_TOTAL"
+  | "HOME_FH_TOTAL"
+  | "AWAY_FH_TOTAL"
   | "HOME_FT_TO_WIN"
   | "AWAY_FT_TO_WIN"
   | "FT_ANY_TEAM_TO_WIN"
@@ -431,12 +438,18 @@ export interface NativeMarketObservation {
   readonly nativeLabel: string | null;
   readonly nativeScope: string | null;
   readonly outcomeLabels: readonly string[];
+  /** Original public odds row when its positional field identities are not yet fully decoded. */
+  readonly nativeRow?: string | undefined;
+  /** Present only when native market suspension/closure was observed. Missing means unknown. */
+  readonly status?: QuoteStatus | undefined;
   /** Original provider selection values, including markets awaiting semantic mapping. */
   readonly nativeSelections?: readonly {
     readonly selectionId: string | null;
     readonly outcomeId: string | null;
     readonly line: string | null;
     readonly price: string | null;
+    readonly rawFormat?: OddsFormat | undefined;
+    readonly status?: QuoteStatus | undefined;
   }[] | undefined;
   readonly observedAtMs: number;
   readonly disposition: NativeMarketDisposition;
