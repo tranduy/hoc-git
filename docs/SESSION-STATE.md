@@ -30,9 +30,12 @@ Verified exactoldinstance04747496, launcher/API/web PIDsgone, ports4310/4311free
 unchangedstate; archivedthatfile within.auth/run; existinghandoff thencompleted
 andlease released. No broad processkill or providerreload. Local/public200 newasset.
 Headless04:24: noerrors/crash, mainJSheap227,701,528bytes,167livepairs; AP/IM/SBO
-remainoutdated. APbootstrap patchbuilt but latest runtimeAPstilloldgeneric
-REQUEST_TEMPLATE_MISSING; extensionactivation investigation ongoing. Do not
-claim liveAPsource fixed from unit tests or retainedreplay.
+remainoutdated. Extensionactivationconfirmed04:25:22 by newobserverepoch
+30314ad9 andnewgateAPSPORT_BOOTSTRAP_CONTEXT_UNAVAILABLE. APstill0HTTP/WS;
+failureprecedesAPcatalogrequests, whileobtaining/evaluatingproviderdocument
+context. Nofreshnativecapture. Do notclaim liveAPsource fixed from unit tests
+or retainedreplay. Implementationcommitted/pushed564e70f. Initialpushfailed
+transientDNS; explicitIPv4SSHretry succeeded withoutchangingremoteconfig.
 
 ## BTI remaining normalization — 2026-09-10 03:45 local
 

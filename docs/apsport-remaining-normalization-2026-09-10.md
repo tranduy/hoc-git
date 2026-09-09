@@ -91,3 +91,11 @@ passed. The replay asserts native conservation, unchanged old values and zero
 lost pairs. Runtime deployment evidence is recorded separately in
 `deployment.json` and `.run/ap-ingress-2026-09-10/`; successful replay does not
 mean AP has resumed live ingestion.
+
+Deployment completed at 04:22:34 +07:00 with API identity
+`sha256:dfde31e326b7273a2d8667a8faba617b78296c2d7b19c90a6351f0bf0608a7f7`;
+local and public web serve `index-BR_hjKBB.js`. At 04:25:22 the new extension
+was confirmed active, but AP still had zero HTTP/WS payloads and reported
+`APSPORT_BOOTSTRAP_CONTEXT_UNAVAILABLE` before catalog requests. Its provider
+document context remains the live-ingress blocker. The headless local UI
+rendered without JavaScript errors or crash; this is not AP feed recovery.
