@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { footballBinaryMarketSpec, footballCategoricalMarketSpec, type MarketType, type ProviderEvent } from "@tool-chenh/contracts";
 import { footballComparisonEquivalents } from "./football-comparison-equivalents.js";
 import type { ComparisonCell } from "./comparison.js";
-import { buildComparisonEvents } from "./comparison.js";
+import { binaryOpposingCellPairs, buildComparisonEvents } from "./comparison.js";
 import { resultCatalog } from "./result-opposition.fixture.js";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 function cell(type:MarketType,line:string|null,selections:string[],live=false):ComparisonCell {
@@ -50,13 +50,63 @@ describe("proven native football equivalences",()=>{
     expect(footballComparisonEquivalents({...source,sourceEvent:undefined} as unknown as ComparisonCell)).toEqual([]);
   });
 });
-function catalog(provider:"BTI"|"CMD",type:MarketType,line:string|null,selections:string[],reversed=false):LiveCatalogResponse {
+function catalog(provider:"BTI"|"CMD"|"APSPORT",type:MarketType,line:string|null,selections:string[],reversed=false):LiveCatalogResponse {
   const base=resultCatalog(provider,false),native=cell(type,line,selections);
   const market={...native.market,provider,providerEventId:base.events[0]!.providerEventId};
   return {...base,markets:[market],quotes:native.quotes.map(q=>({...q,provider,providerEventId:market.providerEventId})),
     events:base.events.map(e=>reversed?{...e,participantA:e.participantB,participantB:e.participantA}:e)};
 }
 describe("equivalences in the real matcher",()=>{
+  it.each([false,true])("matches AP non-draw without BTTS against BTI draw-or-BTTS after orientation %s",reversed=>{
+    const ap=catalog("APSPORT","FT_DOUBLE_CHANCE_BTTS",null,["HOME_AWAY_NO"]);
+    const bti=catalog("BTI","FT_RESULT_OR_BTTS",null,["DRAW_YES_YES"],reversed);
+    const row=buildComparisonEvents([ap,bti]).flatMap(e=>e.rows).find(r=>r.marketType==="FT_DRAW_OR_BTTS");
+    expect(row).toBeDefined();
+    expect(binaryOpposingCellPairs(row!.cells)).toHaveLength(1);
+    expect(row!.cells.map(c=>[c.provider,c.quotes[0]!.selection]).sort()).toEqual([["APSPORT","NO"],["BTI","YES"]]);
+    for(const source of [ap,bti]){
+      const leg=row!.cells.find(c=>c.provider===source.provider)!;
+      expect(leg.sourceMarket).toBe(source.markets[0]);expect(leg.sourceQuotes).toEqual(source.quotes);
+      expect(leg.quotes[0]).toMatchObject({providerSelectionId:source.quotes[0]!.providerSelectionId,
+        rawOdds:source.quotes[0]!.rawOdds,rawFormat:source.quotes[0]!.rawFormat,
+        receivedMonotonicMs:source.quotes[0]!.receivedMonotonicMs,sequence:source.quotes[0]!.sequence});
+    }
+  });
+  it("rejects BTI's NO leg against the equivalent AP predicate",()=>{
+    const rows=buildComparisonEvents([catalog("APSPORT","FT_DOUBLE_CHANCE_BTTS",null,["HOME_AWAY_NO"]),
+      catalog("BTI","FT_RESULT_OR_BTTS",null,["DRAW_YES_NO"])]).flatMap(e=>e.rows);
+    expect(rows.some(r=>r.marketType==="FT_DRAW_OR_BTTS")).toBe(false);
+  });
+  it("exhaustively covers each regulation score with exactly one of the projected predicates",()=>{
+    const ap=footballComparisonEquivalents(cell("FT_DOUBLE_CHANCE_BTTS",null,["HOME_AWAY_NO"]))[0];
+    const bti=footballComparisonEquivalents(cell("FT_RESULT_OR_BTTS",null,["DRAW_YES_YES"]))[0];
+    expect(ap?.quotes[0]?.selection).toBe("NO");expect(bti?.quotes[0]?.selection).toBe("YES");
+    for(let home=0;home<=20;home++)for(let away=0;away<=20;away++){
+      const draw=home===away,bothScore=home>0&&away>0;
+      expect(Number(!draw&&!bothScore)+Number(draw||bothScore)).toBe(1);
+      expect((home===0)!==(away===0)).toBe(!draw&&!bothScore);
+    }
+  });
+  it.each([false,true])("retains full-period boolean predicates for live=%s without creating unrelated complements",live=>{
+    const bti=footballComparisonEquivalents(cell("FT_RESULT_OR_BTTS",null,["DRAW_YES_YES","DRAW_YES_NO","HOME_YES_YES"],live));
+    expect(bti).toHaveLength(1);expect(bti[0]!.market.marketType).toBe("FT_DRAW_OR_BTTS");
+    expect(bti[0]!.quotes.map(q=>q.selection)).toEqual(["YES","NO"]);
+    const ap=footballComparisonEquivalents(cell("FT_DOUBLE_CHANCE_BTTS",null,["HOME_AWAY_NO","HOME_AWAY_YES","HOME_DRAW_NO"],live));
+    expect(ap).toHaveLength(1);expect(ap[0]!.quotes.map(q=>q.selection)).toEqual(["NO"]);
+  });
+  it("rejects malformed or suspended evidence for the new boolean partition",()=>{
+    const base=cell("FT_DOUBLE_CHANCE_BTTS",null,["HOME_AWAY_NO"]);
+    const rejected:ComparisonCell[]=[
+      {...base,market:{...base.market,settlementProfile:"foreign-rules"}},
+      {...base,market:{...base.market,scope:"FIRST_HALF"}},
+      {...base,market:{...base.market,line:"2.5"},quotes:base.quotes.map(q=>({...q,line:"2.5"}))},
+      {...base,quotes:base.quotes.map(q=>({...q,isLive:true}))},
+      {...base,quotes:base.quotes.map(q=>({...q,status:"SUSPENDED" as const}))},
+      {...base,quotes:[...base.quotes,...base.quotes]},
+      {...base,sourceEvent:undefined} as unknown as ComparisonCell
+    ];
+    for(const bad of rejected)expect(footballComparisonEquivalents(bad)).toEqual([]);
+  });
   it.each([false,true])("matches a European away offer against native Asian home after orientation %s",reversed=>{
     const bti=catalog("BTI","FT_EUROPEAN_HANDICAP",reversed?"1":"-1",[reversed?"HOME":"AWAY"],reversed);
     const cmd=catalog("CMD","FT_AH","-0.5",["HOME"]);

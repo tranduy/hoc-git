@@ -7,6 +7,7 @@ import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 import { decodeTsportCategoricalTerms, tsportCategoricalGroups } from "./tsport-categorical-terms.js";
+import { tsportNativeContext } from "./tsport-native-context.js";
 
 const ACCOUNT_ID = "catalog-source:APSPORT:FOOTBALL";
 const MAX_RETIRED_DOM_SWEEPS = 64;
@@ -105,6 +106,10 @@ const marketSemanticsByGroup: Readonly<Record<string, TsportMarketSemantics>> = 
   "20": { marketType: "CORNER_FH_AH", selections: ["HOME", "AWAY"] },
   "21": { marketType: "CORNER_FT_TOTAL", selections: ["OVER", "UNDER"] },
   "22": { marketType: "CORNER_FH_TOTAL", selections: ["OVER", "UNDER"] },
+  "25": { marketType: "ET_TOTAL", selections: ["OVER", "UNDER"] },
+  "26": { marketType: "ET_FH_TOTAL", selections: ["OVER", "UNDER"] },
+  "27": { marketType: "ET_AH", selections: ["HOME", "AWAY"] },
+  "28": { marketType: "ET_FH_AH", selections: ["HOME", "AWAY"] },
   "31": { marketType: "CARD_FT_TOTAL", selections: ["OVER", "UNDER"] },
   "32": { marketType: "CARD_FH_TOTAL", selections: ["OVER", "UNDER"] },
   "33": { marketType: "CARD_FT_AH", selections: ["HOME", "AWAY"] },
@@ -149,6 +154,7 @@ const nativeGroupLabelById: Readonly<Record<string, string>> = {
   "11": "FH_CORRECT_SCORE", "12": "DOUBLE_CHANCE", "13": "FH_DOUBLE_CHANCE", "14": "TOTAL_SCORE",
   "15": "FH_TOTAL_SCORE", "16": "DRAW_NO_BET", "17": "CORNER_FT_1X2", "18": "CORNER_FH_1X2",
   "19": "CORNER_FT_AH", "20": "CORNER_FH_AH", "21": "CORNER_FT_TOTAL", "22": "CORNER_FH_TOTAL",
+  "23": "ET_1X2", "24": "ET_FH_1X2", "25": "ET_TOTAL", "26": "ET_FH_TOTAL", "27": "ET_AH", "28": "ET_FH_AH",
   "29": "CARD_FT_1X2", "30": "CARD_FH_1X2", "31": "CARD_FT_TOTAL", "32": "CARD_FH_TOTAL",
   "33": "CARD_FT_AH", "34": "CARD_FH_AH", "36": "FT_BTTS", "37": "FH_BTTS",
   "56": "CORNER_FT_ODD_EVEN", "57": "CORNER_FH_ODD_EVEN", "58": "TEAM_QUALIFY",
@@ -172,10 +178,11 @@ const nativeGroupLabelById: Readonly<Record<string, string>> = {
   "144": "EUROPEAN_CORNER_HANDICAP", "146": "EUROPEAN_NEXT_GOAL", "147": "REST_OF_MATCH_WINNER",
   "148": "HOME_FT_TO_WIN", "149": "AWAY_FT_TO_WIN", "150": "HOME_NO_BET", "151": "AWAY_NO_BET",
   "153": "NEXT_PLAYER_GOALSCORER", "154": "FT_ANY_TEAM_TO_WIN", "155": "ANYTIME_GOALSCORER",
-  "159": "FAST_BOOKING_1X2_10M", "162": "FAST_TOTAL_10M", "163": "FAST_CORNER_1X2_10M",
-  "164": "FAST_CORNER_ODD_EVEN_5M", "166": "FAST_CORNER_TOTAL_5M", "167": "FAST_1X2_5M",
-  "168": "FAST_1X2_10M", "170": "FAST_CORNER_TOTAL_10M", "172": "FAST_TOTAL_5M"
+  "159": "FAST_BOOKING_1X2_10M", "161": "FAST_CORNER_TOTAL_10M", "162": "FAST_TOTAL_10M", "163": "FAST_CORNER_1X2_10M",
+  "164": "FAST_CORNER_ODD_EVEN_5M", "166": "AWAY_FAST_CORNER_TOTAL_5M", "167": "FAST_1X2_5M",
+  "168": "FAST_1X2_10M", "169": "HOME_FAST_CORNER_TOTAL_10M", "170": "AWAY_FAST_CORNER_TOTAL_10M", "172": "FAST_TOTAL_5M"
 };
+const fastNativeGroups = new Set(["159", "161", "162", "163", "164", "166", "167", "168", "169", "170", "172"]);
 
 const threeWayNativeGroups = new Set(["1", "2", "17", "18", "29", "30", "65", "68", "81", "82", "87", "88",
   "89", "90", "91", "138", "140", "141", "143", "144", "146", "147", "159", "163", "167", "168"]);
@@ -394,7 +401,8 @@ function tsportNativeMarketId(groupId: string, offerId: string): string {
 function extractTsportMarket(group: JsonRecord, odd: JsonRecord, live = false): SbobetCatalogInputRecord["markets"][number] | null {
   const groupId = scalar(group["3"]);
   if (groupId !== null && tsportCategoricalGroups.has(groupId)) {
-    const terms = decodeTsportCategoricalTerms(groupId, scalar(odd["7"]), live);
+    const terms = decodeTsportCategoricalTerms(groupId, scalar(odd["7"]), live,
+      { playerId: scalar(odd["15"]), playerName: scalar(odd["16"]) });
     const offerId = scalar(odd["6"]);
     if (terms === null || offerId === null) return null;
     const ids = [scalar(odd["0"]), scalar(odd["2"]), scalar(odd["3"])];
@@ -431,20 +439,23 @@ function extractTsportMarket(group: JsonRecord, odd: JsonRecord, live = false): 
       selections };
   }
   if (spec === null || (spec.linePolicy !== "NONE" && line === null) ||
-    firstId === null || secondId === null || offerId === null ||
-    firstPrice === null || secondPrice === null || scalar(odd["3"]) !== null) return null;
+    offerId === null || scalar(odd["3"]) !== null ||
+    (firstId !== null && firstId === secondId)) return null;
   const isHandicap = spec.family === "HANDICAP";
   const awayLine = isHandicap ? inverseLine(line!) : null;
   if (isHandicap && awayLine === null) return null;
+  const selections = ([
+    [firstId, firstPrice, semantics.selections[0], line],
+    [secondId, secondPrice, semantics.selections[1], awayLine]
+  ] as const).flatMap(([selectionId, quote, selection, selectionLine]) => selectionId === null || quote === null ? [] : [{
+    selectionId, selection, priceText: quote.priceText, priceFormat: quote.priceFormat, locked,
+    ...(isHandicap ? { lineText: selectionLine } : {})
+  }]);
+  if (selections.length === 0) return null;
   return {
     marketId: tsportNativeMarketId(groupId!, offerId), marketType: semantics.marketType, lineText: spec.linePolicy === "NONE" ? null : line!,
     ...(isHandicap ? { handicapLineFormat: "SIGNED" as const } : {}),
-    selections: [
-      { selectionId: firstId, selection: semantics.selections[0], priceText: firstPrice.priceText,
-        priceFormat: firstPrice.priceFormat, locked, ...(isHandicap ? { lineText: line! } : {}) },
-      { selectionId: secondId, selection: semantics.selections[1], priceText: secondPrice.priceText,
-        priceFormat: secondPrice.priceFormat, locked, ...(isHandicap ? { lineText: awayLine! } : {}) }
-    ]
+    selections
   };
 }
 
@@ -479,14 +490,22 @@ export function observeTsportNativeMarkets(event: JsonRecord, observedAtMs: numb
       let disposition: NativeMarketObservation["disposition"];
       let reason: string;
       if (normalized !== null) {
-        disposition = "NORMALIZED";
-        reason = normalized.marketType;
+        const nativeCount = ["0", "2", "3"].filter(key => scalar(odd[key]) !== null).length;
+        const partial = normalized.selections.length < nativeCount;
+        disposition = partial ? "UNMAPPED" : "NORMALIZED";
+        reason = partial ? "UNPRICED_NATIVE_SELECTIONS" : normalized.marketType;
       } else if (semantics !== null) {
         disposition = "EXCLUDED";
         reason = semantics.selections[2] !== undefined ? "INVALID_THREE_WAY_SHAPE" : "INVALID_TWO_WAY_SHAPE";
       } else if ((groupId === "10" || groupId === "11") && scalar(odd["7"]) === "9:9") {
         disposition = "UNMAPPED";
         reason = "OTHER_SCORE_DOMAIN_REQUIRED";
+      } else if (groupId === "153" && (scalar(odd["15"]) === null || scalar(odd["16"]) === null)) {
+        disposition = "UNMAPPED";
+        reason = "PLAYER_IDENTITY_REQUIRED";
+      } else if (fastNativeGroups.has(groupId)) {
+        disposition = "UNMAPPED";
+        reason = scalar(odd["17"]) === null ? "TIME_RANGE_REQUIRED" : "TIME_RANGE_SETTLEMENT_NOT_MAPPED";
       } else if (tsportCategoricalGroups.has(groupId)) {
         disposition = "UNMAPPED";
         reason = "INVALID_OR_UNPROVEN_CATEGORICAL_TERMS";
@@ -501,6 +520,7 @@ export function observeTsportNativeMarkets(event: JsonRecord, observedAtMs: numb
       }
       observations.push({ provider: "APSPORT", category: "FOOTBALL", providerEventId,
         providerMarketId, nativeType: groupId, nativeLabel: knownLabel,
+        nativeRow: tsportNativeContext(groupId, group, odd),
         status: group["10"] !== "Active" || group["6"] === true || odd["13"] === true || event["9"] === true || !activeApsportApiEvent(event) ? "SUSPENDED" : "OPEN",
         nativeScope: normalized !== null ? (footballCategoricalMarketSpec(normalized.marketType) ??
           footballResultMarketSpec(normalized.marketType) ?? footballBinaryMarketSpec(normalized.marketType))?.scope ?? null

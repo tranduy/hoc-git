@@ -3,7 +3,7 @@ import { extendedFootballCategoricalSpecs } from "./football-extended-market.js"
 
 /** Native multi-outcome offers. Keeping a quote does not assert a binary complement. */
 export interface FootballCategoricalMarketSpec {
-  readonly scope: Extract<Scope, "FULL_TIME" | "FIRST_HALF" | "SECOND_HALF">;
+  readonly scope: Extract<Scope, "FULL_TIME" | "FIRST_HALF" | "SECOND_HALF" | "EXTRA_TIME" | "EXTRA_TIME_FIRST_HALF">;
   readonly settlementProfile: string;
   readonly linePolicy: "NONE" | "HALF_UNIT" | "INTEGER";
   readonly selectionPattern: RegExp;

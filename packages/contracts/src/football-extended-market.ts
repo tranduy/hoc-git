@@ -4,6 +4,14 @@ import type { FootballCategoricalMarketSpec } from "./football-categorical-marke
 // Registry entries are separate from decoding: every native mapping must still
 // corroborate its subject, period, price and indexed/time terms.
 const binaryEntries = [
+  // AP's published rules settle these on the 30-minute extra-time period,
+  // or its first 15 minutes, including added time; regulation goals do not carry over.
+  ["ET_TOTAL","GOALS","EXTRA_TIME","TOTAL","HALF_UNIT"],
+  ["ET_AH","GOALS","EXTRA_TIME","HANDICAP","HALF_UNIT"],
+  ["ET_FH_TOTAL","GOALS","EXTRA_TIME_FIRST_HALF","TOTAL","HALF_UNIT"],
+  ["ET_FH_AH","GOALS","EXTRA_TIME_FIRST_HALF","HANDICAP","HALF_UNIT"],
+  ["PLAYER_FT_GOAL_NUMBER_SCORER","GOALS","FULL_TIME","YES_NO","POSITIVE_INTEGER"],
+  ["FT_DRAW_OR_BTTS","GOALS","FULL_TIME","YES_NO","NONE"],
   ["SHOTS_FH_TOTAL","SHOTS","FIRST_HALF","TOTAL","HALF_UNIT"],
   ["GOAL_KICKS_FH_TOTAL","GOAL_KICKS","FIRST_HALF","TOTAL","HALF_UNIT"],
   ["CARD_FT_ODD_EVEN","CARDS","FULL_TIME","ODD_EVEN","NONE"],
@@ -108,6 +116,12 @@ const binaryEntries = [
   ["AWAY_TACKLES_FT_TOTAL","TACKLES","FULL_TIME","TOTAL","HALF_UNIT"],
 ] as const;
 const categoricalEntries = [
+  ["ET_1X2","EXTRA_TIME",/^(?:HOME|DRAW|AWAY)$/u,"NONE"],
+  ["ET_FH_1X2","EXTRA_TIME_FIRST_HALF",/^(?:HOME|DRAW|AWAY)$/u,"NONE"],
+  // The line identifies which goal, rather than an Asian line or a goal race.
+  ["FT_GOAL_NUMBER_TEAM","FULL_TIME",/^(?:HOME|AWAY|NO_GOAL)$/u,"INTEGER"],
+  // The score at acceptance is part of the payoff identity, not a decimal line.
+  ["FT_REMAINING_RESULT","FULL_TIME",/^FROM_SCORE_(?:0|[1-9]\d?)_(?:0|[1-9]\d?)_(?:HOME|AWAY|DRAW)$/u,"NONE"],
   ["HOME_FT_FIRST_SCORER_RESULT","FULL_TIME",/^NO_SCORER$/u,"NONE"],
   ["AWAY_FT_FIRST_SCORER_RESULT","FULL_TIME",/^NO_SCORER$/u,"NONE"],
   ["FT_WIN_CUP","FULL_TIME",/^(?:HOME|AWAY)$/u,"NONE"],

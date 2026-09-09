@@ -354,6 +354,8 @@ export type Scope =
   | "FULL_TIME"
   | "FIRST_HALF"
   | "SECOND_HALF"
+  | "EXTRA_TIME"
+  | "EXTRA_TIME_FIRST_HALF"
   | "SERIES"
   | "MAP_1"
   | "MAP_2"

@@ -1,5 +1,39 @@
 # Trạng thái làm việc — 2026-09-10
 
+## AP remaining normalization — 2026-09-10 04:24 local
+
+Latest user explicitly requested continued AP normalization. New immutable audit
+`.run/ap-remaining-2026-09-10/` starts at CURRENT 60,953 canonical / 1,208 unmapped,
+not historical 18,802. After: 61,014 canonical (+61), 86,208 quotes (+161), 1,147
+unmapped; all 62,161 native rows and old canonical/quotes retained. Remaining:
+AOS1,054, player metadata69, fast time-range12, corner three-way slot proof12.
+New decoder preserves ordinal, remainder score anchor, separate ET/ET_FH scopes,
+player15/16 identity; future native inventory retains player/time fields and
+observed AOS score lists with domainComplete=false. Partial binary prices retain
+the priced leg and report the missing sibling as UNMAPPED.
+
+Fixed AP pairs40,039→40,143 (+104, lost0), all64,500→64,604; APpaired native markets
+22,469→22,573, events540 unchanged. All104 gains are proven AP98HOME_AWAY_NO vs
+BTIQA5200DRAW_YES_YES complement, not from the61new contracts. Source old/native
+clocks unchanged, reconstructed added clocks0. APsnapshot remainsSTALE; no
+fresh/positive ROI claim. Afterengine9dd9535605385858726f8847cb96173213ca526fc096344bb26c36a8161b44c8.
+Report: docs/apsport-remaining-normalization-2026-09-10.md.
+
+Validation462backend /457webcatalog /422extension tests, contracts/adapters/core/
+API/web/extension typechecks passed. Deployed04:22:34: instance
+3bec50ad-c04e-46f0-a86a-a7d9c18a8346, API
+sha256:dfde31e326b7273a2d8667a8faba617b78296c2d7b19c90a6351f0bf0608a7f7;
+webindex-BR_hjKBB.js / workercomparison.worker-DkrW9ExR.js;
+extensionb7f3abdfd1accab5285e948ee8dc7fbde5999d22dd7e3b09b3855127d8f2cf43.
+One integrated handoff temporarily blocked on orphaned old .auth/run/live-stack.json.
+Verified exactoldinstance04747496, launcher/API/web PIDsgone, ports4310/4311free,
+unchangedstate; archivedthatfile within.auth/run; existinghandoff thencompleted
+andlease released. No broad processkill or providerreload. Local/public200 newasset.
+Headless04:24: noerrors/crash, mainJSheap227,701,528bytes,167livepairs; AP/IM/SBO
+remainoutdated. APbootstrap patchbuilt but latest runtimeAPstilloldgeneric
+REQUEST_TEMPLATE_MISSING; extensionactivation investigation ongoing. Do not
+claim liveAPsource fixed from unit tests or retainedreplay.
+
 ## BTI remaining normalization — 2026-09-10 03:45 local
 
 User requested immediate continuation of remaining BTI normalization. Implemented

@@ -19,6 +19,8 @@ import { createSabaHiddenMarketPageAdapter,
 import { SabaSchemaContextCache, type SabaSchemaContext } from "./saba-schema-context.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { TSPORT_CATALOG_SHAPE_EXPRESSION } from "./tsport-catalog-shape.js";
+import { APSPORT_BOOTSTRAP_EXPRESSION, apsportBootstrapFailure,
+  type ApsportBootstrapFailure } from "./apsport-bootstrap.js";
 import { buildTsportSelectionPriceExpression } from "./tsport-selection-price.js";
 import { buildImExactSelectionPriceExpression } from "./im-selection-price.js";
 import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
@@ -143,32 +145,6 @@ const APSPORT_ROSTER_COLLAPSE_FLOOR = 20;
 const APSPORT_MIN_RETAINED_ROSTER_SHARE = 0.9;
 const APSPORT_EVENT_DETAIL_DEBOUNCE_MS = 400;
 const APSPORT_EVENT_DETAIL_MIN_INTERVAL_MS = 2_000;
-const APSPORT_BOOTSTRAP_EXPRESSION = `(() => {
-  try {
-    const fieldlineApsportBootstrap = true;
-    const page = new URL(location.href);
-    if (!fieldlineApsportBootstrap || page.protocol !== 'https:' ||
-      !(page.hostname === 'agenate.com' || page.hostname.endsWith('.agenate.com'))) return null;
-    const language = page.searchParams.get('lng') || '';
-    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
-    const resources = performance.getEntriesByType('resource')
-      .map((entry) => typeof entry.name === 'string' ? entry.name : '');
-    const hints = [...document.querySelectorAll('link[rel="dns-prefetch"],link[rel="preconnect"]')]
-      .map((link) => typeof link.href === 'string' ? link.href : '');
-    let origin = '';
-    for (const raw of [...resources, ...hints]) {
-      try {
-        const candidate = new URL(raw, page.origin);
-        if (candidate.protocol !== 'https:' ||
-          !/^(?:spbui|spbtui)\.agenate\.com$/u.test(candidate.hostname)) continue;
-        if (resources.includes(raw) && !candidate.pathname.startsWith('/be-ui/pac/api/v3/')) continue;
-        origin = candidate.origin;
-        break;
-      } catch { /* Ignore malformed resource timing and link values. */ }
-    }
-    return origin === '' ? null : { origin, language, timeZone };
-  } catch { return null; }
-})()`;
 // Long enough that two captures never overlap, short enough that one which will
 // never settle cannot silence the sweep for the rest of the worker's life.
 const CAPTURE_IN_FLIGHT_LIMIT_MS = 60_000;
@@ -4104,7 +4080,8 @@ export class NetworkObserver {
   }
 
   async #bootstrapApsportRequestTemplate(source: ObservedSource, sourceGeneration: number,
-    tabGeneration: number): Promise<BoundApsportRequestTemplate | null> {
+    tabGeneration: number): Promise<BoundApsportRequestTemplate | ApsportBootstrapFailure> {
+    let failure: ApsportBootstrapFailure = { reason: "APSPORT_BOOTSTRAP_CONTEXT_UNAVAILABLE" };
     const contexts = [...(this.#mainWorldContexts.get(source.tabId)?.entries() ?? [])];
     for (const [frameId, binding] of contexts) {
       const params = { expression: APSPORT_BOOTSTRAP_EXPRESSION, contextId: binding.contextId,
@@ -4113,6 +4090,7 @@ export class NetworkObserver {
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId)).catch(() => null);
       const value = nestedValue(evaluation, "result", "value");
+      failure = apsportBootstrapFailure(failure, value);
       if (!isRecord(value) || typeof value.origin !== "string" || typeof value.language !== "string" ||
         typeof value.timeZone !== "string" || !/^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$/u.test(value.language) ||
         value.timeZone.length > 128 ||
@@ -4128,7 +4106,10 @@ export class NetworkObserver {
       const loaderId = currentFrameLoader(frameTree, frameId);
       if (loaderId === null || !this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
         this.#captureTabGeneration(source.tabId) !== tabGeneration ||
-        this.#mainWorldContexts.get(source.tabId)?.get(frameId) !== binding) continue;
+        this.#mainWorldContexts.get(source.tabId)?.get(frameId) !== binding) {
+        failure = { reason: "APSPORT_BOOTSTRAP_DOCUMENT_CHANGED" };
+        continue;
+      }
       const template: BoundApsportRequestTemplate = {
         origin: origin.origin,
         headers: { "content-type": "application/json", lng: value.language, tz: value.timeZone },
@@ -4162,6 +4143,7 @@ export class NetworkObserver {
         "Runtime.evaluate", { expression: APSPORT_BOOTSTRAP_EXPRESSION, contextId,
           returnByValue: true, awaitPromise: false })).catch(() => null);
       const value = nestedValue(evaluation, "result", "value");
+      failure = apsportBootstrapFailure(failure, value);
       if (!isRecord(value) || typeof value.origin !== "string" || typeof value.language !== "string" ||
         typeof value.timeZone !== "string" || !/^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$/u.test(value.language) ||
         value.timeZone.length > 128 ||
@@ -4176,7 +4158,10 @@ export class NetworkObserver {
       ).catch(() => null);
       if (currentFrameLoader(currentTree, descriptor.id) !== descriptor.loaderId ||
         !this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
-        this.#captureTabGeneration(source.tabId) !== tabGeneration) continue;
+        this.#captureTabGeneration(source.tabId) !== tabGeneration) {
+        failure = { reason: "APSPORT_BOOTSTRAP_DOCUMENT_CHANGED" };
+        continue;
+      }
       const binding: MainWorldContextBinding = { contextId };
       const retainedContexts = this.#mainWorldContexts.get(source.tabId) ??
         new Map<string, MainWorldContextBinding>();
@@ -4192,7 +4177,7 @@ export class NetworkObserver {
       this.#apsportRequestTemplates.set(source.sourceId, template);
       return template;
     }
-    return null;
+    return failure;
   }
 
   #apsportTemplateIsCurrent(source: ObservedSource, template: BoundApsportRequestTemplate): boolean {
@@ -4394,8 +4379,8 @@ export class NetworkObserver {
       cached.tabGeneration === tabGeneration
       ? cached
       : await this.#bootstrapApsportRequestTemplate(source, sourceGeneration, tabGeneration);
-    if (template === undefined || template === null) {
-      this.#lastCaptureExit.set(source.sourceId, "APSPORT_REQUEST_TEMPLATE_MISSING");
+    if ("reason" in template) {
+      this.#lastCaptureExit.set(source.sourceId, template.reason);
       return;
     }
     const prematchWindowHours = options.prematchWindowHours ?? 24;

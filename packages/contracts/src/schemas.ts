@@ -226,6 +226,8 @@ export const ScopeSchema = z.enum([
   "FULL_TIME",
   "FIRST_HALF",
   "SECOND_HALF",
+  "EXTRA_TIME",
+  "EXTRA_TIME_FIRST_HALF",
   "SERIES",
   "MAP_1",
   "MAP_2",
@@ -562,10 +564,10 @@ const lolMarketTypes = new Set<MarketType>([
   "MAP_KILL_HANDICAP",
   "MAP_DURATION"
 ]);
-const footballScopes = new Set<Scope>(["FULL_TIME", "FIRST_HALF", "SECOND_HALF"]);
+const footballScopes = new Set<Scope>(["FULL_TIME", "FIRST_HALF", "SECOND_HALF", "EXTRA_TIME", "EXTRA_TIME_FIRST_HALF"]);
 const lolScopes = new Set<Scope>(["SERIES", "MAP_1", "MAP_2", "MAP_3", "MAP_4", "MAP_5"]);
 function validateCategoryCompatibility(
-  value: { category: Category; marketType: MarketType; scope: Scope },
+  value: { category: Category; marketType: MarketType; scope: Scope; line?: string | null; selection?: string },
   context: z.RefinementCtx
 ): void {
   const compatibleMarketType = value.category === "FOOTBALL"
@@ -599,6 +601,19 @@ function validateCategoryCompatibility(
       path: ["scope"],
       message: "scope is incompatible with football market type"
     });
+  }
+
+  if (value.category !== "FOOTBALL") return;
+  if ((value.marketType === "FT_GOAL_NUMBER_TEAM" || value.marketType === "PLAYER_FT_GOAL_NUMBER_SCORER") && "line" in value &&
+    (typeof value.line !== "string" || !/^[1-9]\d*$/u.test(value.line) || !Number.isSafeInteger(Number(value.line)))) {
+    context.addIssue({ code: "custom", path: ["line"], message: "goal ordinal must be a positive canonical safe integer" });
+  }
+  if (value.marketType === "FT_REMAINING_RESULT" && "line" in value && value.line !== null) {
+    context.addIssue({ code: "custom", path: ["line"], message: "remaining-result score anchor belongs in the selection" });
+  }
+  if ((value.marketType === "FT_GOAL_NUMBER_TEAM" || value.marketType === "FT_REMAINING_RESULT") &&
+    value.selection !== undefined && !footballCategoricalMarketSpec(value.marketType)!.selectionPattern.test(value.selection)) {
+    context.addIssue({ code: "custom", path: ["selection"], message: "selection does not preserve the indexed football market terms" });
   }
 }
 
