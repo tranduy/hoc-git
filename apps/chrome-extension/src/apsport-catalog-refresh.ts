@@ -204,13 +204,13 @@ export function apsportSelectionPriceFromEvent(value: ApsportRawEvent, identity:
   readonly selection: string; readonly line: string | null;
 }): { readonly status: "FOUND"; readonly rawOdds: string } |
   { readonly status: "NOT_FOUND" | "AMBIGUOUS" } {
-  if (eventId(value) !== identity.providerEventId || !activeEventEvidence(value) ||
+  if (eventId(value) !== identity.providerEventId || value["9"] === true || !activeEventEvidence(value) ||
     !Array.isArray(value["50"])) return { status: "NOT_FOUND" };
   const matches: string[] = [];
   for (const candidateGroup of value["50"]) {
     const group = record(candidateGroup);
     const semantics = group === null ? undefined : marketSemanticsByGroup[String(group["3"])];
-    if (group === null || group["10"] !== "Active" || semantics === undefined ||
+    if (group === null || group["10"] !== "Active" || group["6"] === true || semantics === undefined ||
       semantics.marketType !== identity.marketType || semantics.scope !== identity.scope || !Array.isArray(group["9"])) continue;
     if ((semantics.linePolicy === "NONE" && identity.line !== null) ||
       (semantics.linePolicy === "LINE" && identity.line === null)) continue;
@@ -224,7 +224,7 @@ export function apsportSelectionPriceFromEvent(value: ApsportRawEvent, identity:
       // across groups. Match the full identity without stripping that boundary.
       const marketMatches = nativeOfferId !== null && (identity.providerMarketId === nativeOfferId ||
         identity.providerMarketId === `tsport:${String(group["3"])}:${nativeOfferId}`);
-      if (odd === null || !marketMatches ||
+      if (odd === null || odd["13"] === true || !marketMatches ||
         (requestedLine !== null && (!Number.isFinite(line) || Math.abs(line - requestedLine) > 1e-9))) continue;
       const selectionIndex = semantics.selections.indexOf(identity.selection);
       if (selectionIndex < 0) continue;

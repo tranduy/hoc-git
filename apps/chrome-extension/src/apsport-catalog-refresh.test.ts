@@ -121,6 +121,24 @@ describe("collectApsportCatalog", () => {
     expect(nativeTotal["50"][0]!["9"][0]!["6"]).toBe("1985150448351005");
   });
 
+  it.each(["event", "group", "offer"])("refuses a native AP %s pause even while its status label remains Active", level => {
+    const group = nativeTotal["50"][0]!;
+    const detailed = { ...nativeTotal, ...(level === "event" ? { "9": true } : {}), "50": [{
+      ...group, ...(level === "group" ? { "6": true } : {}), "9": [{
+        ...group["9"][0]!, ...(level === "offer" ? { "13": true } : {})
+      }]
+    }] };
+    expect(apsportSelectionPriceFromEvent(detailed, normalizedTotalIdentity)).toEqual({ status: "NOT_FOUND" });
+  });
+
+  it.each(["tsport:3:1985150448351005", "1985150448351005"])("accepts false AP pause flags with market ID %s", providerMarketId => {
+    const group = nativeTotal["50"][0]!;
+    const detailed = { ...nativeTotal, "9": false, "50": [{ ...group, "6": false,
+      "9": [{ ...group["9"][0]!, "13": false }] }] };
+    expect(apsportSelectionPriceFromEvent(detailed, { ...normalizedTotalIdentity, providerMarketId }))
+      .toEqual({ status: "FOUND", rawOdds: "0.36" });
+  });
+
   it.each([
     { providerMarketId: "tsport:4:1985150448351005" },
     { providerMarketId: "tsport:3:1985150448351006" },
