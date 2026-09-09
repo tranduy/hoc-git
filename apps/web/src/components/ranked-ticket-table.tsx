@@ -101,14 +101,42 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     return plan?.legs.find((leg) => leg.provider === provider && leg.selection === selection)?.stake ??
       ticket.plan?.legs.find((leg) => leg.provider === provider && leg.selection === selection)?.stake ?? "";
   };
-  const canCaptureTicket = ticket.row.opposition === undefined && openableLegs.length === 2 && openableLegs.every(({ leg }) =>
-    providerCatalogEvidence?.[leg.provider] !== undefined && displayedStake(leg.provider, leg.selection) !== "");
+  const waitingPair = useMemo(() => {
+    const retained = ticket.auditRow;
+    if (ticket.plan !== null || ticket.hasOpposingSources !== true || retained === undefined ||
+      retained.opposition !== undefined || retained.key !== ticket.row.key || retained.marketType !== ticket.row.marketType ||
+      retained.scope !== ticket.row.scope || retained.line !== ticket.row.line) return null;
+    return enumerateOpposingLegPairs(retained, new Set(providers)).find(pair => ticket.opposingProviderPairs?.some(
+      ([first, second]) => (first === pair.first.provider && second === pair.second.provider) ||
+        (first === pair.second.provider && second === pair.first.provider))) ?? null;
+  }, [providers, ticket]);
+  const baseCheckStake = stakePolicy?.baseStake ?? "";
+  const validCheckStake = /^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(baseCheckStake) &&
+    Number.isFinite(Number(baseCheckStake)) && Number(baseCheckStake) > 0;
+  const captureRow = ticket.plan === null ? ticket.auditRow : ticket.row;
+  const captureLegs = ticket.plan === null
+    ? waitingPair === null || !validCheckStake ? [] : sortProviderItems([waitingPair.first, waitingPair.second], item => item.provider)
+      .map(({ provider, quote }) => ({ leg: { provider, selection: quote.selection }, quote, requestedStake: baseCheckStake }))
+    : openableLegs.map(item => ({ ...item, requestedStake: displayedStake(item.leg.provider, item.leg.selection) }));
+  const canCaptureTicket = ticket.row.opposition === undefined && captureLegs.length === 2 && captureLegs.every(({ leg, quote, requestedStake }) => {
+    if (providerCatalogEvidence?.[leg.provider] === undefined || requestedStake === "") return false;
+    const cell = captureRow?.cells.find(candidate => candidate.provider === leg.provider &&
+      candidate.market.providerEventId === quote.providerEventId && candidate.market.providerMarketId === quote.providerMarketId);
+    if (cell === undefined) return false;
+    // Native orientation must come from the retained selection with this exact
+    // ID, including when canonical team order was reversed for comparison.
+    return ticket.plan !== null || cell.sourceQuotes === undefined || cell.sourceQuotes.filter(candidate =>
+      candidate.provider === leg.provider && candidate.providerSelectionId === quote.providerSelectionId &&
+      candidate.providerEventId === (cell.sourceMarket ?? cell.market).providerEventId &&
+      candidate.providerMarketId === (cell.sourceMarket ?? cell.market).providerMarketId).length === 1;
+  });
   const captureDisplayedTicket = (): TicketRealtimeCheckRequest | null => {
     if (!canCaptureTicket) return null;
     const capturedAtMs = Date.now();
-    const toDisplayedLeg = ({ leg, quote }: (typeof openableLegs)[number]): TicketRealtimeCheckRequest["legs"][number] => {
+    const toDisplayedLeg = ({ leg, quote, requestedStake }: (typeof captureLegs)[number]): TicketRealtimeCheckRequest["legs"][number] => {
       const evidence = providerCatalogEvidence![leg.provider]!;
-      const cell = ticket.row.cells.find((candidate) => candidate.provider === leg.provider &&
+      const cell = captureRow!.cells.find((candidate) => candidate.provider === leg.provider &&
+        candidate.market.providerEventId === quote.providerEventId &&
         candidate.market.providerMarketId === quote.providerMarketId);
       const providerQuote = cell?.sourceQuotes?.find((candidate) =>
         candidate.providerSelectionId === quote.providerSelectionId) ?? quote;
@@ -116,21 +144,21 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
       const providerMarket = cell?.sourceMarket;
       const normalized = decimalOdds(quote);
       if (normalized === null) throw new Error("DISPLAYED_ODDS_INVALID");
-      return { provider: leg.provider, accountId: evidence.accountId, providerEventId: quote.providerEventId,
-        providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId,
+      return { provider: leg.provider, accountId: evidence.accountId, providerEventId: providerQuote.providerEventId,
+        providerMarketId: providerQuote.providerMarketId, providerSelectionId: providerQuote.providerSelectionId,
         selection: quote.selection, line: quote.line, rawOdds: quote.rawOdds, rawFormat: quote.rawFormat,
         providerParticipantA: providerEvent?.participantA ?? event.participantA,
         providerParticipantB: providerEvent?.participantB ?? event.participantB,
         providerSelection: providerQuote.selection, providerLine: providerMarket?.line ?? providerQuote.line,
         decimalOdds: normalized.toString(), quoteStatus: quote.status, providerObservedAtMs: evidence.observedAtMs,
         receivedMonotonicMs: quote.receivedMonotonicMs, sequence: quote.sequence,
-        requestedStake: displayedStake(leg.provider, leg.selection) };
+        requestedStake };
     };
     return { eventLabel: `${event.participantA} vs ${event.participantB}`,
       participantA: event.participantA, participantB: event.participantB,
       marketType: ticket.row.marketType as TicketRealtimeCheckRequest["marketType"],
       scope: ticket.row.scope as TicketRealtimeCheckRequest["scope"], capturedAtMs,
-      legs: [toDisplayedLeg(openableLegs[0]!), toDisplayedLeg(openableLegs[1]!)] };
+      legs: [toDisplayedLeg(captureLegs[0]!), toDisplayedLeg(captureLegs[1]!)] };
   };
   const canCheckRealtime = realtimeCheckApi !== undefined && canCaptureTicket;
   const checkRealtime = async (): Promise<void> => {
@@ -241,6 +269,7 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
       <small>Move {ticket.movementMagnitude}</small></div>}
       {ticket.reason !== null && <p className="ranked-ticket-reason">{displayReason(ticket.reason)}</p>}</td>
   </tr>{(canCheckRealtime || canReport) && <tr className="ticket-realtime-audit-row"><td colSpan={rowProviders.length + 5}>
+    {ticket.plan === null && <small>Chỉ kiểm tra giá · {money(baseCheckStake)} mỗi cửa theo tiền cơ bản; giá lưu chưa được xác nhận mới.</small>}
     <button className="ticket-realtime-check" disabled={audit?.pending === true}
       onClick={() => { void checkRealtime(); }} type="button">{audit?.pending === true ? "Đang kiểm tra…" : "Kiểm tra giá thật"}</button>
     {canReport && <button aria-label={`Report vé ${ticket.key}`} className="ticket-report-button"

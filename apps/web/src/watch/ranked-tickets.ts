@@ -13,6 +13,8 @@ export interface RankedTicket {
   readonly key: string;
   readonly eventKey: string;
   readonly row: ComparisonRow;
+  /** Original retained evidence for manual price reads only; never a pricing/placement input. */
+  readonly auditRow?: ComparisonRow;
   readonly plan: FixedBaseStakePlan | null;
   /** An exact selected source relation survives when its prices need renewal. */
   readonly hasOpposingSources?: boolean;
@@ -260,6 +262,7 @@ export function rankTicketsForEvent(input: {
       })).values()] : [];
     return { key: row.key, eventKey: input.event.key, row: safeRow, plan,
       ...(plan === null ? { hasOpposingSources: opposingProviderPairs.length > 0, opposingProviderPairs } : {}),
+      ...(plan === null && opposingProviderPairs.length > 0 && row.opposition === undefined ? { auditRow: row } : {}),
       state: "OBSERVATION", reason: freshness.rejectedApsportQuote
         ? "APSPORT quote freshness not confirmed" : row.opposition !== undefined
           ? "Chỉ ước tính; kiểm tra vé ghép 1X2/cơ hội kép chưa hỗ trợ" : "Provider preflight required", movementMagnitude, gapsBySelection };

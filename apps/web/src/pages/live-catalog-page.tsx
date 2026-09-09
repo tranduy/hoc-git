@@ -611,6 +611,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     ticket: new URLSearchParams(window.location.search).get("ticket") });
   const autoLoaded = useRef(false);
   const sourcesInitialized = useRef(false);
+  const automaticallySelectedSourceIds = useRef(new Set<string>());
   const categorySources = useMemo(() => sources.filter((source) => source.category === category), [sources, category]);
   const recoveryByProvider = new Map(recoverableProviders.map((provider) =>
     [provider, sourceRecoveryCoordinatorRef.current?.snapshot(provider) ??
@@ -897,7 +898,12 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         const newlyActive = availableCandidates.filter((source) => source.category === targetCategory &&
           !previousActive.has(source.id));
         if (newlyActive.length > 0) {
-          setSelectedIds((current) => new Set([...current, ...newlyActive.map((source) => source.id)]));
+          // An outage does not reset the user's checkbox choice. Select each
+          // source automatically only on its first activation in this page.
+          const firstActiveIds = newlyActive.map((source) => source.id)
+            .filter((id) => !automaticallySelectedSourceIds.current.has(id));
+          for (const id of firstActiveIds) automaticallySelectedSourceIds.current.add(id);
+          if (firstActiveIds.length > 0) setSelectedIds((current) => new Set([...current, ...firstActiveIds]));
           void loadIds(newlyActive.map((source) => source.id), false, targetCategory);
         }
         return;
@@ -918,7 +924,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       staleAccountIdsRef.current = cachedStale;
       setStaleAccountIds(cachedStale);
       comparisonWorkerRef.current?.reset(cached, [...cachedStale]);
-      setSelectedIds(new Set(availableCandidates.map((source) => source.id)));
+      const initialSelectedIds = new Set(availableCandidates.map((source) => source.id));
+      automaticallySelectedSourceIds.current = new Set(initialSelectedIds);
+      setSelectedIds(initialSelectedIds);
       setCategory(initialCategory); saveCatalogCategory(window.localStorage, initialCategory);
       if (!autoLoaded.current && initial.size > 0) {
         autoLoaded.current = true;

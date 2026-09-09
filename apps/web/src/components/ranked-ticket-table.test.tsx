@@ -98,6 +98,74 @@ describe("RankedTicketTable", () => {
   const stakePolicy = { currency: "VND", baseStake: "100000", minStake: "30000",
     maxStake: "1000000", stakeStep: "1000", balance: "1000000" } as const;
 
+  function waitingFootballTicket(): RankedTicket {
+    const cells: ComparisonCell[] = (["APSPORT", "BTI"] as const).map((provider, index) => {
+      const selection = index === 0 ? "HOME" : "AWAY";
+      const market: ProviderMarket = { provider, category: "FOOTBALL", providerEventId: `${provider}-event`,
+        providerMarketId: `${provider}-native-market`, marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5",
+        settlementProfile: "football-regulation-including-added-time", status: "OPEN" };
+      const quote: ProviderQuote = { provider, category: "FOOTBALL", providerEventId: market.providerEventId,
+        providerMarketId: market.providerMarketId, providerSelectionId: `${provider}-native-away`,
+        marketType: "FT_AH", scope: "FULL_TIME", selection, line: "-0.5", rawOdds: index === 0 ? "2.1" : "1.95",
+        rawFormat: "DECIMAL", status: "OPEN", isLive: false, sourceTimestampMs: 900, receivedMonotonicMs: 19 + index, sequence: 3 };
+      return { provider, market, quotes: [quote], sourceMarket: { ...market, line: index === 0 ? "0.5" : "-0.5" },
+        sourceQuotes: [{ ...quote, selection: "AWAY", line: index === 0 ? "0.5" : "-0.5" }],
+        sourceEvent: { ...event, provider, providerEventId: market.providerEventId,
+          participantA: index === 0 ? "Beta" : "Alpha", participantB: index === 0 ? "Alpha" : "Beta" } };
+    });
+    const auditRow: ComparisonRow = { key: "waiting-ap-bti", marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5",
+      cells, bestBySelection: {}, margin: null, crossBook: true };
+    return { key: auditRow.key, eventKey: "ap-bti-event", auditRow, plan: null, state: "OBSERVATION",
+      hasOpposingSources: true, opposingProviderPairs: [["APSPORT", "BTI"]],
+      row: { ...auditRow, cells: cells.map(cell => cell.provider === "APSPORT" ? { ...cell, quotes: [], sourceQuotes: [] } : cell) },
+      reason: "APSPORT quote freshness not confirmed", movementMagnitude: "0", gapsBySelection: {} };
+  }
+
+  it("checks retained exact AP/BTI quote identities while waiting without reviving ROI or a betting plan", () => {
+    const waiting = waitingFootballTicket();
+    const check = vi.fn((_request: TicketRealtimeCheckRequest) => new Promise<TicketRealtimeCheckResponse>(() => undefined));
+    const open = vi.fn();
+    render(<RankedTicketTable event={{ ...event, participantA: "Alpha", participantB: "Beta" }}
+      providers={["APSPORT", "BTI"]} tickets={[waiting]} compact stakePolicy={stakePolicy}
+      onOpenProviderTicket={open} realtimeCheckApi={{ check }} providerCatalogEvidence={{
+        APSPORT: { accountId: "ap-account", observedAtMs: 1_000 }, BTI: { accountId: "bti-account", observedAtMs: 1_010 } }} />);
+    expect(screen.getByText(/Chỉ kiểm tra giá · 100,000 VND mỗi cửa/u)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra giá thật" }));
+    expect(check).toHaveBeenCalledOnce();
+    expect(check.mock.calls[0]![0].legs).toMatchObject([
+      { provider: "APSPORT", providerEventId: "APSPORT-event", providerMarketId: "APSPORT-native-market",
+        providerSelectionId: "APSPORT-native-away", selection: "HOME", line: "-0.5",
+        providerSelection: "AWAY", providerLine: "0.5", providerParticipantA: "Beta", providerParticipantB: "Alpha",
+        rawOdds: "2.1", providerObservedAtMs: 1_000, receivedMonotonicMs: 19, sequence: 3, requestedStake: "100000" },
+      { provider: "BTI", providerEventId: "BTI-event", providerMarketId: "BTI-native-market",
+        providerSelectionId: "BTI-native-away", selection: "AWAY", line: "-0.5",
+        providerSelection: "AWAY", providerLine: "-0.5", rawOdds: "1.95", requestedStake: "100000" }
+    ]);
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Mở kèo/u })).toBeNull();
+    expect(within(screen.getByRole("row", { name: `Ticket ${waiting.key}` })).queryByText(/ROI/u)).toBeNull();
+    expect(waiting.plan).toBeNull();
+    expect(waiting.row.cells[0]!.quotes).toEqual([]);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing-audit", "not-opposing", "missing-policy", "missing-native-id", "invalid-stake"] as const)(
+    "does not fabricate a waiting read-check when %s", invalid => {
+      const original = waitingFootballTicket();
+      const { auditRow: _auditRow, ...withoutAudit } = original;
+      const waiting: RankedTicket = invalid === "missing-audit" ? withoutAudit :
+        invalid === "not-opposing" ? { ...original, auditRow: { ...original.auditRow!,
+          cells: original.auditRow!.cells.map(cell => ({ ...cell, quotes: cell.quotes.map(quote => ({ ...quote, selection: "HOME" })) })) } } :
+        invalid === "missing-native-id" ? { ...original, auditRow: { ...original.auditRow!,
+          cells: original.auditRow!.cells.map(cell => ({ ...cell, sourceQuotes: [] })) } } : original;
+      render(<RankedTicketTable event={event} providers={["APSPORT", "BTI"]} tickets={[waiting]}
+        {...(invalid === "missing-policy" ? {} : { stakePolicy: invalid === "invalid-stake" ? { ...stakePolicy, baseStake: "0" } : stakePolicy })}
+        realtimeCheckApi={{ check: vi.fn() }}
+        providerCatalogEvidence={{ APSPORT: { accountId: "ap-account", observedAtMs: 1_000 },
+          BTI: { accountId: "bti-account", observedAtMs: 1_000 } }} />);
+      expect(screen.queryByRole("button", { name: "Kiểm tra giá thật" })).toBeNull();
+    });
+
   it("shows an exact waiting row without ROI, stake inputs or ticket actions and honors removed sides", () => {
     const original = ticket(1);
     const waiting: RankedTicket = { ...original, plan: null, hasOpposingSources: true,

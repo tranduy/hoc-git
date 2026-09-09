@@ -65,6 +65,39 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
+  it.each(["inactive", "missing"] as const)("preserves checked and unchecked books after %s source recovery", async outage => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const atMs = Date.now();
+    const allSources: CatalogSourceStatus[] = (["SABA", "CMD", "APSPORT", "BTI", "SBOBET"] as const)
+      .map(provider => ({ id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider,
+        category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: atMs, reason: null }));
+    let sources = allSources.slice(0, 4);
+    const view = render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sources }} catalogApi={{ read: async id => {
+        const provider = allSources.find(source => source.id === id)!.provider;
+        return { ...catalog, accountId: id, provider, observedAtMs: Date.now(), snapshotState: "FRESH",
+          events: [{ ...event, provider, startAtUtcMs: atMs + 3_600_000 }], markets: [{ ...market, provider }],
+          quotes: quotes.map(quote => ({ ...quote, provider })) };
+      } }} />);
+    const checkbox = (provider: string): HTMLInputElement => [...view.container.querySelectorAll(".provider-selector__item")]
+      .find(item => item.textContent?.includes(provider))!.querySelector("input[type=checkbox]")!;
+    await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
+    await waitFor(() => expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain("6 cặp market"));
+    for (const provider of ["SABA", "CMD"]) fireEvent.click(checkbox(provider));
+    expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain("1 cặp market");
+    sources = outage === "missing" ? [allSources[2]!] : sources.map(source => source.provider === "APSPORT" ? source :
+      { ...source, sessionState: "ACTION_REQUIRED", reason: "EXPIRED" });
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    sources = allSources;
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(checkbox("SABA").checked).toBe(false);
+    expect(checkbox("CMD").checked).toBe(false);
+    expect(checkbox("BTI").checked).toBe(true);
+    expect(checkbox("APSPORT").checked).toBe(true);
+    expect(checkbox("SBOBET").checked).toBe(true);
+    expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain("3 cặp market");
+  });
+
   it.each([false, true])("keeps checked-book pairs after SABA/SBO removal (expired AP: %s)", async expiredAp => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const atMs = Date.now();

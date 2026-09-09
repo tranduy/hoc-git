@@ -378,15 +378,20 @@ describe("rankTicketsForEvent", () => {
     const input = { verified: new Map<string, VerifiedTicketEvidence>(), movements: [],
       selectedProviders: new Set(["SABA", "APSPORT"] as const), observationPolicy: policy, nowMs };
 
-    const stale = rankTicketsForEvent({ ...input, event: eventWithAp(staleApCell) });
+    const staleEvent = eventWithAp(staleApCell);
+    const stale = rankTicketsForEvent({ ...input, event: staleEvent });
     const unrelatedUpdate = rankTicketsForEvent({ ...input,
       event: eventWithAp(staleApCell, "another-event") });
     const confirmed = rankTicketsForEvent({ ...input, event: eventWithAp(freshApCell) });
 
     expect(stale[0]).toMatchObject({ key: "ap-row", plan: null, state: "OBSERVATION" });
     expect(stale[0]?.row.cells.find((candidate) => candidate.provider === "APSPORT")?.quotes).toEqual([]);
+    expect(stale[0]?.auditRow).toBe(staleEvent.rows[0]);
+    expect(stale[0]?.auditRow?.cells.find((candidate) => candidate.provider === "APSPORT")?.quotes)
+      .toBe(staleApCell.quotes);
     expect(unrelatedUpdate[0]?.plan).toBeNull();
     expect(confirmed[0]?.plan).not.toBeNull();
+    expect(confirmed[0]?.auditRow).toBeUndefined();
     // A warm arithmetic cache must not revive the same prices past their receipt deadline.
     const expiredAfterWarm = rankTicketsForEvent({ ...input, nowMs: nowMs + 5_001,
       event: eventWithAp(freshApCell) });
