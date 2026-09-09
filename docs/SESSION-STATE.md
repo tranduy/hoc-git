@@ -1,5 +1,84 @@
 # Trạng thái làm việc — 2026-09-10
 
+## AP live recovery and actual pairing — 2026-09-10 latest checkpoint
+
+User challenged repeated unproven completion claims. Current work restored actual
+AP ingress and proved AP×BTI pairing on the local UI; do not claim every feed or
+continuous price renewal is fixed. Full report:
+`docs/apsport-live-recovery-2026-09-10.md`.
+
+At05:45 AP FRESH599events/52,557canonical/73,299quotes,1,241HTTP+5,966WS;
+all53,592native accounted (52,557normalized+1,035unmapped). At06:09 UI with ONLY
+AP+BTI checked:7,164nativepairs/13,181source markets/7,494groups. At06:12 the
+same two-book filter displayed15,331pairs/26,790source markets/13,519groups;
+AP54,147normalized/1,041unmapped. BTI was still loading detail data; this increase
+is not a code-only benchmark. All top displayed rows waited for AP quote renewal.
+Source freshness must not freshen retained quotes: AP roster60s vs5s/15s quote
+deadlines, serial detail walk. No receipt/ROI guard relaxed.
+
+Fixed existing owned AP renderer recovery blocked before reload by CDP timeout;
+normalized `tsport:group:offer` exact-price lookup; AP pause flags; checkboxes
+auto-selecting unchecked books after recovery; missing read-only price check on
+waiting tickets. One actual AP direct read found Palmeiras Under2.5 price0.65
+Malay vs retained0.77, reportedODDS_CHANGED. CMD leg identity failed; no full
+pair ROI/execution proof and no bet placed. Journalcheck77407fd1-0e0f-472a-baaa-6d93e9a29187.
+
+Also fixed startup OOM parsing536MB cache: incremental JSON reader stress restores
+all6incl566MB BTI at2048MiB with~1045MiBpeakRSS. Live budget now4096MiB in local.env
+because steady-state ingestion exceeded2GiB. BTI duplicate extraction removed;
+WeakMapper-immutable-part grouping reduces complete291,411market merge1358→114.5ms,
+3/3 output hashes unchanged. All native data, closures and original clocks kept.
+
+Deployed APIinstance0f81a0dc-855a-47be-8a3e-33cfbfcd83cc,
+API08b337dd16710a8e2f7c90f0e9d5d340d54e36b3171f5badc8851013801bd2cf;
+extensionc4b68e359100889ecb6fe992de4eb16bfa2e2cbd16ac94e4ef6706eb1fbb269c;
+webindex-DD7xKG6J.js/workercomparison.worker-DKv8vAOC.js. API dynamically reads extension identity each sweep, so
+latest combined artifact hash differs intentionally from APIstartuphash.
+Managed handoff leaves orphanstate after exit: root ignored helpers archiveonly
+the exact shutdown-requested instance after all recordedPIDs and bothports gone.
+Do not broadkill or remove caches. All deploymentleases released.
+
+Commits83ede2e,64e5da0,7611c10,c2d7dd3 pushed toorigin/feat/realtime-hardening.
+Follow-upa6784c4 skips redundant disk restore for already published catalogs;
+ae8c32c retains finite signed audit receipts and adds safe validation field paths.
+f3e63a3 removes awaited journal I/O before price reads, bounds post-read audit
+acknowledgement to100ms, preserves order and reports persisted=false if pending.
+These are deployed and verified; docs and all changes committed/pushed at final handoff.
+Tests72BTI/45API/418extension/154web passed,4existingwebskips; relevanttypechecks
+andbuilds passed. Browserlist proof has noJSerrors. The waiting-button UI check
+failed client validation (`Invalid realtime ticket check request`) BEFORE fetch:
+AP/BTI AWAY_FT_TOTAL0.5, Atlanta/Orlando. Its45s waitForResponse timed out waiting
+for a request never sent; do not misreport this as API latency. A bounded new
+browser capture had no row to open, so the exact Atlanta invalid field remains
+unproven. Separately proved BTI adapter cache translation produces valid negative
+relative receipts(-10080/-180); ProviderQuote accepts them but audit leg refused.
+Only audit leg now accepts finite signed, preserves the value; direct preflight
+nonnegative clock/freshness/stake guards unchanged. The earlier
+Palmeiras41.7s journal-before-probe delay was repeated in a real TorinoAP+BTI
+request:29,514ms blocked firstappend before bothreads. BothMATCH7,703/7,732ms,
+APUnder-0.93Malay/BTIOver0.91Malay,FH_TOTAL1; checka81bdf89-ae54-4bd5-bdc2-4ae1b3f62fe3.
+ActualTorinoPOST sent (unlike Atlanta) but browser45s timedout before completion.
+Evidence `.run/ap-context-2026-09-10/torino-audit-latency-evidence.json`.
+This proved the latency fix above; logging does not block source reads now.
+Browser evidence lives in
+`.run/ap-context-2026-09-10/price-button-ui*.json`. QA blocks its own maintenance
+POSTs to avoid resetting user provider tabs merely because its browser starts.
+Latestverification root43API;90contracts;41webclient/table;71BTIadapter passed;
+contracts/API/webtypechecks passed. After latency fix parent14APIroute/journal
+and41webclient/tabletests passed. PostdeployQA completed successfully:
+Angers–TroyesFT_TOTAL2.25APOver0.9Malay+BTIUnder0.93Malay bothMATCH/IN_PAGE_FETCH,
+HTTP200; AP4772ms/BTI3879ms; capture-to-completion10282ms; persistedfalsehonestpending.
+NoJSerrors. Check64e199be-0ef5-4b3f-9b9e-c966cb63d183; artifact
+`.run/ap-context-2026-09-10/price-latency-ui.json`.
+Latest06:36UI onlyAPBTI:6372pairs/12051source markets/7064groups;
+AP51989normalized/1045unmapped, BTIstillhydratingafterrestart. Do not compare
+this against15331earlier as fixed-input normalization regression. NoROIproof.
+
+Remaining: continuousAPquoteupdates and1kstrictunmapped rows; IM/SABA/SBO source
+issues notallsolved. PublicIPv4GET now returns latestindex-DD7xKG6J.js HTML;
+local200newassetconfirmed. No new
+provider restore or bulkcapture needed for already proven APsource/pairs.
+
 ## AP remaining normalization — 2026-09-10 04:24 local
 
 Latest user explicitly requested continued AP normalization. New immutable audit
