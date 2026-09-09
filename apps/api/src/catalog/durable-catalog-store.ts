@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   NativeMarketObservationSchema,
@@ -9,6 +9,7 @@ import {
 } from "@tool-chenh/contracts";
 import { z } from "zod";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
+import { readCatalogJson } from "./catalog-json-reader.js";
 
 const observedCatalogSchema = z.strictObject({
   dataMode: z.literal("LIVE"),
@@ -80,7 +81,7 @@ export class DurableCatalogStore implements CatalogStoreLike {
 
   async load(sourceKey: string): Promise<ObservedProviderCatalog | null> {
     try {
-      const parsed: unknown = JSON.parse(await readFile(this.pathFor(sourceKey), "utf8"));
+      const parsed = await readCatalogJson(this.pathFor(sourceKey));
       return validateCatalog(parsed);
     } catch {
       return null;

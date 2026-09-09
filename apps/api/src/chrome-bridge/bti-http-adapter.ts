@@ -87,7 +87,7 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
     }
     const records = extractBtiCatalogRecords(payload);
     const resolvedEventIds = new Set(records.map((record) => record.eventId));
-    const nativeMarketObservations = extractBtiNativeMarketObservations(payload, envelope.observedAtMs).map((observation) =>
+    const nativeMarketObservations = extractBtiNativeMarketObservations(payload, envelope.observedAtMs, resolvedEventIds).map((observation) =>
       isDetail && !resolvedEventIds.has(observation.providerEventId) && observation.disposition === "NORMALIZED"
         ? { ...observation, disposition: "EXCLUDED" as const, reason: "EVENT_IDENTITY_UNRESOLVED" } : observation);
     const closedEventIds = new Set<string>(isDetail && Array.isArray(root?.data) ? root.data.flatMap((row) =>
@@ -381,7 +381,8 @@ function resolvePendingDetail(part: BtiPart, lists: ReadonlyMap<string, BtiPart>
   const { unresolvedDetail: _unresolved, ...resolved } = part;
   return { ...resolved, events: normalized.events, markets: normalized.markets, quotes: normalized.quotes,
     rejectedMarketCount: normalized.diagnostics.length,
-    nativeMarketObservations: extractBtiNativeMarketObservations(payload, part.observedAtMs) };
+    nativeMarketObservations: extractBtiNativeMarketObservations(payload, part.observedAtMs,
+      new Set(records.map((record) => record.eventId))) };
 }
 
 function preserveClosureHistory(previous: BtiPart | undefined, incoming: BtiPart): BtiPart {
@@ -421,9 +422,85 @@ function preserveClosureHistory(previous: BtiPart | undefined, incoming: BtiPart
   return { ...incoming, closureHistory: history };
 }
 
-function mergeMarketParts(parts: readonly BtiPart[]): Pick<ObservedProviderCatalog,
-  "markets" | "quotes" | "nativeMarketObservations"> {
-  const families = new Map<string, Pick<ObservedProviderCatalog, "markets" | "quotes" | "nativeMarketObservations">>();
+type BtiMarketFamily = Pick<ObservedProviderCatalog, "markets" | "quotes" | "nativeMarketObservations">;
+const marketPartGroups = new WeakMap<BtiPart, ReadonlyMap<string, BtiMarketFamily>>();
+
+function groupsForMarketPart(part: BtiPart): ReadonlyMap<string, BtiMarketFamily> {
+  const cached = marketPartGroups.get(part);
+  if (cached !== undefined) return cached;
+  // BtiPart instances are replaced, never amended: changed prices, closures,
+  // clocks and resolved identities each receive a new object. Keep only the
+  // validated grouping here; merging a newer roster must not mutate it.
+  const nativeKeys = new Set(part.nativeMarketIds.filter((item) => item.marketId !== "")
+    .map(({ eventId, marketId }) => `${eventId}\u0000${marketId}`));
+  const familyFor = (item: { readonly providerEventId: string; readonly providerMarketId: string;
+    readonly marketType?: MarketType; readonly scope?: Scope; readonly line?: string | null;
+    readonly nativeScope?: string | null; readonly player?: unknown }): string | null => {
+    const key = `${item.providerEventId}\u0000${item.providerMarketId}`;
+    if (nativeKeys.has(key)) return key;
+    // A categorical family can expose several independent canonical terms.
+    // All remain owned by the exact native family for closure and replacement.
+    const derived = /^(.+):([A-Z][A-Z0-9_]+):(none|-?\d+(?:\.\d+)?)(?::player:([1-9]\d*))?$/u.exec(item.providerMarketId);
+    if (derived !== null) {
+      const type = derived[2] as MarketType;
+      const binary = footballBinaryMarketSpec(type), categorical = footballCategoricalMarketSpec(type);
+      const spec = binary ?? categorical ?? footballResultMarketSpec(type);
+      const linePolicy = binary?.linePolicy ?? categorical?.linePolicy ?? "NONE";
+      const encodedLine = derived[3] === "none" ? null : derived[3]!;
+      const family = `${item.providerEventId}\u0000${derived[1]}`;
+      if (spec !== null && nativeKeys.has(family) && type.startsWith("PLAYER_") === (derived[4] !== undefined) &&
+        (item.marketType === undefined || (type.startsWith("PLAYER_")
+          ? isValidProviderPlayerIdentity(item.player) && item.player.providerPlayerId === derived[4]
+          : item.player === undefined)) &&
+        (item.marketType === undefined || item.marketType === type) &&
+        (item.scope === undefined || item.scope === spec.scope) &&
+        (item.nativeScope == null || item.nativeScope === spec.scope) &&
+        (item.line === undefined || item.line === encodedLine) &&
+        (linePolicy === "NONE" ? encodedLine === null : encodedLine !== null &&
+          (linePolicy === "POSITIVE_INTEGER" ? /^[1-9]\d*$/u.test(encodedLine) && Number.isSafeInteger(Number(encodedLine))
+            : linePolicy === "INTEGER" ? /^-?(?:0|[1-9]\d*)$/u.test(encodedLine) && Number.isSafeInteger(Number(encodedLine))
+              : isSupportedFootballTwoWayLine(encodedLine)))) return family;
+      // A malformed canonical variant cannot become an orphan that outlives
+      // native family closure. Its native observation is retained below.
+      return null;
+    }
+    if (item.marketType?.startsWith("PLAYER_") || item.player !== undefined) return null;
+    const separator = item.providerMarketId.lastIndexOf(":");
+    const parent = `${item.providerEventId}\u0000${item.providerMarketId.slice(0, separator)}`;
+    return separator >= 0 && nativeKeys.has(parent) &&
+      /^-?\d+(?:\.\d+)?$/u.test(item.providerMarketId.slice(separator + 1)) ? parent : key;
+  };
+  type Group = { markets: ObservedProviderCatalog["markets"][number][];
+    quotes: ObservedProviderCatalog["quotes"][number][];
+    nativeMarketObservations: NonNullable<ObservedProviderCatalog["nativeMarketObservations"]>[number][] };
+  const groups = new Map<string, Group>([...nativeKeys].map((key) =>
+    [key, { markets: [], quotes: [], nativeMarketObservations: [] }]));
+  const invalidBindings = new Set<string>();
+  const identityFor = (item: { readonly providerEventId: string; readonly providerMarketId: string }): string =>
+    `${item.providerEventId}\u0000${item.providerMarketId}`;
+  const normalizedMarketIds = new Set(part.markets.map(identityFor));
+  const groupFor = (item: { readonly providerEventId: string; readonly providerMarketId: string }, retainInvalid = false): Group | null => {
+    const family = familyFor(item);
+    if (family === null && !retainInvalid) { invalidBindings.add(identityFor(item)); return null; }
+    const key = family ?? identityFor(item);
+    const group = groups.get(key) ?? { markets: [], quotes: [], nativeMarketObservations: [] };
+    groups.set(key, group);
+    return group;
+  };
+  for (const item of part.markets) groupFor(item)?.markets.push(item);
+  for (const item of part.quotes) groupFor(item)?.quotes.push(item);
+  for (const item of part.nativeMarketObservations ?? []) {
+    const invalid = invalidBindings.has(identityFor(item)) || familyFor(item) === null ||
+      (item.providerMarketId.includes(":player:") && item.disposition === "NORMALIZED" && !normalizedMarketIds.has(identityFor(item)));
+    groupFor(item, true)!.nativeMarketObservations.push(invalid
+      ? { ...item, disposition: "UNMAPPED", reason: "INVALID_DERIVED_MARKET_BINDING" } : item);
+  }
+  marketPartGroups.set(part, groups);
+  return groups;
+}
+
+function mergeMarketParts(parts: readonly BtiPart[]): BtiMarketFamily {
+  const families = new Map<string, BtiMarketFamily>();
   // Each detail response already replaced its event's previous detail partition.
   // A shallow roster only replaces native families it actually advertises.
   for (const part of [...parts].sort(comparePartClock)) {
@@ -432,71 +509,8 @@ function mergeMarketParts(parts: readonly BtiPart[]): Pick<ObservedProviderCatal
         if (part.closedEventIds.has(key.slice(0, key.indexOf("\u0000")))) families.delete(key);
       }
     }
-    const nativeKeys = new Set(part.nativeMarketIds.filter((item) => item.marketId !== "")
-      .map(({ eventId, marketId }) => `${eventId}\u0000${marketId}`));
-    const familyFor = (item: { readonly providerEventId: string; readonly providerMarketId: string;
-      readonly marketType?: MarketType; readonly scope?: Scope; readonly line?: string | null;
-      readonly nativeScope?: string | null; readonly player?: unknown }): string | null => {
-      const key = `${item.providerEventId}\u0000${item.providerMarketId}`;
-      if (nativeKeys.has(key)) return key;
-      // A categorical family can expose several independent canonical terms.
-      // All remain owned by the exact native family for closure and replacement.
-      const derived = /^(.+):([A-Z][A-Z0-9_]+):(none|-?\d+(?:\.\d+)?)(?::player:([1-9]\d*))?$/u.exec(item.providerMarketId);
-      if (derived !== null) {
-        const type = derived[2] as MarketType;
-        const binary = footballBinaryMarketSpec(type), categorical = footballCategoricalMarketSpec(type);
-        const spec = binary ?? categorical ?? footballResultMarketSpec(type);
-        const linePolicy = binary?.linePolicy ?? categorical?.linePolicy ?? "NONE";
-        const encodedLine = derived[3] === "none" ? null : derived[3]!;
-        const family = `${item.providerEventId}\u0000${derived[1]}`;
-        if (spec !== null && nativeKeys.has(family) && type.startsWith("PLAYER_") === (derived[4] !== undefined) &&
-          (item.marketType === undefined || (type.startsWith("PLAYER_")
-            ? isValidProviderPlayerIdentity(item.player) && item.player.providerPlayerId === derived[4]
-            : item.player === undefined)) &&
-          (item.marketType === undefined || item.marketType === type) &&
-          (item.scope === undefined || item.scope === spec.scope) &&
-          (item.nativeScope == null || item.nativeScope === spec.scope) &&
-          (item.line === undefined || item.line === encodedLine) &&
-          (linePolicy === "NONE" ? encodedLine === null : encodedLine !== null &&
-            (linePolicy === "POSITIVE_INTEGER" ? /^[1-9]\d*$/u.test(encodedLine) && Number.isSafeInteger(Number(encodedLine))
-              : linePolicy === "INTEGER" ? /^-?(?:0|[1-9]\d*)$/u.test(encodedLine) && Number.isSafeInteger(Number(encodedLine))
-                : isSupportedFootballTwoWayLine(encodedLine)))) return family;
-        // A malformed canonical variant cannot become an orphan that outlives
-        // native family closure. Its native observation is retained below.
-        return null;
-      }
-      if (item.marketType?.startsWith("PLAYER_") || item.player !== undefined) return null;
-      const separator = item.providerMarketId.lastIndexOf(":");
-      const parent = `${item.providerEventId}\u0000${item.providerMarketId.slice(0, separator)}`;
-      return separator >= 0 && nativeKeys.has(parent) &&
-        /^-?\d+(?:\.\d+)?$/u.test(item.providerMarketId.slice(separator + 1)) ? parent : key;
-    };
-    type Group = { markets: ObservedProviderCatalog["markets"][number][];
-      quotes: ObservedProviderCatalog["quotes"][number][];
-      nativeMarketObservations: NonNullable<ObservedProviderCatalog["nativeMarketObservations"]>[number][] };
-    const groups = new Map<string, Group>([...nativeKeys].map((key) =>
-      [key, { markets: [], quotes: [], nativeMarketObservations: [] }]));
-    const invalidBindings = new Set<string>();
-    const identityFor = (item: { readonly providerEventId: string; readonly providerMarketId: string }): string =>
-      `${item.providerEventId}\u0000${item.providerMarketId}`;
-    const normalizedMarketIds = new Set(part.markets.map(identityFor));
-    const groupFor = (item: { readonly providerEventId: string; readonly providerMarketId: string }, retainInvalid = false): Group | null => {
-      const family = familyFor(item);
-      if (family === null && !retainInvalid) { invalidBindings.add(identityFor(item)); return null; }
-      const key = family ?? identityFor(item);
-      const group = groups.get(key) ?? { markets: [], quotes: [], nativeMarketObservations: [] };
-      groups.set(key, group);
-      return group;
-    };
-    for (const item of part.markets) groupFor(item)?.markets.push(item);
-    for (const item of part.quotes) groupFor(item)?.quotes.push(item);
-    for (const item of part.nativeMarketObservations ?? []) {
-      const invalid = invalidBindings.has(identityFor(item)) || familyFor(item) === null ||
-        (item.providerMarketId.includes(":player:") && item.disposition === "NORMALIZED" && !normalizedMarketIds.has(identityFor(item)));
-      groupFor(item, true)!.nativeMarketObservations.push(invalid
-        ? { ...item, disposition: "UNMAPPED", reason: "INVALID_DERIVED_MARKET_BINDING" } : item);
-    }
-    for (const [key, group] of groups) {
+    for (const [key, sourceGroup] of groupsForMarketPart(part)) {
+      let group = sourceGroup;
       const previous = families.get(key);
       if (!part.isDetail && previous !== undefined && group.markets.length > 0) {
         // A roster can show only one of a detail family's alternate lines.
@@ -506,12 +520,15 @@ function mergeMarketParts(parts: readonly BtiPart[]): Pick<ObservedProviderCatal
         for (const quote of previous.quotes) {
           if (incomingSelections.has(quote.providerSelectionId)) replacedMarkets.add(quote.providerMarketId);
         }
-        group.markets.unshift(...previous.markets.filter((item) => !replacedMarkets.has(item.providerMarketId)));
-        group.quotes.unshift(...previous.quotes.filter((item) => !replacedMarkets.has(item.providerMarketId)));
-        group.nativeMarketObservations.unshift(...(previous.nativeMarketObservations ?? [])
-          .filter((item) => !replacedMarkets.has(item.providerMarketId) && (item.disposition === "NORMALIZED" ||
-            (item.reason === "UNPAIRED_OR_INVALID_NATIVE_SELECTIONS" && !group.nativeMarketObservations.some((current) =>
-              current.providerMarketId === item.providerMarketId && current.reason === item.reason)))));
+        const incomingObservations = group.nativeMarketObservations ?? [];
+        group = {
+          markets: [...previous.markets.filter((item) => !replacedMarkets.has(item.providerMarketId)), ...group.markets],
+          quotes: [...previous.quotes.filter((item) => !replacedMarkets.has(item.providerMarketId)), ...group.quotes],
+          nativeMarketObservations: [...(previous.nativeMarketObservations ?? [])
+            .filter((item) => !replacedMarkets.has(item.providerMarketId) && (item.disposition === "NORMALIZED" ||
+              (item.reason === "UNPAIRED_OR_INVALID_NATIVE_SELECTIONS" && !incomingObservations.some((current) =>
+                current.providerMarketId === item.providerMarketId && current.reason === item.reason)))), ...incomingObservations]
+        };
       }
       families.set(key, group);
     }

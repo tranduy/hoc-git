@@ -88,7 +88,7 @@ export function readExtensionBuildIdentity(
 
 export function startExtensionReloadSweep(
   controlPlane: { reloadExtension(buildIdentity: string): number },
-  buildIdentity: string | null,
+  buildIdentity: string | null | (() => string | null),
   intervalMs = 30_000
 ): { dispose(): void } | null {
   if (buildIdentity === null) return null;
@@ -96,7 +96,12 @@ export function startExtensionReloadSweep(
   // announcement is a no-op once it has converged, and it also covers a worker
   // that was evicted and restarted on the old bundle after the deployment.
   const timer = setInterval(() => {
-    try { controlPlane.reloadExtension(buildIdentity); }
+    try {
+      // Extension-only builds must not keep receiving the API's startup identity:
+      // that would repeatedly reload the newer worker back into the same bundle.
+      const current = typeof buildIdentity === "function" ? buildIdentity() : buildIdentity;
+      if (current !== null) controlPlane.reloadExtension(current);
+    }
     catch { /* a reload announcement must never stop the stack */ }
   }, intervalMs);
   timer.unref();
@@ -708,7 +713,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   }
   const extensionReload = chromeBridgeControlPlane === null
     ? null
-    : startExtensionReloadSweep(chromeBridgeControlPlane, readExtensionBuildIdentity());
+    : startExtensionReloadSweep(chromeBridgeControlPlane, () => readExtensionBuildIdentity());
   if (extensionReload !== null) app.addHook("onClose", async () => { extensionReload.dispose(); });
   await app.listen({ host: config.host, port: config.port });
   let sessionTimer: ReturnType<typeof setInterval> | null = null;

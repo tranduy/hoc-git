@@ -484,6 +484,25 @@ describe("extension reload announcement", () => {
     expect(startExtensionReloadSweep({ reloadExtension: vi.fn(() => 1) }, null)).toBeNull();
   });
 
+  it("announces the current disk build after an extension-only deployment", () => {
+    vi.useFakeTimers();
+    try {
+      const reloadExtension = vi.fn((_identity: string) => 1);
+      let current: string | null = identity;
+      const sweep = startExtensionReloadSweep({ reloadExtension }, () => current, 1_000);
+      vi.advanceTimersByTime(1_000);
+      expect(reloadExtension).toHaveBeenLastCalledWith(identity);
+      current = null; // Bundler is replacing dist; never request an obsolete bundle.
+      vi.advanceTimersByTime(1_000);
+      expect(reloadExtension).toHaveBeenCalledTimes(1);
+      current = `sha256:${"f".repeat(64)}`;
+      vi.advanceTimersByTime(2_000);
+      expect(reloadExtension).toHaveBeenCalledTimes(3);
+      expect(reloadExtension.mock.calls.map(([value]) => value)).toEqual([identity, current, current]);
+      sweep!.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("never lets a failing announcement stop the stack", () => {
     vi.useFakeTimers();
     try {

@@ -84,6 +84,69 @@ describe("DurableCatalogStore", () => {
     await expect(value.load("BTI|FOOTBALL|large")).resolves.toEqual(large);
   });
 
+  it("loads existing JSON caches without parsing a second full catalog-sized string", async () => {
+    const { value } = await store();
+    const large: ObservedProviderCatalog = { ...catalog(), nativeMarketObservations: Array.from({ length: 1025 },
+      (_, index) => ({ provider: "BTI", category: "FOOTBALL", providerEventId: "event",
+        providerMarketId: `market-${index}`, nativeType: "unknown", nativeLabel: `Việt Nam \\" ${index} } [`,
+        nativeScope: null, outcomeLabels: [], observedAtMs: 900, disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED" })) };
+    // Compatibility with files written before incremental loading was added.
+    await writeFile(value.pathFor("BTI|FOOTBALL|large"),JSON.stringify(large),"utf8");
+    const parse=vi.spyOn(JSON,"parse");
+    try {
+      await expect(value.load("BTI|FOOTBALL|large")).resolves.toEqual(large);
+      const largestPiece=Math.max(...parse.mock.calls.map(([input])=>typeof input==="string"?input.length:0));
+      expect(largestPiece).toBeLessThan(64*1024);
+    } finally { parse.mockRestore(); }
+  });
+
+  it.each([
+    '{"dataMode":"LIVE",}',
+    '{"events":[{},]}',
+    '{"events":[{"name":"unterminated}]}',
+    '{"events":[]}}',
+    '{"events":[]} garbage',
+    '{"events":[],"quotes":[[}]]}'
+  ])("rejects corrupt incremental JSON %s",async json=>{
+    const { value }=await store();
+    await writeFile(value.pathFor("BTI|FOOTBALL|corrupt"),json,"utf8");
+    await expect(value.load("BTI|FOOTBALL|corrupt")).resolves.toBeNull();
+  });
+
+  it("preserves a native observation larger than a read chunk with nested arrays and escaped Unicode",async()=>{
+    const { value }=await store();
+    const native={provider:"BTI" as const,category:"FOOTBALL" as const,providerEventId:"event",providerMarketId:"large-native",
+      nativeType:"unknown",nativeLabel:'Việt Nam \\" } ]',nativeScope:null,
+      outcomeLabels:Array.from({length:1024},(_,index)=>`Đội ${index} \\" ${"x".repeat(128)}`),
+      nativeSelections:[{selectionId:"selection",outcomeId:"0",line:null,price:null}],
+      observedAtMs:900,disposition:"UNMAPPED" as const,reason:"NATIVE_TYPE_UNMAPPED"};
+    const input={...catalog(),nativeMarketObservations:[native]};
+    const json=JSON.stringify(input);
+    expect(Buffer.byteLength(json)).toBeGreaterThan(2*64*1024);
+    await writeFile(value.pathFor("BTI|FOOTBALL|nested"),json,"utf8");
+    await expect(value.load("BTI|FOOTBALL|nested")).resolves.toEqual(input);
+  });
+
+  it.each(["Việt",'\\"'])("preserves %s when its bytes straddle a read boundary",async marker=>{
+    const { value }=await store();
+    const input={...catalog(),nativeMarketObservations:[{provider:"BTI" as const,category:"FOOTBALL" as const,
+      providerEventId:"event",providerMarketId:"boundary",nativeType:"unknown",nativeLabel:'Việt \\" Nam',nativeScope:null,
+      outcomeLabels:[],observedAtMs:900,disposition:"UNMAPPED" as const,reason:"NATIVE_TYPE_UNMAPPED"}]};
+    const json=JSON.stringify(input),position=json.indexOf(marker);
+    expect(position).toBeGreaterThan(0);
+    const splitOffset=marker==="Việt"?3:1;
+    const padding=64*1024-Buffer.byteLength(json.slice(0,position))-splitOffset;
+    await writeFile(value.pathFor("BTI|FOOTBALL|boundary")," ".repeat(padding)+json,"utf8");
+    await expect(value.load("BTI|FOOTBALL|boundary")).resolves.toEqual(input);
+  });
+
+  it("rejects unknown metadata and duplicate top-level keys",async()=>{
+    const { value }=await store(),path=value.pathFor("BTI|FOOTBALL|metadata");
+    for(const json of [JSON.stringify({...catalog(),unknown:{nested:true}}),JSON.stringify(catalog()).replace('"provider":"IM"','"provider":"IM","provider":"IM"')]){
+      await writeFile(path,json,"utf8");await expect(value.load("BTI|FOOTBALL|metadata")).resolves.toBeNull();
+    }
+  });
+
   it("fails soft for corrupt or schema-invalid persisted data", async () => {
     const { value } = await store();
     await value.save("IM|LOL|session", catalog());

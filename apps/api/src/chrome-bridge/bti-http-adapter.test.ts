@@ -262,6 +262,48 @@ describe("BtiHttpCatalogAdapter", () => {
     } finally { extract.mockRestore(); }
   });
 
+  it("does not revalidate unchanged native families when a different event detail updates", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const roster = structuredClone(payload);
+    const events = roster.serializedData[0]![12] as unknown[][];
+    const extra = structuredClone(events[0]!);
+    extra[0] = "event-2";
+    events.push(extra);
+    committedCatalog(adapter, "bti:1000:1", 1, JSON.stringify(roster));
+    const initial = adapter.decode(cachedDetail(detailPayload(), now + 100))[0]!.value as ObservedProviderCatalog;
+    const retained = initial.markets.find(({ providerMarketId }) => providerMarketId === "detail-ou:2.75")!;
+    expect(retained).toBeDefined();
+    const identity = retained.providerMarketId;
+    let identityReads = 0;
+    Object.defineProperty(retained, "providerMarketId", { configurable: true, enumerable: true,
+      get: () => { identityReads += 1; return identity; } });
+    const changed = adapter.decode(detailEnvelope(detailPayload("event-2"), now + 200,
+      "bti:1000:1", "event-2"))[0]!.value as ObservedProviderCatalog;
+    expect(identityReads).toBe(0);
+    expect(changed.markets).toContain(retained);
+    expect(changed.quotes.filter(({ providerEventId }) => providerEventId === "event"))
+      .toEqual(initial.quotes.filter(({ providerEventId }) => providerEventId === "event"));
+  });
+
+  it("does not mutate cached roster families while preserving hidden alternate lines over repeated merges", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    committedCatalog(adapter);
+    const hidden = overlapDetail(-1.5);
+    const selections = ((hidden.data[0]![20] as unknown[][])[1]![13]) as unknown[][];
+    selections[0]![0] = "alt-home";
+    selections[1]![0] = "alt-away";
+    const first = adapter.decode(cachedDetail(hidden, now - 300))[0]!.value as ObservedProviderCatalog;
+    const expected = JSON.parse(JSON.stringify(first));
+    for (const offset of [-200, -100]) {
+      const next = adapter.decode(cachedDetail(hidden, now + offset))[0]!.value as ObservedProviderCatalog;
+      expect(next.markets.map(({ providerMarketId }) => providerMarketId).sort())
+        .toEqual(first.markets.map(({ providerMarketId }) => providerMarketId).sort());
+      expect(new Set(next.quotes.map(({ providerSelectionId }) => providerSelectionId)).size).toBe(next.quotes.length);
+      expect(next.nativeMarketObservations?.length).toBe(first.nativeMarketObservations?.length);
+    }
+    expect(first).toEqual(expected);
+  });
+
   it("honors explicit empty detail batch entries and remembers their removal clock", () => {
     const adapter = new BtiHttpCatalogAdapter();
     committedCatalog(adapter);

@@ -304,10 +304,13 @@ function nativeSelection(value: unknown, detail: boolean): NonNullable<NativeMar
 
 export function extractBtiNativeMarketObservations(
   payload: unknown,
-  observedAtMs: number
+  observedAtMs: number,
+  resolvedEventIds?: ReadonlySet<string>
 ): readonly NativeMarketObservation[] {
   const observations: NativeMarketObservation[] = [];
-  const resolvedEvents = new Set(extractBtiCatalogRecords(payload).map((record) => record.eventId));
+  // Adapters already resolve this payload into catalog records. Reuse those
+  // identities instead of decoding every native market again just for its event.
+  const resolvedEvents = resolvedEventIds ?? new Set(extractBtiCatalogRecords(payload).map((record) => record.eventId));
   for (const native of rawNativeMarkets(payload)) {
     const parseSelection = native.detail ? detailSelection : selection;
     const normalized = normalizedMarket(native.marketId, native.code, native.values, parseSelection,
