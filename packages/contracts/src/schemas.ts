@@ -427,7 +427,9 @@ export const TicketRealtimeDisplayedLegSchema = z.strictObject({
   decimalOdds: NonnegativeDecimalStringSchema,
   quoteStatus: QuoteStatusSchema,
   providerObservedAtMs: z.number().finite().nonnegative(),
-  receivedMonotonicMs: z.number().finite().nonnegative(),
+  // Audit evidence retains the ProviderQuote receipt verbatim. Cache age can
+  // place it before the current observer's clock origin; it is not a fresh read.
+  receivedMonotonicMs: z.number().finite(),
   sequence: z.number().int().nonnegative().safe().nullable(),
   requestedStake: NonnegativeDecimalStringSchema
 }) satisfies z.ZodType<TicketRealtimeDisplayedLeg>;

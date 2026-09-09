@@ -42,4 +42,47 @@ describe("TicketRealtimeCheckApi", () => {
       { status: 200, headers: { "content-type": "application/json" } }));
     await expect(api.check(request)).rejects.toThrow("Invalid realtime ticket check response");
   });
+
+  it("reports invalid receipt paths before fetch without exposing request values", async () => {
+    let fetchCount = 0;
+    const api = new TicketRealtimeCheckApi(async () => { fetchCount++; return new Response(); });
+    const invalid = { ...request, eventLabel: "PRIVATE_EVENT_LABEL",
+      legs: [request.legs[0], { ...request.legs[1], accountId: "PRIVATE_ACCOUNT_VALUE",
+        receivedMonotonicMs: Number.POSITIVE_INFINITY, providerObservedAtMs: Number.NaN }] } as TicketRealtimeCheckRequest;
+
+    await expect(api.check(invalid).catch(error => (error as Error).message)).resolves.toBe(
+      "Invalid realtime ticket check request (fields: legs.1.providerObservedAtMs, legs.1.receivedMonotonicMs)");
+    expect(fetchCount).toBe(0);
+  });
+
+  it("reports unknown request fields at the root without exposing their names or values", async () => {
+    const api = new TicketRealtimeCheckApi(async () => { throw new Error("FETCH_MUST_NOT_RUN"); });
+    const invalid = { ...request, PRIVATE_FIELD_NAME: "PRIVATE_FIELD_VALUE" };
+    await expect(api.check(invalid).catch(error => (error as Error).message)).resolves.toBe(
+      "Invalid realtime ticket check request (fields: request)");
+  });
+
+  it("reports malformed response paths without exposing returned values", async () => {
+    const invalid = { ...response, legs: [{ ...response.legs[0], status: "PRIVATE_PROVIDER_RESPONSE" }, response.legs[1]] };
+    const api = new TicketRealtimeCheckApi(async () => new Response(JSON.stringify(invalid),
+      { status: 200, headers: { "content-type": "application/json" } }));
+    await expect(api.check(request).catch(error => (error as Error).message)).resolves.toBe(
+      "Invalid realtime ticket check response (fields: legs.0.status)");
+  });
+
+  it.each([-10_080, -180])("preserves a rebased BTI receipt of %s through the read-only audit round trip", async receivedMonotonicMs => {
+    // BTI detail/roster caches can predate the current observer's monotonic origin.
+    const signedRequest: TicketRealtimeCheckRequest = { ...request,
+      legs: [{ ...request.legs[0], provider: "BTI", accountId: "bti", receivedMonotonicMs }, request.legs[1]] };
+    const signedResponse: TicketRealtimeCheckResponse = { ...response,
+      legs: [{ ...response.legs[0], displayed: signedRequest.legs[0], direct: null,
+        status: "SOURCE_UNAVAILABLE", verificationStatus: null, error: "VISIBLE_PRICE_NOT_FOUND" }, response.legs[1]] };
+    let posted: unknown;
+    const api = new TicketRealtimeCheckApi(async (_input, init) => {
+      posted = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify(signedResponse), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    await expect(api.check(signedRequest)).resolves.toEqual(signedResponse);
+    expect(posted).toEqual(signedRequest);
+  });
 });

@@ -47,6 +47,32 @@ describe("TicketRealtimeCheck schemas", () => {
     expect(TicketRealtimeCheckRequestSchema.safeParse(missingParticipant).success).toBe(false);
   });
 
+  it.each([-10_080, -180])("retains a signed BTI receipt of %s in both audit request and response", receivedMonotonicMs => {
+    // These are valid cache-age translations covered by BtiHttpCatalogAdapter;
+    // the original receipt may precede a restarted observer's monotonic origin.
+    const signedRequest = { ...request,
+      legs: [{ ...request.legs[0], provider: "BTI", accountId: "bti", receivedMonotonicMs }, request.legs[1]] };
+    expect(TicketRealtimeCheckRequestSchema.parse(signedRequest)).toEqual(signedRequest);
+    const response = { ...signedRequest, checkId: "signed-receipt-check", completedAtMs: 1_121, persisted: true,
+      legs: signedRequest.legs.map(displayed => ({ status: "SOURCE_UNAVAILABLE", verificationStatus: null,
+        directMethod: null, displayed, direct: null, error: "VISIBLE_PRICE_NOT_FOUND",
+        startedAtMs: 1_101, completedAtMs: 1_121, elapsedMs: 20 })) };
+    expect(TicketRealtimeCheckResponseSchema.parse(response)).toEqual(response);
+    // Direct fresh preflight evidence keeps its stricter receipt contract.
+    const { requestedStake: _requestedStake, ...directIdentity } = signedRequest.legs[0]!;
+    const direct = { ...directIdentity, limitEvidence: null, constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"] };
+    expect(ProviderTicketPreflightSchema.safeParse({ ...direct, receivedMonotonicMs: 11 }).success).toBe(true);
+    expect(ProviderTicketPreflightSchema.safeParse(direct).success).toBe(false);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "rejects nonfinite displayed receipt %s", receivedMonotonicMs => {
+      const parsed = TicketRealtimeCheckRequestSchema.safeParse({ ...request,
+        legs: [{ ...request.legs[0], receivedMonotonicMs }, request.legs[1]] });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) expect(parsed.error.issues.map(issue => issue.path)).toContainEqual(["legs", 0, "receivedMonotonicMs"]);
+    });
+
   it("preserves direct read method and the four fail-closed verification outcomes", () => {
     const direct = { accountId: "saba", provider: "SABA", providerEventId: "event-a",
       providerMarketId: "market-a", providerSelectionId: "selection-a", selection: "HOME", line: "-0.25",
