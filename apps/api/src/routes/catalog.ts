@@ -250,8 +250,18 @@ export function registerCatalogRoutes(
         deadlineMs - performance.now()
       );
       lastDemandAtMs.set(sourceKey, performance.now());
-      await within(restoreSource(sourceKey), deadlineMs - performance.now());
-      const published = revisions?.get(accountId);
+      let published = revisions?.get(accountId);
+      if (published === undefined) {
+        await within(restoreSource(sourceKey), deadlineMs - performance.now());
+        // Ingress can publish a newer catalog while the cold restore is pending.
+        published = revisions?.get(accountId);
+      } else if (!restoredSources.has(sourceKey)) {
+        // Startup already restored/published Chrome catalogs. Reading disk here
+        // would duplicate the entire book just to serve the existing revision.
+        coverageGuard.accept(sourceKey, { generation: sourceKey, authoritativeBaseline: false,
+          providerEventIds: published.catalog.events.map((event) => event.providerEventId) });
+        restoredSources.add(sourceKey);
+      }
       if (published !== undefined) {
         if (published.snapshotState === "STALE") void startRead(sourceKey, accountId).catch(() => undefined);
         else scheduleCollector(sourceKey, accountId);
