@@ -115,20 +115,24 @@ describe("BTI captured native markets", () => {
       .toEqual([["0OU881536431317872683OMM", "OVER", "0.75"], ["0OU881536431317872683UMM", "UNDER", "1.00"]]);
   });
 
-  it("retains every captured unknown selection and original closed price without manufacturing executable quotes", () => {
+  it("normalizes captured score offers while retaining every original closed cell without making it executable", () => {
     const input = payload();
     const observations = extractBtiNativeMarketObservations(input, 100);
-    const correctScore = observations.find(({ nativeType }) => nativeType === "QA60")!;
-    expect(correctScore).toMatchObject({ disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED" });
-    expect(correctScore.outcomeLabels).toHaveLength(121);
-    expect(correctScore.outcomeLabels.at(-1)).toBe("10:10");
-    expect(correctScore.nativeSelections).toHaveLength(121);
-    expect(correctScore.nativeSelections?.[0]).toMatchObject({ selectionId: "0QA881536431317872662Q0Q0",
+    const correctScore = observations.filter(({ nativeType }) => nativeType === "QA60");
+    const retained = correctScore.flatMap(item => item.nativeSelections ?? []);
+    expect(retained).toHaveLength(121);
+    expect(new Set(retained.map(item => item.selectionId)).size).toBe(121);
+    expect(correctScore.flatMap(item => item.outcomeLabels)).toContain("10:10");
+    expect(retained.find(item => item.selectionId === "0QA881536431317872662Q0Q0")).toMatchObject({
       outcomeId: "2", line: null, price: "-0.067", rawFormat: "MALAY" });
-    expect(correctScore.nativeSelections?.at(-1)).toMatchObject({ selectionId: "0QA881536431317872662Q10Q10",
+    expect(retained.find(item => item.selectionId === "0QA881536431317872662Q10Q10")).toMatchObject({
       outcomeId: "2", line: null, price: "0.00", rawFormat: "MALAY" });
-    expect(extractBtiCatalogRecords(input)[0]!.markets.some(({ marketId }) => marketId.startsWith("0QA881536431317872662")))
-      .toBe(false);
+    const normalized = normalizeSbobetCatalog(extractBtiCatalogRecords(input), {
+      provider: "BTI", observedAtMs: 100, receivedMonotonicMs: 50, sequence: 7
+    });
+    expect(normalized.quotes.find(item => item.providerSelectionId === "0QA881536431317872662Q0Q0"))
+      .toMatchObject({ selection: "UNDER", rawOdds: "-0.067" });
+    expect(normalized.quotes.some(item => item.providerSelectionId === "0QA881536431317872662Q10Q10")).toBe(false);
     expect(observations.every((item) => NativeMarketObservationSchema.safeParse(item).success)).toBe(true);
   });
 

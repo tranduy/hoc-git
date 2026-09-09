@@ -1,4 +1,55 @@
-# Trạng thái làm việc — 2026-09-09
+# Trạng thái làm việc — 2026-09-10
+
+## BTI categorical normalization — 2026-09-10 02:50 local
+
+Latest user asked to continue BTI normalization. Implemented strict BTI
+code/ID/name/participant-based score, range, half/full, margin, score-set,
+team-scoring/clean-sheet/odd-even, corner and period DNB contracts. Binary
+equivalences only where predicates coincide. QA696/697 positive home/away
+offers split into separate YES contracts; no invented NO. QA62 handles slash
+names such as Bodo/Glimt. Derived family closure/removal/replacement fixed.
+
+Same BTI115,578 native observations/1,632 events: canonical51,895 ->99,385;
+original UNMAPPED38,421 ->17,901 (20,520 handled, plus2,433 oldEXCLUDED).
+Added47,490 canonical =27,072 binary +20,418 categorical. All22,953 handled
+source rows map every available selection.822,763 candidate native entries
+preserved exactly, old111,046 quotes/51,895 markets unchanged. New replay
+quotes have receipt/sequence0; evidence is not fresh eligible odds/profit.
+
+Fixed peers with latest AP normalization held constant on both sides:
+BTI30,844 ->33,358 opposing native pairs (+2,514), lost0; pairedBTIevents651
+unchanged. Gains AP1,215/SBO1,228/CMD54/SABA17. IM unavailable. AP snapshot
+STALE. Primary older-AP variant26,590 ->29,104, samegain. Only1,283 newBTI
+source contracts find opponents. Categorical storage coverage is not pairing;
+general categorical complements/orientation remain disabled in matcher.
+
+Remaining17,901 original UNMAPPED rows across152types ALL contain OPENpriced
+selections. Largest groups: first-scoring-half, first10minutes, comebackwin,
+goal/corner races, playergoals/scorers. Do not dismiss these as closed noise.
+Native source rows are reconstructed from retained fields, not full network
+tuples. Final immutable audit after-r3, source SHA606e1011a6989b2b0b0a654d153a
+378479a8bf3b8cae85b75fbf05754ac855d9. Local evidence/report paths below.
+
+703 tests passed:351 API/contracts +352 web comparison. Contracts/API builds
+and web typecheck/build passed. Root Vitest requires exclusions for .run and
+.worktrees; web worker tests need web workspace jsdom config (ErrorEvent).
+
+Final handoff02:50:01: instance6a8f62bf-e7fc-4dfe-8be7-51e72ea81a4e,
+APIsha256:50cf4743eac50c88f04c97410c759264aae529f8f66d3174ceaf66f8dc4a1b41.
+Webindex-a25HopCZ.js/workercomparison.worker-YlhPqpj8.js. Lease released;
+local/public200 newasset. Two handoffs because late QA62 slashfix required
+final API rebuild; no provider reload. FirstcheckBTIFRESH79,277canonical/
+12,550unmapped; immediatefinalcheckrestoredSTALE97,661canonical/17,318unmapped.
+Do not compare those changing runtime snapshots as fixed-input measurements.
+Follow-up02:52:08 returned BTIFRESH1,596events/96,659canonical/316,891quotes/
+17,095unmapped; local/public200 and final API identity match. Evidence is
+deployment-verification-settled.json. No further provider reload/checkloop.
+
+Report docs/bti-categorical-normalization-2026-09-10.md. Evidence
+.run/bti-normalization-2026-09-10/{BTI-full.json,after-r3-result.json,
+after-r3-ap-latest-result.json,final-evidence-summary.json,after-r3-source.json,
+deployment-final.json,deployment-verification-final.json}. This task does not
+fix the prior AP/IM producer outages or establish all-feed stability.
 
 ## AP categorical normalization — 2026-09-10 01:36 local
 

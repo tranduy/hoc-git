@@ -1,5 +1,6 @@
-import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
-import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
+import { isSupportedFootballTwoWayLine, normalizeSbobetCatalog } from "@tool-chenh/adapters";
+import { footballBinaryMarketSpec, footballCategoricalMarketSpec, footballResultMarketSpec,
+  type ChromeBridgeEnvelope, type MarketType, type Scope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { extractBtiCatalogRecords,
   extractBtiNativeMarketIdentities,
@@ -433,9 +434,29 @@ function mergeMarketParts(parts: readonly BtiPart[]): Pick<ObservedProviderCatal
     }
     const nativeKeys = new Set(part.nativeMarketIds.filter((item) => item.marketId !== "")
       .map(({ eventId, marketId }) => `${eventId}\u0000${marketId}`));
-    const familyFor = (item: { readonly providerEventId: string; readonly providerMarketId: string }): string => {
+    const familyFor = (item: { readonly providerEventId: string; readonly providerMarketId: string;
+      readonly marketType?: MarketType; readonly scope?: Scope; readonly line?: string | null;
+      readonly nativeScope?: string | null }): string => {
       const key = `${item.providerEventId}\u0000${item.providerMarketId}`;
       if (nativeKeys.has(key)) return key;
+      // A categorical family can expose several independent canonical terms.
+      // All remain owned by the exact native family for closure and replacement.
+      const derived = /^(.+):([A-Z][A-Z0-9_]+):(none|-?\d+(?:\.\d+)?)$/u.exec(item.providerMarketId);
+      if (derived !== null) {
+        const type = derived[2] as MarketType;
+        const binary = footballBinaryMarketSpec(type), categorical = footballCategoricalMarketSpec(type);
+        const spec = binary ?? categorical ?? footballResultMarketSpec(type);
+        const linePolicy = binary?.linePolicy ?? categorical?.linePolicy ?? "NONE";
+        const encodedLine = derived[3] === "none" ? null : derived[3]!;
+        const family = `${item.providerEventId}\u0000${derived[1]}`;
+        if (spec !== null && nativeKeys.has(family) &&
+          (item.marketType === undefined || item.marketType === type) &&
+          (item.scope === undefined || item.scope === spec.scope) &&
+          (item.nativeScope == null || item.nativeScope === spec.scope) &&
+          (item.line === undefined || item.line === encodedLine) &&
+          (linePolicy === "NONE" ? encodedLine === null :
+            encodedLine !== null && isSupportedFootballTwoWayLine(encodedLine))) return family;
+      }
       const separator = item.providerMarketId.lastIndexOf(":");
       const parent = `${item.providerEventId}\u0000${item.providerMarketId.slice(0, separator)}`;
       return separator >= 0 && nativeKeys.has(parent) &&

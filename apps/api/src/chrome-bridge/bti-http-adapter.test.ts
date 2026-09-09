@@ -93,6 +93,53 @@ describe("BtiHttpCatalogAdapter", () => {
     return body;
   }
 
+  function categoricalRoster(code = "QA119", count = 0) {
+    const body = structuredClone(payload);
+    const value = structuredClone(market);
+    value[0] = "category";
+    value[3] = [code, "Number of goals", 1];
+    const choice = selection(`categoryQ0Q${count}`, 1, 0, "-0.25");
+    const name = count === 0 ? "Không bàn thắng" : `${count} bàn thắng`;
+    choice[1] = { VI: name }; choice[2] = { VI: name };
+    value[7] = [choice];
+    (body.serializedData[0]![12] as unknown[][])[0]![8] = ["event", 0, [], [value]];
+    return body;
+  }
+
+  function categoricalDetail(code = "QA119", count = 0) {
+    const body = detailPayload() as { data: unknown[][] };
+    const value = (body.data[0]![20] as unknown[][])[0]!;
+    value[0] = "category"; value[1] = "Number of goals"; value[5] = [code, "Number of goals"];
+    value[15] = false; value[23] = false;
+    const choice = (value[13] as unknown[][])[0]!;
+    choice[0] = `categoryQ0Q${count}`;
+    choice[2] = { VI: count === 0 ? "Không bàn thắng" : `${count} bàn thắng` }; choice[16] = null;
+    value[13] = [choice];
+    return body;
+  }
+
+  it.each(["closed", "omitted", "empty"].flatMap(kind => [0, 2].map(count => [kind, count] as const)))(
+    "retires derived categorical quotes after native family %s (goal count %d)", (kind, count) => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const initial = committedCatalog(adapter, "bti:1000:1", 1, JSON.stringify(categoricalRoster("QA119", count))) as ObservedProviderCatalog;
+    expect(initial.quotes.map(quote => quote.providerMarketId)).toEqual([
+      count === 0 ? "category:FT_TOTAL:0.5" : "category:FT_GOAL_RANGE:none"]);
+    adapter.decode(cachedDetail(categoricalDetail("QA119", count), now + 100));
+    const changed = kind === "empty" ? { data: [] } : kind === "omitted" ? detailPayload() : categoricalDetail("QA119", count);
+    if (kind === "closed") (((changed as { data: unknown[][] }).data[0]![20] as unknown[][])[0]!)[15] = true;
+    const catalog = adapter.decode(cachedDetail(changed, now + 200))[0]!.value as ObservedProviderCatalog;
+    expect(catalog.quotes.filter(quote => quote.providerSelectionId === `categoryQ0Q${count}`)).toEqual([]);
+    expect(catalog.markets.filter(value => value.providerMarketId.startsWith("category:"))).toEqual([]);
+  });
+
+  it("replaces older derived terms when the roster reuses their native selection", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    committedCatalog(adapter, "bti:1000:1", 1, JSON.stringify(categoricalRoster("QA120")));
+    const catalog = adapter.decode(cachedDetail(categoricalDetail("QA119"), now - 100))[0]!.value as ObservedProviderCatalog;
+    expect(catalog.quotes.filter(quote => quote.providerSelectionId === "categoryQ0Q0")
+      .map(quote => [quote.marketType, quote.providerMarketId])).toEqual([["FH_TOTAL", "category:FH_TOTAL:0.5"]]);
+  });
+
   it("keeps newer main prices while retaining hidden detail with its original cache clock", () => {
     const adapter = new BtiHttpCatalogAdapter();
     committedCatalog(adapter);
@@ -295,7 +342,7 @@ describe("BtiHttpCatalogAdapter", () => {
       reason: "EVENT_IDENTITY_UNRESOLVED", disposition: "EXCLUDED" }));
   });
 
-  it("retains unmatched native selection diagnostics when main only updates its visible pair", () => {
+  it("retains a valid partial hidden handicap when main only updates its visible pair", () => {
     const adapter = new BtiHttpCatalogAdapter();
     committedCatalog(adapter);
     const detail = overlapDetail(-1.5);
@@ -305,8 +352,11 @@ describe("BtiHttpCatalogAdapter", () => {
     selections.push(unmatched);
     const catalog = adapter.decode(cachedDetail(detail, now - 100))[0]!.value as ObservedProviderCatalog;
     expect(catalog.nativeMarketObservations).toContainEqual(expect.objectContaining({
-      providerMarketId: "hc", disposition: "EXCLUDED", reason: "UNPAIRED_OR_INVALID_NATIVE_SELECTIONS",
-      observedAtMs: now - 100 }));
+      providerMarketId: "hc:-2.5", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED",
+      observedAtMs: now - 100, nativeSelections: [expect.objectContaining({ selectionId: "unmatched-hidden-home" })] }));
+    expect(catalog.quotes.filter(quote => quote.providerMarketId === "hc:-2.5")).toEqual([
+      expect.objectContaining({ providerSelectionId: "unmatched-hidden-home", selection: "HOME", receivedMonotonicMs: -10_080 })
+    ]);
   });
 
   it("honors whole-event closure with a safe numeric native event identity", () => {

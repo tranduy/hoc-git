@@ -1,7 +1,8 @@
 import { isSupportedFootballTwoWayLine,
   type SbobetCatalogInputRecord, type SbobetCatalogMarket,
   type SbobetCatalogSelection } from "@tool-chenh/adapters";
-import { footballBinaryMarketSpec, footballResultMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, footballResultMarketSpec, footballCategoricalMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
+import { btiCategoricalCodes, btiNamedSubject, decodeBtiCategoricalTerms } from "./bti-categorical-terms.js";
 
 type Row = readonly unknown[];
 
@@ -110,6 +111,11 @@ function namedTeam(label: string, expectedTeams?: readonly [string, string]): "H
 
 function marketType(code: string, label = "", expectedTeams?: readonly [string, string]): SbobetCatalogMarket["marketType"] | null {
   const evidence = normalizedLabel(label);
+  if(code === "OU52") return "CORNER_SH_TOTAL";
+  if(code === "OU5083" || code === "OU6311" || code === "OU6312") {
+    const subject=btiNamedSubject(label,expectedTeams);
+    return subject===null?null:`${subject}_${code==="OU5083"?"SH":"FH"}_TOTAL`;
+  }
   if (code === "ML0") return "FT_1X2";
   if (code === "ML1") return "FH_1X2";
   if (code === "ML2") return "SH_1X2";
@@ -337,8 +343,9 @@ export function extractBtiNativeMarketObservations(
         const positions = market.selections.flatMap((selection) => {
           const index = native.values.findIndex((value, position) => {
             if (accounted.has(position)) return false;
-            const candidate = parseSelection(value, spec?.linePolicy === "NONE" || fixedLine !== undefined || resultMarket);
+            const candidate = parseSelection(value, spec?.linePolicy === "NONE" || fixedLine !== undefined || resultMarket || btiCategoricalCodes.has(native.code));
             if (candidate?.id !== selection.selectionId) return false;
+            if (btiCategoricalCodes.has(native.code)) return true;
             const line = fixedLine ?? (market.marketType.endsWith("_AH") && candidate.side === 3 ? -candidate.line : candidate.line);
             return market.lineText === null || String(line) === market.lineText;
           });
@@ -348,7 +355,7 @@ export function extractBtiNativeMarketObservations(
         });
         observations.push({ status: native.status, provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId || "UNKNOWN_EVENT",
           providerMarketId: market.marketId, nativeType: native.code || "UNKNOWN", nativeLabel: native.label || null,
-          nativeScope: spec?.scope ?? footballResultMarketSpec(market.marketType)?.scope ?? null,
+          nativeScope: spec?.scope ?? footballResultMarketSpec(market.marketType)?.scope ?? footballCategoricalMarketSpec(market.marketType)?.scope ?? null,
           outcomeLabels: positions.map((position) => labels[position] || "UNNAMED_SELECTION"),
           nativeSelections: positions.map((position) => nativeSelections[position]!),
           observedAtMs, disposition: "NORMALIZED",
@@ -387,6 +394,21 @@ function normalizedMarket(
   expectedTeams?: readonly [string, string],
   validateSelectionNames = true
 ): readonly SbobetCatalogMarket[] {
+  if(btiCategoricalCodes.has(code)) {
+    if(marketId==="")return [];
+    const candidates=values.map(value=>parseSelection(value,true)).filter((item):item is BtiSelection=>item!==null&&Math.abs(Number(item.malay))<=1);
+    if(new Set(candidates.map(item=>item.id)).size!==candidates.length)return [];
+    const groups=new Map<string,SbobetCatalogMarket>();
+    const invalid=new Set<string>();
+    for(const item of candidates){
+      const decoded=decodeBtiCategoricalTerms(code,marketId,item,label,expectedTeams);if(decoded===null)continue;
+      const key=`${marketId}:${decoded.marketType}:${decoded.lineText??"none"}`;
+      const previous=groups.get(key),quote={selectionId:item.id,selection:decoded.selection,priceText:item.malay,locked:item.locked};
+      if(previous?.selections.some(q=>q.selection===quote.selection)){invalid.add(key);continue;}
+      groups.set(key,{marketId:key,marketType:decoded.marketType,lineText:decoded.lineText,selections:[...(previous?.selections??[]),quote]});
+    }
+    return [...groups.values()].filter(m=>!invalid.has(m.marketId));
+  }
   const type = marketType(code, label, expectedTeams);
   if (marketId === "" || type === null) return [];
   const resultSpec = footballResultMarketSpec(type);
