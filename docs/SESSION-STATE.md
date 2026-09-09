@@ -1,5 +1,47 @@
 # Trạng thái làm việc — 2026-09-09
 
+## AP categorical normalization — 2026-09-10 01:36 local
+
+User requested commit/push then continued AP normalization, and asked why BTI
+still had >30k unmapped. Existing work was committed/pushed as d5c7ab3 on
+feat/realtime-hardening. BTI's prior capture: 52,493 canonical, 38,713 unmapped,
+25,788 excluded; it was only partially normalized, not nearly 100% unmapped.
+
+Implemented AP score/range/combined-result/highest-half/statistic-result/DNB
+decoders and shared categorical contracts. Proven boundary ranges/nil-nil
+scores/prematch DNB become actual binary equivalents with native IDs/odds.
+AP HT/FT digits differ from result+BTTS digits; native renderer tables verified.
+Live DNB stays separate from AH0. AOS9:9 remains unmapped with an explicit
+OTHER_SCORE_DOMAIN_REQUIRED reason, never treated as literal nine-nine.
+
+Same AP62,161 native input: 18,802 -> 60,953 canonical, 43,359 -> 1,208
+unmapped. Added42,151 canonical =5,793 binary equivalents +36,358 categorical.
+Actual production matcher: AP30,864 ->35,729 native cross-book pairs (+4,865),
+paired APsource markets17,220 ->21,457, paired APevents539 ->542. Zero old
+pairs lost. Snapshot STALE; additions use expired clock0/sequence0 because
+inventory lacks receipt evidence. These are cached structural results, not
+live prices/profit. IM absent. Source clocks/status/IDs of originals unchanged.
+
+400 tests passed across9 relevant suites, contracts/adapters/API build and
+web typecheck/build passed. ROOT Vitest needs --exclude '**/.worktrees/**'
+or file patterns also run old worktrees. Single-worker tests avoid memory OOM.
+
+Deployed once at01:36:01: instance edc6aeee-4f17-46b6-a690-f8893b52f9af,
+API sha256:91175b12a02f0716e00749ca41dac37beb0d3bc3c55f16febc92348fde8bb23b.
+Web index-BRllPTcL.js / comparison.worker-DcUfWoeL.js, CSS unchanged.
+Deployment lease released. This normalization change does not fix the earlier
+APSPORT_REQUEST_TEMPLATE_MISSING producer outage or assert feed stability.
+New normalization requires native input; old persisted canonical catalogs
+are not relabeled or granted fresh quotes by deployment.
+Post-deployment GET: API health200 and local/public web200 with index-BRllPTcL.
+AP catalog read returned503 CATALOG_TIMEOUT, so no runtime AP market count or
+feed recovery is claimed from this deployment. No repeated reload was issued.
+
+Evidence .run/ap-normalization-2026-09-10/: original53MB APfull inventory,
+frozen before/after engines and source hashes, replay.mjs, before/after-result
+and -pairs JSON, deployment.json, deployment-verification.json.
+Report: docs/apsport-categorical-normalization-2026-09-10.md.
+
 ## Latest read-only matching audit — 2026-09-10 00:49–00:52 local
 
 User asks matching progress and why AP shows many markets but no matches.

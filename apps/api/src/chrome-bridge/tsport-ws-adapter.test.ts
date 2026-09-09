@@ -30,9 +30,9 @@ describe("AP own result schema", () => {
       expect(observeTsportNativeMarkets(input, 1)[0]).toMatchObject({ disposition: "NORMALIZED", status: "SUSPENDED",
         nativeScope: groupId === 12 ? "FULL_TIME" : groupId === 13 ? "FIRST_HALF" : "SECOND_HALF" });
     });
-  it("reports native semantics awaiting a canonical contract as unmapped", () => {
+  it("keeps a native combination without its outcome code unmapped", () => {
     const input = { "2": 1, "50": [{ "3": 98, "10": "Active", "9": [{ "0": "1h", "6": "offer", "8": { "0": "2.5" } }] }] };
-    expect(observeTsportNativeMarkets(input, 1)[0]).toMatchObject({ disposition: "UNMAPPED", reason: "CANONICAL_EQUIVALENCE_NOT_PROVEN" });
+    expect(observeTsportNativeMarkets(input, 1)[0]).toMatchObject({ disposition: "UNMAPPED", reason: "INVALID_OR_UNPROVEN_CATEGORICAL_TERMS" });
   });
 });
 
@@ -341,7 +341,7 @@ describe("TsportWsCatalogAdapter", () => {
     expect(update.value.quotes).toHaveLength(8);
   });
 
-  it("normalizes exact AP binary props and accounts for every native market without guessing three-way groups", () => {
+  it("accounts for every native market without interpreting an unverified odds format", () => {
     const adapter = new TsportWsCatalogAdapter();
     const detailed: Record<string, unknown> = {
       ...event(130, "Complete Home"), "6": false, "11": "2026-08-16T04:00:00Z"
@@ -373,7 +373,7 @@ describe("TsportWsCatalogAdapter", () => {
       expect.objectContaining({ providerMarketId: "tsport:31:130-card-total", nativeType: "31", disposition: "NORMALIZED" }),
       expect.objectContaining({ providerMarketId: "tsport:36:130-btts", nativeType: "36", disposition: "NORMALIZED" }),
       expect.objectContaining({ providerMarketId: "tsport:87:130-three-way", nativeType: "87", disposition: "UNMAPPED",
-        reason: "THREE_WAY_OUTCOME_DOMAIN" }),
+        reason: "INVALID_OR_UNPROVEN_CATEGORICAL_TERMS" }),
       expect.objectContaining({ providerMarketId: "tsport:999:130-unknown", nativeType: "999", disposition: "UNMAPPED",
         reason: "NATIVE_TYPE_UNMAPPED" })
     ]));

@@ -66,12 +66,12 @@ describe("APSPORT native contract identity and outcome retention", () => {
     expect(result.quotes).toEqual([]);
   });
 
-  it("retains raw exact-score identity, line and Decimal odds without claiming binary equivalence", () => {
+  it("maps a native nil-nil score to under 0.5 while retaining its exact original quote", () => {
     const raw = event([{ "3": 10, "10": "Active", "9": [{ "0": "56484400100000000h", "6": "733990848451000",
       "7": "0:0", "8": { "0": "3.760810751951861" } }] }]);
-    expect(normalize(raw).markets).toEqual([]);
-    expect(observeTsportNativeMarkets(raw, 1)[0]).toMatchObject({ disposition: "UNMAPPED",
-      reason: "CANONICAL_EQUIVALENCE_NOT_PROVEN",
+    expect(normalize(raw).markets).toEqual([expect.objectContaining({ marketType: "FT_TOTAL", line: "0.5" })]);
+    expect(observeTsportNativeMarkets(raw, 1)[0]).toMatchObject({ disposition: "NORMALIZED",
+      reason: "FT_TOTAL",
       nativeLabel: "CORRECT_SCORE", nativeScope: "FULL_TIME", nativeSelections: [{ selectionId: "56484400100000000h",
         outcomeId: "0", line: "0:0", price: "3.760810751951861", rawFormat: "DECIMAL" }] });
   });

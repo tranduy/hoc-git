@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { footballBinaryMarketSpec } from "./football-binary-market.js";
 import { footballResultMarketSpec } from "./football-result-market.js";
+import { footballCategoricalMarketSpec } from "./football-categorical-market.js";
 export {
   ChromeBridgeControlMessageSchema,
   ChromeBridgeEnvelopeSchema,
@@ -142,6 +143,13 @@ export const QuoteIneligibilityReasonSchema = z.enum([
 export const OddsFormatSchema = z.enum(["DECIMAL", "HK", "AMERICAN", "MALAY"]) satisfies z.ZodType<OddsFormat>;
 
 export const MarketTypeSchema = z.enum([
+  "FT_CORRECT_SCORE", "FH_CORRECT_SCORE",
+  "FT_GOAL_RANGE", "FH_GOAL_RANGE", "HOME_FT_GOAL_RANGE", "AWAY_FT_GOAL_RANGE",
+  "CORNER_FT_RANGE", "CORNER_FH_RANGE", "HOME_CORNER_FT_RANGE", "AWAY_CORNER_FT_RANGE",
+  "FT_HALF_FULL_RESULT", "FT_RESULT_BTTS", "FT_DOUBLE_CHANCE_BTTS", "FT_RESULT_TOTAL",
+  "FT_HIGHEST_SCORING_HALF", "HOME_FT_HIGHEST_SCORING_HALF", "AWAY_FT_HIGHEST_SCORING_HALF",
+  "CORNER_FT_1X2", "CORNER_FH_1X2", "CARD_FT_1X2", "CARD_FH_1X2",
+  "YELLOW_CARD_FT_1X2", "YELLOW_CARD_FT_DOUBLE_CHANCE", "FT_DRAW_NO_BET", "FH_DRAW_NO_BET",
   "FT_1X2",
   "FT_AH",
   "FT_TOTAL",
@@ -553,7 +561,7 @@ function validateCategoryCompatibility(
   context: z.RefinementCtx
 ): void {
   const compatibleMarketType = value.category === "FOOTBALL"
-    ? footballResultMarketSpec(value.marketType) !== null ||
+    ? footballCategoricalMarketSpec(value.marketType) !== null || footballResultMarketSpec(value.marketType) !== null ||
       footballBinaryMarketSpec(value.marketType) !== null
     : lolMarketTypes.has(value.marketType);
   const compatibleScopes = value.category === "FOOTBALL" ? footballScopes : lolScopes;
@@ -575,7 +583,7 @@ function validateCategoryCompatibility(
   }
 
   const expectedFootballScope = value.category === "FOOTBALL"
-    ? footballResultMarketSpec(value.marketType)?.scope ?? footballBinaryMarketSpec(value.marketType)?.scope
+    ? footballCategoricalMarketSpec(value.marketType)?.scope ?? footballResultMarketSpec(value.marketType)?.scope ?? footballBinaryMarketSpec(value.marketType)?.scope
     : undefined;
   if (expectedFootballScope !== undefined && value.scope !== expectedFootballScope) {
     context.addIssue({

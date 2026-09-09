@@ -1,11 +1,11 @@
-import { footballBinaryMarketSpec, footballResultMarketSpec,
-  type FootballBinaryOutcome, type FootballResultSelection, type MarketType, type OddsFormat,
+import { footballBinaryMarketSpec, footballResultMarketSpec, footballCategoricalMarketSpec, isFootballCategoricalSelection,
+  type MarketType, type OddsFormat,
   type ProviderEvent, type ProviderMarket, type ProviderQuote, type Scope } from "@tool-chenh/contracts";
 import { isSupportedFootballSplitLine, isSupportedFootballTwoWayLine } from "../football-market-policy.js";
 
 export interface SbobetCatalogSelection {
   readonly selectionId: string;
-  readonly selection: FootballBinaryOutcome | FootballResultSelection;
+  readonly selection: string;
   readonly priceText: string;
   readonly priceFormat?: OddsFormat;
   readonly locked: boolean;
@@ -56,10 +56,13 @@ const signedDecimal = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 
 function exactFootballMarketSemantics(marketType: MarketType, fallbackProfile?: string): {
   readonly isTotal: boolean; readonly isHandicap: boolean; readonly scope: Scope;
-  readonly outcomes: readonly (FootballBinaryOutcome | FootballResultSelection)[]; readonly linePolicy: "HALF_UNIT" | "NONE";
+  readonly outcomes: readonly string[]; readonly linePolicy: "HALF_UNIT" | "NONE";
   readonly partialSelections: boolean;
   readonly settlementProfile: string;
 } | null {
+  const categorical = footballCategoricalMarketSpec(marketType);
+  if (categorical !== null) return { ...categorical, isTotal: false, isHandicap: false,
+    outcomes: [], partialSelections: true };
   // A native result selection is meaningful independently of other offers.
   // Eligibility for an opposing ticket is decided from the exact outcome set.
   const result = footballResultMarketSpec(marketType);
@@ -189,7 +192,7 @@ export function normalizeSbobetCatalog(
       if (linePolicy === "HALF_UNIT" && !isSupportedFootballTwoWayLine(line)) continue;
       const pricesValid = market.selections.every(validPrice);
       const exactDomain = actual.length > 0 && ids.size === actual.length && new Set(actual).size === actual.length &&
-        actual.every((outcome) => outcomes.includes(outcome)) &&
+        actual.every((outcome) => outcomes.includes(outcome) || isFootballCategoricalSelection(market.marketType, outcome)) &&
         (semantics.partialSelections || actual.length === outcomes.length);
       if (market.marketId.trim() === "" || !exactDomain ||
         (linePolicy === "HALF_UNIT" && line === null) || !pricesValid) {

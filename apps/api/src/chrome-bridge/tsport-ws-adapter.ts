@@ -1,11 +1,12 @@
 import { normalizeSbobetCatalog, type SbobetCatalogInputRecord } from "@tool-chenh/adapters";
-import { footballBinaryMarketSpec, footballResultMarketSpec, CmdSnapshotChunkSchema,
+import { footballBinaryMarketSpec, footballResultMarketSpec, footballCategoricalMarketSpec, CmdSnapshotChunkSchema,
   type ChromeBridgeEnvelope, type MarketType, type NativeMarketObservation, type OddsFormat } from "@tool-chenh/contracts";
 import { z } from "zod";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
+import { decodeTsportCategoricalTerms, tsportCategoricalGroups } from "./tsport-categorical-terms.js";
 
 const ACCOUNT_ID = "catalog-source:APSPORT:FOOTBALL";
 const MAX_RETIRED_DOM_SWEEPS = 64;
@@ -390,8 +391,23 @@ function tsportNativeMarketId(groupId: string, offerId: string): string {
   return `tsport:${groupId}:${offerId}`;
 }
 
-function extractTsportMarket(group: JsonRecord, odd: JsonRecord): SbobetCatalogInputRecord["markets"][number] | null {
+function extractTsportMarket(group: JsonRecord, odd: JsonRecord, live = false): SbobetCatalogInputRecord["markets"][number] | null {
   const groupId = scalar(group["3"]);
+  if (groupId !== null && tsportCategoricalGroups.has(groupId)) {
+    const terms = decodeTsportCategoricalTerms(groupId, scalar(odd["7"]), live);
+    const offerId = scalar(odd["6"]);
+    if (terms === null || offerId === null) return null;
+    const ids = [scalar(odd["0"]), scalar(odd["2"]), scalar(odd["3"])];
+    const present = ids.filter((id) => id !== null);
+    if (new Set(present).size !== present.length || ids.some((id, index) => id !== null && terms.selections[index] === undefined)) return null;
+    const locked = group["10"] !== "Active" || group["6"] === true || odd["13"] === true;
+    const selections = terms.selections.flatMap((selection, index) => {
+      const selectionId = ids[index]; const quote = price(odd, (["8", "9", "10"] as const)[index]!);
+      return selectionId == null || quote === null ? [] : [{ selectionId, selection, ...quote, locked,
+        ...(terms.handicapLineFormat === "SIGNED" ? { lineText: "0" } : {}) }];
+    });
+    return selections.length === 0 ? null : { ...terms, marketId: tsportNativeMarketId(groupId, offerId), selections };
+  }
   const semantics = groupId === null ? null : marketSemanticsByGroup[groupId] ?? null;
   if (semantics === null) return null;
   const spec = footballBinaryMarketSpec(semantics.marketType);
@@ -457,17 +473,23 @@ export function observeTsportNativeMarkets(event: JsonRecord, observedAtMs: numb
     for (let index = 0; index < group["9"].length; index += 1) {
       const odd = record(group["9"][index]);
       if (odd === null) continue;
-      const normalized = semantics === null ? null : extractTsportMarket(group, odd);
+      const normalized = extractTsportMarket(group, odd, event["6"] === true);
       const knownLabel = nativeGroupLabelById[groupId] ?? null;
       const providerMarketId = tsportNativeMarketId(groupId, scalar(odd["6"]) ?? `${providerEventId}:row:${index}`);
       let disposition: NativeMarketObservation["disposition"];
       let reason: string;
       if (normalized !== null) {
         disposition = "NORMALIZED";
-        reason = semantics!.marketType;
+        reason = normalized.marketType;
       } else if (semantics !== null) {
         disposition = "EXCLUDED";
         reason = semantics.selections[2] !== undefined ? "INVALID_THREE_WAY_SHAPE" : "INVALID_TWO_WAY_SHAPE";
+      } else if ((groupId === "10" || groupId === "11") && scalar(odd["7"]) === "9:9") {
+        disposition = "UNMAPPED";
+        reason = "OTHER_SCORE_DOMAIN_REQUIRED";
+      } else if (tsportCategoricalGroups.has(groupId)) {
+        disposition = "UNMAPPED";
+        reason = "INVALID_OR_UNPROVEN_CATEGORICAL_TERMS";
       } else if (knownLabel === null) {
         disposition = "UNMAPPED";
         reason = "NATIVE_TYPE_UNMAPPED";
@@ -480,9 +502,11 @@ export function observeTsportNativeMarkets(event: JsonRecord, observedAtMs: numb
       observations.push({ provider: "APSPORT", category: "FOOTBALL", providerEventId,
         providerMarketId, nativeType: groupId, nativeLabel: knownLabel,
         status: group["10"] !== "Active" || group["6"] === true || odd["13"] === true || event["9"] === true || !activeApsportApiEvent(event) ? "SUSPENDED" : "OPEN",
-        nativeScope: semantics !== null && footballResultMarketSpec(semantics.marketType) !== null ? footballResultMarketSpec(semantics.marketType)!.scope
+        nativeScope: normalized !== null ? (footballCategoricalMarketSpec(normalized.marketType) ??
+          footballResultMarketSpec(normalized.marketType) ?? footballBinaryMarketSpec(normalized.marketType))?.scope ?? null
+          : semantics !== null && footballResultMarketSpec(semantics.marketType) !== null ? footballResultMarketSpec(semantics.marketType)!.scope
           : semantics === null ? tsportInventoryScope[groupId] ?? null : footballBinaryMarketSpec(semantics.marketType)?.scope ?? null,
-        outcomeLabels: nativeOutcomeLabels(odd, semantics),
+        outcomeLabels: normalized?.selections.map(selection => selection.selection) ?? nativeOutcomeLabels(odd, semantics),
         nativeSelections: ([['0', '8'], ['2', '9'], ['3', '10']] as const).flatMap(([idKey, priceKey]) => {
           const selectionId = scalar(odd[idKey]);
           if (selectionId === null) return [];
@@ -526,7 +550,7 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
     for (const rawOdd of group["9"]) {
       const odd = record(rawOdd);
       if (odd === null) continue;
-      const market = extractTsportMarket({ ...group, ...(eventActive && event["9"] !== true ? {} : { "10": "Suspended" }) }, odd);
+      const market = extractTsportMarket({ ...group, ...(eventActive && event["9"] !== true ? {} : { "10": "Suspended" }) }, odd, event["6"] === true);
       if (market !== null) markets.push(market);
     }
   }
