@@ -43,6 +43,15 @@ Report docs/bti-remaining-normalization-2026-09-10.md. No six-feed uptime claim.
 In-app Browser setup errored sandbox-state-meta missing sandboxPolicy; bounded
 standalone headless Chrome local verification used instead. Initial UIcheck
 was duringloading; use settled verification for actual comparison evidence.
+Normalization committed/pushed as3305379. Finalbackend833tests/web501tests.
+UIsettled03:47:232,147BTImarkets/430unmapped,390MiBmainJSheap,noerror/crash,
+176SABA/CMDpairs;BTIage31secondsandIM/AP/SBOunavailable/recovering. Not all-feed
+success. This exposed duplicate display/fresh worker calculation when invalid
+player subjects changed display catalog identity. Follow-up preserves those
+currentunpairablePLAYERrecords without cachedfallback; existingmatcher still
+rejectsbadidentities.79focusedtests/typecheckpassed. Web-onlypublication03:53:21
+servesindex-CmMLGhBF.js locally/publicly; APIbuildunchanged, noAPIrestart, lease
+released. See worker-publication.json and worker-performance evidence when present.
 
 ## BTI categorical normalization — 2026-09-10 02:50 local
 

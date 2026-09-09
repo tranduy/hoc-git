@@ -22,6 +22,37 @@ function catalog(provider: "BTI" | "APSPORT", selection = "YES", name = "Joao Fe
 const observed = (events: ReturnType<typeof buildComparisonEvents>) => events.flatMap(event => event.observedRows);
 
 describe("bounded player comparison worker projections", () => {
+  it.each(["unknown team", "initials", "missing player", "mismatched quote"])(
+    "does not build a separate display catalog for unpairable player evidence: %s", kind => {
+      const source = catalog("BTI"), originalPlayer = source.markets[0]!.player!;
+      const player = kind === "unknown team" ? { ...originalPlayer, teamSide: null }
+        : kind === "initials" ? { ...originalPlayer, name: "J. Felix" }
+          : kind === "missing player" ? undefined : originalPlayer;
+      const invalid = { ...source, markets: source.markets.map(market => ({ ...market, player })),
+        quotes: source.quotes.map(quote => ({ ...quote, player: kind === "mismatched quote" ? { ...originalPlayer, providerPlayerId: "other" } : player })) };
+      const saved = structuredClone(invalid);
+      const engine = new ComparisonWorkerEngine();
+      const output = engine.apply({ type: "RESET", generation: 1, catalogs: [invalid, catalog("APSPORT", "NO")], staleAccountIds: [] });
+      expect(output.freshEvents).toBe(output.displayEvents);
+      expect(output.displayEvents.flatMap(event => event.rows)).toEqual([]);
+      expect(invalid).toEqual(saved);
+      const next = engine.apply({ type: "UPSERT", generation: 2, catalog: { ...invalid, observedAtMs: 2 }, stale: false });
+      expect(next.freshEvents).toBe(next.displayEvents);
+      expect(next.displayEvents.flatMap(event => event.rows)).toEqual([]);
+    }
+  );
+  it("retains legitimate same-player display fallback while rejecting its mixed-generation fresh route", () => {
+    const original = catalog("BTI"), first = original.quotes[0]!;
+    const complete = { ...original, quotes: [first, { ...first, providerSelectionId: "native:no", selection: "NO" }] };
+    const engine = new ComparisonWorkerEngine();
+    engine.apply({ type: "RESET", generation: 1, catalogs: [complete, catalog("APSPORT", "NO")], staleAccountIds: [] });
+    const next = { ...complete, observedAtMs: 2, quotes: [{ ...first, sequence: 2, rawOdds: "3.1" }, complete.quotes[1]!] };
+    const output = engine.apply({ type: "UPSERT", generation: 2, catalog: next, stale: false });
+    expect(output.displayEvents.flatMap(event => event.rows)).toHaveLength(1);
+    expect(output.displayEvents[0]!.rows[0]!.cells.find(cell => cell.provider === "BTI")!.sourceQuotes).toEqual(complete.quotes);
+    expect(output.freshEvents.flatMap(event => event.rows)).toEqual([]);
+    expect(next.quotes[0]!.sequence).toBe(2);
+  });
   it("keeps direct inventory detail while the worker omits a sole book's player rows", () => {
     const source = catalog("BTI"), saved = structuredClone(source);
     expect(observed(buildComparisonEvents([source]))).toHaveLength(1);

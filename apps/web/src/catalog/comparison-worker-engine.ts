@@ -1,5 +1,5 @@
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import { sameNativePlayer } from "@tool-chenh/contracts";
+import { playerComparisonKey, sameNativePlayer } from "@tool-chenh/contracts";
 import { buildComparisonEvents, createCompetitionLinkMemory, exactTwoWayOutcomeDomain,
   isFocusedTwoWayTicket, isAvailableTwoWayTicket, type ComparisonEvent } from "./comparison.js";
 import type { ComparisonProjection, ComparisonWorkerCommand, ComparisonWorkerOutput } from "./comparison-worker-protocol.js";
@@ -112,7 +112,13 @@ function completeDisplayCatalog(catalog: LiveCatalogResponse,
     const key = marketIdentity(market);
     const currentQuotes = quotesByMarket.get(key) ?? [];
     const expected = exactTwoWayOutcomeDomain(market.marketType, market.scope, market.line);
-    if (market.status !== "OPEN" || expected === null ||
+    // Unresolved player names/teams and conflicting native quote subjects can
+    // never pass comparison binding. Keep their current inventory unchanged:
+    // dropping them creates a needless second full comparison every revision,
+    // while falling back could resurrect a different or unproven player.
+    const unpairablePlayer = market.marketType.startsWith("PLAYER_") &&
+      (playerComparisonKey(market.player) === null || currentQuotes.some(quote => !sameNativePlayer(market.player, quote.player)));
+    if (market.status !== "OPEN" || expected === null || unpairablePlayer ||
       isAvailableTwoWayTicket({ provider: catalog.provider, market, quotes: currentQuotes })) {
       markets.push(market);
       quotes.push(...currentQuotes);
