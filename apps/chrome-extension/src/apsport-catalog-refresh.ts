@@ -219,7 +219,12 @@ export function apsportSelectionPriceFromEvent(value: ApsportRawEvent, identity:
     for (const candidateOdd of group["9"]) {
       const odd = record(candidateOdd);
       const line = odd === null ? Number.NaN : Number(scalar(odd["7"]));
-      if (odd === null || scalar(odd["6"]) !== identity.providerMarketId ||
+      const nativeOfferId = odd === null ? null : scalar(odd["6"]);
+      // Catalog IDs include the native group because AP can reuse an offer ID
+      // across groups. Match the full identity without stripping that boundary.
+      const marketMatches = nativeOfferId !== null && (identity.providerMarketId === nativeOfferId ||
+        identity.providerMarketId === `tsport:${String(group["3"])}:${nativeOfferId}`);
+      if (odd === null || !marketMatches ||
         (requestedLine !== null && (!Number.isFinite(line) || Math.abs(line - requestedLine) > 1e-9))) continue;
       const selectionIndex = semantics.selections.indexOf(identity.selection);
       if (selectionIndex < 0) continue;

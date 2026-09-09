@@ -3580,7 +3580,7 @@ describe("NetworkObserver", () => {
     await observer.refreshCatalog(apsport, { prematchWindowHours: 24 });
 
     await observer.probeSelectionPrice(apsport, {
-      requestId: "price-hidden", providerEventId: "event-hidden", providerMarketId: "hidden-market",
+      requestId: "price-hidden", providerEventId: "event-hidden", providerMarketId: "tsport:80:hidden-market",
       providerSelectionId: "hidden-under", eventLabel: "Alpha vs Beta", participantA: "Alpha",
       participantB: "Beta", marketType: "SH_TOTAL", scope: "SECOND_HALF", selection: "UNDER", line: "1.5"
     });

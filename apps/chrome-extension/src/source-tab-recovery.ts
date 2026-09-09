@@ -252,8 +252,25 @@ export class SourceTabRecovery {
     if (tab.id === undefined) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
     this.#options.beginSourceEpoch?.(`chrome:${lobby}:${tab.id}`);
     this.#options.onBootstrapStart?.(tab.id);
+    const ownedApsportTab = lobby === "TSPORT" && this.#options.listAttached()
+      .some((source) => source.lobby === lobby && source.tabId === tab.id);
     try {
-      await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))({ ...tab, url }, lobby);
+      let attachAfterNavigation = false;
+      try {
+        await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))({ ...tab, url }, lobby);
+      } catch (error) {
+        // A dead AP renderer cannot answer Runtime.enable/disable. Requiring
+        // that answer before Chrome's tab reload prevents recovery itself.
+        // Only the exact owned, unchanged AP tab may take this fallback.
+        if (!ownedApsportTab || !(error instanceof Error) || error.message !== "frame-command-timeout" ||
+          this.#options.get === undefined) throw error;
+        const current = await this.#options.get(tab.id);
+        if (current.id !== tab.id || current.url !== tab.url || !isRecoveryTabForLobby(current, lobby) ||
+          !this.#options.listAttached().some((source) => source.lobby === lobby && source.tabId === tab.id)) {
+          throw new Error("SOURCE_TAB_REPLACED");
+        }
+        attachAfterNavigation = true;
+      }
       if (reload && lobby === "SABA") {
         try {
           // Reattaching the observer starts SABA's lightweight in-page socket
@@ -304,12 +321,36 @@ export class SourceTabRecovery {
           ? await this.#options.reload(tab.id, lobby)
           : await this.#options.update(tab.id, url);
       }
+      if (attachAfterNavigation) {
+        navigated = await this.#waitForApsportDocument(tab.id);
+        this.#assertRecoveryAllowed(lobby);
+        if (!this.#options.listAttached().some((source) => source.lobby === lobby && source.tabId === tab.id)) {
+          throw new Error("SOURCE_TAB_REPLACED");
+        }
+        await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))(navigated, lobby);
+      }
       await this.#waitForLobby(navigated, lobby);
       if (blankHandoffStarted) await this.#options.completeBlankHandoff?.(tab.id);
     } catch (error) {
       this.#options.onBootstrapFailure?.(tab.id);
       throw error;
     }
+  }
+
+  async #waitForApsportDocument(tabId: number): Promise<TabDescriptor> {
+    const delay = this.#options.delay ?? ((delayMs: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const current = await this.#options.get!(tabId);
+      this.#assertRecoveryAllowed("TSPORT");
+      if (current.id !== tabId || !isRecoveryTabForLobby(current, "TSPORT") ||
+        !this.#options.listAttached().some((source) => source.lobby === "TSPORT" && source.tabId === tabId)) {
+        throw new Error("SOURCE_TAB_REPLACED");
+      }
+      if (current.status === "complete") return current;
+      await delay(250);
+    }
+    throw new Error("SOURCE_TAB_RECOVERY_FAILED");
   }
 
   async #parkOnBlank(tabId: number): Promise<void> {

@@ -280,7 +280,21 @@ export async function renewExactProviderTab(
   // against the owned tab first, then confirm the redirected document again
   // below. Attaching only after waitForReady permanently missed those first
   // frames and left APSPORT with orphan deltas but no authoritative baseline.
-  await options.attachBootstrap({ ...current, url: renewalUrl }, source.lobby);
+  try {
+    await options.attachBootstrap({ ...current, url: renewalUrl }, source.lobby);
+  } catch (error) {
+    // Keep healthy bootstrap capture before navigation. A dead, already-owned
+    // AP renderer is the exception: its CDP timeout must not prevent the tab
+    // navigation that replaces it. Other failures and providers stay closed.
+    if (source.lobby !== "TSPORT" || !(error instanceof Error) || error.message !== "frame-command-timeout") {
+      throw error;
+    }
+    const stillCurrent = await options.get(source.tabId);
+    if (!options.isAttached(source) || stillCurrent.id !== source.tabId ||
+      stillCurrent.url !== current.url || !trustedProviderOrigin(source.lobby, safeUrl(stillCurrent.url ?? ""))) {
+      throw new Error("PROVIDER_SOURCE_REPLACED");
+    }
+  }
   if (options.canRenew?.(source) === false) throw new Error("SOURCE_REQUEST_BACKOFF");
   if (!options.isAttached(source)) throw new Error("PROVIDER_SOURCE_REPLACED");
   await options.update(source.tabId, renewalUrl);

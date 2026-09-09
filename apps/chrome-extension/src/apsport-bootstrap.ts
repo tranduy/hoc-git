@@ -50,7 +50,10 @@ const failurePriorities = {
   APSPORT_BOOTSTRAP_DOCUMENT_CHANGED: 5
 } as const;
 
-export type ApsportBootstrapFailure = { readonly reason: keyof typeof failurePriorities };
+export type ApsportBootstrapFailure = {
+  readonly reason: keyof typeof failurePriorities;
+  readonly diagnostic?: string;
+};
 
 /** Preserve the most relevant provider-frame failure instead of a shell-frame rejection. */
 export function apsportBootstrapFailure(current: ApsportBootstrapFailure,

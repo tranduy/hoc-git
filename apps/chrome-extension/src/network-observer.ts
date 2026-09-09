@@ -21,6 +21,8 @@ import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { TSPORT_CATALOG_SHAPE_EXPRESSION } from "./tsport-catalog-shape.js";
 import { APSPORT_BOOTSTRAP_EXPRESSION, apsportBootstrapFailure,
   type ApsportBootstrapFailure } from "./apsport-bootstrap.js";
+import { ApsportBootstrapDiagnostic } from "./apsport-bootstrap-diagnostic.js";
+import { ApsportContextProbe } from "./apsport-context-probe.js";
 import { buildTsportSelectionPriceExpression } from "./tsport-selection-price.js";
 import { buildImExactSelectionPriceExpression } from "./im-selection-price.js";
 import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
@@ -273,6 +275,7 @@ export interface NetworkObserverDependencies {
   readonly collectApsportCatalog?: (options: CollectApsportCatalogOptions) => Promise<void>;
   readonly collectApsportEventDetail?: (options: CollectApsportEventDetailOptions) => Promise<Record<string, unknown> | null>;
   readonly onApsportPageHealth?: (health: ApsportPageHealth) => void;
+  readonly readApsportTabHealth?: (tabId: number) => Promise<unknown>;
   readonly onApsportOrphanSocket?: (source: ObservedSource) => void | Promise<void>;
   readonly onSabaSocketUnavailable?: (source: ObservedSource,
     reason?: "UNSAFE_VIEW") => void | Promise<void>;
@@ -1060,6 +1063,7 @@ export class NetworkObserver {
   readonly #collectApsportCatalog: NonNullable<NetworkObserverDependencies["collectApsportCatalog"]>;
   readonly #collectApsportEventDetail: NonNullable<NetworkObserverDependencies["collectApsportEventDetail"]>;
   readonly #onApsportPageHealth: NetworkObserverDependencies["onApsportPageHealth"];
+  readonly #apsportContextProbe: ApsportContextProbe;
   readonly #onApsportOrphanSocket: NetworkObserverDependencies["onApsportOrphanSocket"];
   readonly #onSabaSocketUnavailable: NetworkObserverDependencies["onSabaSocketUnavailable"];
   readonly #onBtiPageHealth: NetworkObserverDependencies["onBtiPageHealth"];
@@ -1287,6 +1291,11 @@ export class NetworkObserver {
     this.#monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.#recoverImBaseline = dependencies.recoverImBaseline ?? null;
     this.#frameCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 2_500;
+    this.#apsportContextProbe = new ApsportContextProbe({
+      sendCommand: (tabId, method) => this.#sendCommand(tabId, method),
+      readTabHealth: dependencies.readApsportTabHealth, now: this.#now,
+      timeoutMs: this.#frameCommandTimeoutMs
+    });
     // More navigation can span rendering work; ordinary captures keep their fast timeout.
     this.#sabaProbeCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 10_000;
     this.#sabaRecoveryBudget = dependencies.sabaRecoveryBudget ?? new SabaRecoveryBudget({ now: this.#now });
@@ -4083,12 +4092,14 @@ export class NetworkObserver {
     tabGeneration: number): Promise<BoundApsportRequestTemplate | ApsportBootstrapFailure> {
     let failure: ApsportBootstrapFailure = { reason: "APSPORT_BOOTSTRAP_CONTEXT_UNAVAILABLE" };
     const contexts = [...(this.#mainWorldContexts.get(source.tabId)?.entries() ?? [])];
+    const diagnostic = new ApsportBootstrapDiagnostic(contexts.length);
     for (const [frameId, binding] of contexts) {
       const params = { expression: APSPORT_BOOTSTRAP_EXPRESSION, contextId: binding.contextId,
         returnByValue: true, awaitPromise: false };
-      const evaluation = await this.#withFrameCommandTimeout(binding.sessionId === undefined
+      const evaluation = await diagnostic.command("CONTEXT_EVALUATE", this.#withFrameCommandTimeout(binding.sessionId === undefined
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
-        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId)).catch(() => null);
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId)));
+      diagnostic.evaluation("CONTEXT_EVALUATE", evaluation);
       const value = nestedValue(evaluation, "result", "value");
       failure = apsportBootstrapFailure(failure, value);
       if (!isRecord(value) || typeof value.origin !== "string" || typeof value.language !== "string" ||
@@ -4100,9 +4111,9 @@ export class NetworkObserver {
       if (value.origin !== origin.origin || origin.protocol !== "https:" || origin.username !== "" ||
         origin.password !== "" || origin.search !== "" || origin.hash !== "" ||
         !/^(?:spbui|spbtui)\.agenate\.com$/u.test(origin.hostname)) continue;
-      const frameTree = await this.#withFrameCommandTimeout(binding.sessionId === undefined
+      const frameTree = await diagnostic.command("CONTEXT_FRAME_TREE", this.#withFrameCommandTimeout(binding.sessionId === undefined
         ? this.#sendCommand(source.tabId, "Page.getFrameTree")
-        : this.#sendCommand(source.tabId, "Page.getFrameTree", {}, binding.sessionId)).catch(() => null);
+        : this.#sendCommand(source.tabId, "Page.getFrameTree", {}, binding.sessionId)));
       const loaderId = currentFrameLoader(frameTree, frameId);
       if (loaderId === null || !this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
         this.#captureTabGeneration(source.tabId) !== tabGeneration ||
@@ -4127,21 +4138,26 @@ export class NetworkObserver {
     // tree and create a same-origin isolated world so the retained provider
     // session can rebuild its cookie-bound API template without reloading the
     // tab or waiting for a future native request.
-    const discoveredTree = await this.#withFrameCommandTimeout(
+    const discoveredTree = await diagnostic.command("FRAME_TREE", this.#withFrameCommandTimeout(
       this.#sendCommand(source.tabId, "Page.getFrameTree")
-    ).catch(() => null);
-    for (const descriptor of collectFrameDescriptors(discoveredTree)) {
-      if (descriptor.loaderId === null) continue;
-      const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+    ));
+    const frames = collectFrameDescriptors(discoveredTree);
+    diagnostic.frames = frames.length;
+    if (discoveredTree !== null && frames.length === 0) diagnostic.note("FRAME_TREE", "NO_FRAMES");
+    for (const descriptor of frames) {
+      if (descriptor.loaderId === null) { diagnostic.note("FRAME_TREE", "NO_LOADER"); continue; }
+      const world = await diagnostic.command("WORLD_CREATE", this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Page.createIsolatedWorld", {
           frameId: descriptor.id, worldName: "fieldline-apsport-catalog-refresh",
           grantUniveralAccess: false
-        })).catch(() => null);
+        })));
       const contextId = nestedNumber(world, "executionContextId");
-      if (contextId === null) continue;
-      const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+      if (contextId === null) { if (world !== null) diagnostic.note("WORLD_CREATE", "NO_RESULT"); continue; }
+      diagnostic.worlds += 1;
+      const evaluation = await diagnostic.command("WORLD_EVALUATE", this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Runtime.evaluate", { expression: APSPORT_BOOTSTRAP_EXPRESSION, contextId,
-          returnByValue: true, awaitPromise: false })).catch(() => null);
+          returnByValue: true, awaitPromise: false })));
+      diagnostic.evaluation("WORLD_EVALUATE", evaluation);
       const value = nestedValue(evaluation, "result", "value");
       failure = apsportBootstrapFailure(failure, value);
       if (!isRecord(value) || typeof value.origin !== "string" || typeof value.language !== "string" ||
@@ -4153,9 +4169,9 @@ export class NetworkObserver {
       if (value.origin !== origin.origin || origin.protocol !== "https:" || origin.username !== "" ||
         origin.password !== "" || origin.search !== "" || origin.hash !== "" ||
         !/^(?:spbui|spbtui)\.agenate\.com$/u.test(origin.hostname)) continue;
-      const currentTree = await this.#withFrameCommandTimeout(
+      const currentTree = await diagnostic.command("FRAME_RECHECK", this.#withFrameCommandTimeout(
         this.#sendCommand(source.tabId, "Page.getFrameTree")
-      ).catch(() => null);
+      ));
       if (currentFrameLoader(currentTree, descriptor.id) !== descriptor.loaderId ||
         !this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
         this.#captureTabGeneration(source.tabId) !== tabGeneration) {
@@ -4177,7 +4193,9 @@ export class NetworkObserver {
       this.#apsportRequestTemplates.set(source.sourceId, template);
       return template;
     }
-    return failure;
+    const contextProbe = diagnostic.has("FRAME_TREE", "TIMEOUT")
+      ? ` ${await this.#apsportContextProbe.read(source.tabId)}` : "";
+    return { ...failure, diagnostic: `${diagnostic.format()}${contextProbe}` };
   }
 
   #apsportTemplateIsCurrent(source: ObservedSource, template: BoundApsportRequestTemplate): boolean {
@@ -4380,7 +4398,7 @@ export class NetworkObserver {
       ? cached
       : await this.#bootstrapApsportRequestTemplate(source, sourceGeneration, tabGeneration);
     if ("reason" in template) {
-      this.#lastCaptureExit.set(source.sourceId, template.reason);
+      this.#lastCaptureExit.set(source.sourceId, `${template.reason}${template.diagnostic ? ` ${template.diagnostic}` : ""}`);
       return;
     }
     const prematchWindowHours = options.prematchWindowHours ?? 24;

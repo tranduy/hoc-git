@@ -133,6 +133,12 @@ observer = new NetworkObserver({
   }),
   sendCommand: async (tabId, method, params, sessionId) => chrome.debugger.sendCommand(
     sessionId === undefined ? { tabId } : { tabId, sessionId }, method, params),
+  readApsportTabHealth: async (tabId) => {
+    const tab = await chrome.tabs.get(tabId);
+    return { status: tab.status, discarded: tab.discarded,
+      frozen: "frozen" in tab && typeof tab.frozen === "boolean" ? tab.frozen : undefined,
+      pendingNavigation: typeof tab.pendingUrl === "string" && tab.pendingUrl.length > 0 };
+  },
   loadSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.load(sourceId),
   saveSabaWsSnapshots: (snapshots) => sabaSnapshotStorage.save(snapshots),
   clearSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.clear(sourceId),

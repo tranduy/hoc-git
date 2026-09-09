@@ -101,6 +101,43 @@ describe("eligibleApsportFootballEvent", () => {
 });
 
 describe("collectApsportCatalog", () => {
+  // Native event/offer from .run/apsport-live-evidence-frames.json, captured
+  // 2026-08-27. Keep the provider's offer ID intact beneath the catalog namespace.
+  const nativeTotal = { "2": 5682368, "6": true, "10": "Active", "50": [{
+    "2": 5682368, "3": 3, "6": false, "10": "Active", "9": [{
+      "0": "56823680030000005h", "2": "56823680030000005a",
+      "6": "1985150448351005", "7": "0.5",
+      "8": { "0": "2.6159375", "2": "-0.62" },
+      "9": { "0": "1.35553125", "2": "0.36" }
+    }]
+  }] };
+  const normalizedTotalIdentity = { providerEventId: "5682368",
+    providerMarketId: "tsport:3:1985150448351005", providerSelectionId: "56823680030000005a",
+    marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "UNDER", line: "0.5" };
+
+  it("resolves a normalized AP market ID using both its native group and intact offer ID", () => {
+    expect(apsportSelectionPriceFromEvent(nativeTotal, normalizedTotalIdentity))
+      .toEqual({ status: "FOUND", rawOdds: "0.36" });
+    expect(nativeTotal["50"][0]!["9"][0]!["6"]).toBe("1985150448351005");
+  });
+
+  it.each([
+    { providerMarketId: "tsport:4:1985150448351005" },
+    { providerMarketId: "tsport:3:1985150448351006" },
+    { providerMarketId: "unrelated:3:1985150448351005" },
+    { providerMarketId: "tsport:3:extra:1985150448351005" },
+    { providerEventId: "5682369" },
+    { providerSelectionId: "56823680030000005h" },
+    { marketType: "FH_TOTAL" },
+    { scope: "FIRST_HALF" },
+    { selection: "OVER" },
+    { line: "0.75" },
+    { line: null }
+  ])("refuses a normalized AP price when an exact ticket anchor differs: %j", changed => {
+    expect(apsportSelectionPriceFromEvent(nativeTotal, { ...normalizedTotalIdentity, ...changed }))
+      .toEqual({ status: "NOT_FOUND" });
+  });
+
   it("resolves an exact hidden APSPORT selection directly from event detail", () => {
     const detailed = { ...event("hidden-live", { live: true }), "50": [{ "3": 80, "10": "Active", "9": [{
       "0": "hidden-over", "2": "hidden-under", "6": "hidden-market", "7": "1.5",

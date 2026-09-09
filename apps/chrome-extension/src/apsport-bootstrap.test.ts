@@ -3,10 +3,11 @@ import { NetworkObserver } from "./network-observer.js";
 import { apsportBootstrapFailure } from "./apsport-bootstrap.js";
 
 async function bootstrapPage(input: { url: string; language?: string; resource?: string;
-  hints?: readonly string[] }) {
+  hints?: readonly string[]; rejectedCommand?: { method: string; message: string } }) {
   const collect = vi.fn(async () => undefined);
   const forwarded: unknown[] = [];
   const sendCommand = vi.fn(async (_tab: number, method: string, params?: Record<string, unknown>) => {
+    if (method === input.rejectedCommand?.method) throw Error(input.rejectedCommand.message);
     if (method === "Page.getFrameTree") return { frameTree: { frame: {
       id: "ap-frame", loaderId: "ap-loader", url: input.url
     } } };
@@ -87,5 +88,33 @@ describe("APSPORT page bootstrap evidence", () => {
     expect(apsportBootstrapFailure({ reason: "APSPORT_BOOTSTRAP_CONTEXT_UNAVAILABLE" },
       { reason: "secret-page-text" }))
       .toEqual({ reason: "APSPORT_BOOTSTRAP_CONTEXT_UNAVAILABLE" });
+  });
+
+  it.each([
+    { method: "Page.getFrameTree", message: "Debugger is not attached to the tab with id: 7",
+      expected: "FRAME_TREE:DETACHED", counts: "contexts=0 frames=0 worlds=0" },
+    { method: "Page.createIsolatedWorld", message: "No frame for given id found",
+      expected: "WORLD_CREATE:FRAME_GONE", counts: "contexts=0 frames=1 worlds=0" },
+    { method: "Runtime.evaluate", message: "frame-command-timeout",
+      expected: "WORLD_EVALUATE:TIMEOUT", counts: "contexts=0 frames=1 worlds=1" }
+  ])("publishes the failing Chrome command stage $expected", async ({ method, message, expected, counts }) => {
+    const { forwarded } = await bootstrapPage({ url: "https://pacific.agenate.com/?lng=vi",
+      rejectedCommand: { method, message } });
+    const diagnostic = forwarded.find((value) => typeof value === "object" && value !== null &&
+      "kind" in value && value.kind === "WS_ATTACH") as { catalogShape: string };
+    expect(diagnostic.catalogShape).toContain(expected);
+    expect(diagnostic.catalogShape).toContain(counts);
+    expect(diagnostic.catalogShape).not.toContain(message);
+  });
+
+  it("runs the safe browser and renderer probes only after frame-tree timeout", async () => {
+    const timedOut = await bootstrapPage({ url: "https://pacific.agenate.com/?lng=vi",
+      rejectedCommand: { method: "Page.getFrameTree", message: "frame-command-timeout" } });
+    expect(timedOut.sendCommand).toHaveBeenCalledWith(7, "Target.getTargetInfo");
+    expect(timedOut.sendCommand).toHaveBeenCalledWith(7, "Runtime.getIsolateId");
+    expect(JSON.stringify(timedOut.forwarded)).toContain("probe[target=NO_RESULT");
+    const detached = await bootstrapPage({ url: "https://pacific.agenate.com/?lng=vi",
+      rejectedCommand: { method: "Page.getFrameTree", message: "Debugger is not attached" } });
+    expect(detached.sendCommand.mock.calls.some((call) => call[1] === "Target.getTargetInfo")).toBe(false);
   });
 });
