@@ -221,23 +221,44 @@ Promise<TicketRealtimeCheckLegResult> {
   }
 }
 
+function appendAudit(journal: TicketRealtimeAuditJournal | undefined,
+  entry: TicketRealtimeAuditJournalEntry): Promise<boolean> {
+  if (journal === undefined) return Promise.resolve(false);
+  try { return journal.append(entry).then(() => true, () => false); }
+  catch { return Promise.resolve(false); }
+}
+
+async function boundedAuditAcknowledgement(pending: Promise<boolean>): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([pending, new Promise<boolean>(resolve => {
+      timeout = setTimeout(() => resolve(false), 100);
+    })]);
+  } finally { if (timeout !== undefined) clearTimeout(timeout); }
+}
+
 async function checkTicket(preflight: ProviderPreflightLike, input: TicketRealtimeCheckRequest,
   options: ProviderPreflightRouteOptions): Promise<TicketRealtimeCheckResponse> {
   const clock = options.clock ?? { nowMs: Date.now };
   const checkId = options.idFactory?.() ?? randomUUID();
   const timeoutMs = Number.isFinite(options.requestTimeoutMs) && (options.requestTimeoutMs ?? 0) > 0
     ? Math.floor(options.requestTimeoutMs as number) : 10_000;
-  let persisted = options.journal !== undefined;
-  try {
-    await options.journal?.append({ type: "DISPLAY_CAPTURED", checkId, atMs: clock.nowMs(), request: input });
-  } catch { persisted = false; }
+  // Enqueue the original display before reading providers, without putting
+  // filesystem latency ahead of their freshness-sensitive reads and deadlines.
+  const capturedWrite = appendAudit(options.journal,
+    { type: "DISPLAY_CAPTURED", checkId, atMs: clock.nowMs(), request: input });
   const checked = await Promise.all(input.legs.map((leg) =>
     checkLeg(preflight, leg, clock, timeoutMs, options.visiblePriceProbe, input.capturedAtMs, input)));
   const legs = checked as [TicketRealtimeCheckLegResult, TicketRealtimeCheckLegResult];
   const completedAtMs = clock.nowMs();
-  try {
-    await options.journal?.append({ type: "CHECK_COMPLETED", checkId, atMs: completedAtMs, legs });
-  } catch { persisted = false; }
+  // Preserve per-check write order even for journals that do not serialize
+  // append calls. A slow or failed write never claims confirmed persistence.
+  const completedWrite = capturedWrite.then(async captured => {
+    const completed = await appendAudit(options.journal,
+      { type: "CHECK_COMPLETED", checkId, atMs: completedAtMs, legs });
+    return captured && completed;
+  });
+  const persisted = await boundedAuditAcknowledgement(completedWrite);
   return TicketRealtimeCheckResponseSchema.parse({ checkId, eventLabel: input.eventLabel,
     participantA: input.participantA, participantB: input.participantB,
     marketType: input.marketType, scope: input.scope, capturedAtMs: input.capturedAtMs,

@@ -307,7 +307,7 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
             {checked.verificationStatus ?? checked.status}</b>}
         </article>;
       })}
-      {audit.response !== null && <small>{audit.response.persisted ? "Đã ghi JSONL" : "Không ghi được JSONL"} · {audit.response.checkId}</small>}
+      {audit.response !== null && <small>{audit.response.persisted ? "Đã lưu kết quả" : "Chưa xác nhận lưu kết quả"} · {audit.response.checkId}</small>}
       {audit.error !== null && <small className="ticket-realtime-audit__error">{audit.error}</small>}
     </section>}
   </td></tr>}</>;

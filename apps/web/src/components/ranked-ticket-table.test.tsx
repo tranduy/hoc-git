@@ -526,7 +526,7 @@ describe("RankedTicketTable", () => {
     const sabaComparison = within(audit).getByLabelText("So sánh giá SABA");
     expect(within(within(sabaComparison).getByLabelText("Giá tool SABA")).getByText("2.2 DECIMAL")).toBeTruthy();
     expect(within(within(sabaComparison).getByLabelText("Giá sàn SABA")).getByText("2.2 DECIMAL")).toBeTruthy();
-    expect(within(audit).getByText(/Đã ghi JSONL/u)).toBeTruthy();
+    expect(within(audit).getByText(/Đã lưu kết quả/u)).toBeTruthy();
   });
 
   it("submits an operator reason with the complete ticket snapshot and shows it in report history", async () => {
