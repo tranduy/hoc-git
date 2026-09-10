@@ -14,6 +14,10 @@ export interface CatalogRevisionBaseline {
 }
 
 type Listener = (entry: StoredCatalogRevision) => void;
+interface PublicationOptions {
+  readonly snapshotState: "FRESH" | "STALE";
+  readonly freshnessMs: number;
+}
 
 function publicEntry(entry: StoredCatalogRevision): CatalogRevisionEntry {
   return { accountId: entry.accountId, revision: entry.revision,
@@ -25,6 +29,9 @@ export class CatalogRevisionStore {
   readonly #entries = new Map<string, StoredCatalogRevision>();
   readonly #listeners = new Set<Listener>();
   readonly #hasher = new CatalogRevisionHasher();
+  readonly #pending = new Map<string, { readonly catalog: ObservedProviderCatalog;
+    readonly freshUntilMs: number }>();
+  #publicationTimer: ReturnType<typeof setTimeout> | undefined;
   #sequence = 0;
   #expiryTimer: ReturnType<typeof setTimeout> | undefined;
   #closed = false;
@@ -33,25 +40,70 @@ export class CatalogRevisionStore {
     this.#now = options.now ?? Date.now;
   }
 
-  publish(accountId: string, catalog: ObservedProviderCatalog, options: {
-    readonly snapshotState: "FRESH" | "STALE";
-    readonly freshnessMs: number;
-  }): StoredCatalogRevision {
+  /** Feed bursts still enter the authoritative data plane individually. Only
+   * their derived UI revision hashes coalesce over 20 ms. Reads flush the
+   * latest snapshot; invalidation is immediate and freshness never extends. */
+  publishCoalesced(accountId: string, catalog: ObservedProviderCatalog, options: PublicationOptions): void {
     if (this.#closed) throw new Error("CATALOG_REVISION_STORE_CLOSED");
     if (accountId.trim().length === 0 || !Number.isFinite(options.freshnessMs) || options.freshnessMs <= 0) {
       throw new Error("CATALOG_REVISION_PUBLICATION_INVALID");
     }
+    if (options.snapshotState === "STALE") {
+      // Invalidation may carry the last published snapshot while a newer one
+      // is still queued. Mark the latest retained data stale and retire that
+      // queued freshness, so its timer cannot resurrect the invalidated feed.
+      let latest = catalog;
+      for (const retained of [this.#entries.get(accountId)?.catalog, this.#pending.get(accountId)?.catalog]) {
+        if (retained !== undefined && retained.observedAtMs >= latest.observedAtMs) latest = retained;
+      }
+      this.#pending.delete(accountId);
+      this.publish(accountId, latest, options);
+      return;
+    }
+    if (!this.#entries.has(accountId)) {
+      this.publish(accountId, catalog, options);
+      return;
+    }
+    const latest = this.#pending.get(accountId)?.catalog ?? this.#entries.get(accountId)!.catalog;
+    if (catalog.observedAtMs < latest.observedAtMs) return;
+    this.#pending.set(accountId, { catalog, freshUntilMs: this.#now() + options.freshnessMs });
+    if (this.#publicationTimer === undefined) {
+      this.#publicationTimer = setTimeout(() => {
+        this.#publicationTimer = undefined;
+        this.#flushPending();
+      }, 20);
+      this.#publicationTimer.unref?.();
+    }
+  }
+
+  publish(accountId: string, catalog: ObservedProviderCatalog, options: PublicationOptions): StoredCatalogRevision {
+    return this.#publishBefore(accountId, catalog, options, this.#now() + options.freshnessMs);
+  }
+
+  #publishBefore(accountId: string, catalog: ObservedProviderCatalog, options: PublicationOptions,
+    freshUntilMs: number): StoredCatalogRevision {
+    if (this.#closed) throw new Error("CATALOG_REVISION_STORE_CLOSED");
+    if (accountId.trim().length === 0 || !Number.isFinite(options.freshnessMs) || options.freshnessMs <= 0) {
+      throw new Error("CATALOG_REVISION_PUBLICATION_INVALID");
+    }
+    const pending = this.#pending.get(accountId);
+    if (pending !== undefined && catalog.observedAtMs >= pending.catalog.observedAtMs) this.#pending.delete(accountId);
     const current = this.#entries.get(accountId);
     if (current !== undefined && catalog.observedAtMs < current.observedAtMs) return current;
-    const revision = this.#hasher.revisionFor(catalog, options.snapshotState);
+    let snapshotState = options.snapshotState;
+    let revision = this.#hasher.revisionFor(catalog, snapshotState);
+    if (snapshotState === "FRESH" && freshUntilMs <= this.#now()) {
+      snapshotState = "STALE";
+      revision = this.#hasher.revisionFor(catalog, snapshotState);
+    }
     if (current?.revision === revision && catalog.observedAtMs === current.observedAtMs) return current;
     if (current?.revision === revision) {
       const renewed: StoredCatalogRevision = {
         ...current,
         catalog,
         observedAtMs: catalog.observedAtMs,
-        snapshotState: options.snapshotState,
-        freshUntilMs: options.snapshotState === "FRESH" ? this.#now() + options.freshnessMs : null
+        snapshotState,
+        freshUntilMs: snapshotState === "FRESH" ? freshUntilMs : null
       };
       this.#entries.set(accountId, renewed);
       this.#scheduleExpiry();
@@ -59,8 +111,8 @@ export class CatalogRevisionStore {
     }
     const entry: StoredCatalogRevision = {
       accountId, catalog, revision, observedAtMs: catalog.observedAtMs,
-      snapshotState: options.snapshotState, sequence: ++this.#sequence,
-      freshUntilMs: options.snapshotState === "FRESH" ? this.#now() + options.freshnessMs : null
+      snapshotState, sequence: ++this.#sequence,
+      freshUntilMs: snapshotState === "FRESH" ? freshUntilMs : null
     };
     this.#entries.set(accountId, entry);
     for (const listener of this.#listeners) listener(entry);
@@ -87,6 +139,7 @@ export class CatalogRevisionStore {
 
   expire(): void {
     if (this.#closed) return;
+    this.#flushPending();
     const now = this.#now();
     const expired = [...this.#entries.values()].filter((entry) =>
       entry.snapshotState === "FRESH" && entry.freshUntilMs !== null && entry.freshUntilMs <= now);
@@ -106,7 +159,21 @@ export class CatalogRevisionStore {
     this.#closed = true;
     if (this.#expiryTimer !== undefined) clearTimeout(this.#expiryTimer);
     this.#expiryTimer = undefined;
+    if (this.#publicationTimer !== undefined) clearTimeout(this.#publicationTimer);
+    this.#publicationTimer = undefined;
+    this.#pending.clear();
     this.#listeners.clear();
+  }
+
+  #flushPending(): void {
+    if (this.#publicationTimer !== undefined) clearTimeout(this.#publicationTimer);
+    this.#publicationTimer = undefined;
+    for (const [accountId, pending] of this.#pending) {
+      this.#pending.delete(accountId);
+      const remainingMs = pending.freshUntilMs - this.#now();
+      this.#publishBefore(accountId, pending.catalog, { snapshotState: remainingMs > 0 ? "FRESH" : "STALE",
+        freshnessMs: Math.max(1, remainingMs) }, pending.freshUntilMs);
+    }
   }
 
   #scheduleExpiry(): void {

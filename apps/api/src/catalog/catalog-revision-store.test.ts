@@ -30,6 +30,75 @@ function pricedCatalog(observedAtMs: number, receivedMonotonicMs: number,
 }
 
 describe("CatalogRevisionStore", () => {
+  it("coalesces a burst per account and exposes the latest catalog immediately to reads", () => {
+    vi.useFakeTimers();
+    try {
+      const store = new CatalogRevisionStore(); stores.push(store);
+      const publish = vi.fn(); store.subscribe(publish);
+      const first = pricedCatalog(100, 10, 1);
+      store.publishCoalesced(first.accountId, first, { snapshotState: "FRESH", freshnessMs: 1000 });
+      publish.mockClear();
+      let latest = first;
+      for (let index = 1; index <= 100; index++) {
+        latest = { ...pricedCatalog(100 + index, 10 + index, 1 + index),
+          quotes: [{ ...first.quotes[0]!, rawOdds: String(index / 100) }] };
+        store.publishCoalesced(first.accountId, latest, { snapshotState: "FRESH", freshnessMs: 1000 });
+      }
+      expect(publish).not.toHaveBeenCalled();
+      expect(store.get(first.accountId)!.catalog).toBe(latest);
+      expect(publish).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(20);
+      expect(publish).toHaveBeenCalledTimes(1);
+    } finally { stores.splice(0).forEach(store => store.close()); vi.useRealTimers(); }
+  });
+
+  it("cancels buffered freshness immediately on invalidation and on close", () => {
+    vi.useFakeTimers();
+    try {
+      const store = new CatalogRevisionStore(); stores.push(store);
+      const first = pricedCatalog(100, 10, 1), latest = pricedCatalog(200, 20, 2);
+      store.publishCoalesced(first.accountId, first, { snapshotState: "FRESH", freshnessMs: 1000 });
+      store.publishCoalesced(first.accountId, latest, { snapshotState: "FRESH", freshnessMs: 1000 });
+      store.publishCoalesced(first.accountId, first, { snapshotState: "STALE", freshnessMs: 1000 });
+      vi.advanceTimersByTime(20);
+      expect(store.get(first.accountId)!.snapshotState).toBe("STALE");
+      expect(store.get(first.accountId)!.catalog).toBe(latest);
+      const publish = vi.fn(); store.subscribe(publish);
+      store.publishCoalesced(first.accountId, pricedCatalog(300, 30, 3), { snapshotState: "FRESH", freshnessMs: 1000 });
+      store.close(); vi.advanceTimersByTime(20);
+      expect(publish).not.toHaveBeenCalled();
+    } finally { stores.splice(0).forEach(store => store.close()); vi.useRealTimers(); }
+  });
+
+  it("does not extend the freshness deadline while a publication waits in the queue", () => {
+    vi.useFakeTimers();
+    try {
+      let now = 1000;
+      const store = new CatalogRevisionStore({ now: () => now }); stores.push(store);
+      const first = pricedCatalog(100, 10, 1);
+      store.publishCoalesced(first.accountId, first, { snapshotState: "FRESH", freshnessMs: 100 });
+      store.publishCoalesced(first.accountId, pricedCatalog(200, 20, 2), { snapshotState: "FRESH", freshnessMs: 100 });
+      now = 1200; vi.advanceTimersByTime(20);
+      expect(store.get(first.accountId)!.snapshotState).toBe("STALE");
+    } finally { stores.splice(0).forEach(store => store.close()); vi.useRealTimers(); }
+  });
+
+  it("publishes stale when hashing itself crosses the queued freshness deadline", () => {
+    vi.useFakeTimers();
+    try {
+      let now = 1000;
+      const store = new CatalogRevisionStore({ now: () => now }); stores.push(store);
+      const first = pricedCatalog(100, 10, 1);
+      store.publishCoalesced(first.accountId, first, { snapshotState: "FRESH", freshnessMs: 100 });
+      const latest = { ...pricedCatalog(200, 20, 2), quotes: [{ ...first.quotes[0]!,
+        get rawOdds() { now = 1200; return "0.70"; } }] };
+      store.publishCoalesced(first.accountId, latest, { snapshotState: "FRESH", freshnessMs: 100 });
+      vi.advanceTimersByTime(20);
+      expect(store.get(first.accountId)!.snapshotState).toBe("STALE");
+      expect(store.get(first.accountId)!.freshUntilMs).toBeNull();
+    } finally { stores.splice(0).forEach(store => store.close()); vi.useRealTimers(); }
+  });
+
   it("hashes large catalogs in bounded groups with deterministic v2 revision bytes", () => {
     const referenceRevision = (value: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => {
       const { observedAtMs: _time, quotes, ...semantic } = value;

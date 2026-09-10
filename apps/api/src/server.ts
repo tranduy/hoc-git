@@ -513,7 +513,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       const freshnessMs = providerFeedPolicies.get(catalog.accountId)?.catalogFreshnessMs ?? 20_000;
-      catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs });
+      catalogRevisions.publishCoalesced(catalog.accountId, catalog, { snapshotState, freshnessMs });
       catalogPersister.schedule(`catalog-source|${catalog.provider}|${catalog.category}`, catalog);
     }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }),
     authorityCoordinator: chromeBridgeRegistry.authorityCoordinator, telemetry: pipelineTelemetry,
