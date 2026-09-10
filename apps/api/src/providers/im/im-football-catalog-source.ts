@@ -109,7 +109,10 @@ function imMarketSemantics(bti: number, gp: number): ImFootballMarketSemantics |
     return result === null ? null : { ...result, retainedOnlyOutcomes: new Set([37, 38, 439]) };
   }
   if (bti === 7) return categorical(periodMarket(gp, "FT_GOAL_RANGE", "FH_GOAL_RANGE", "SH_GOAL_RANGE"),
-    new Map([[39, "RANGE_0_1"], [40, "RANGE_2_3"], [41, "RANGE_4_6"], [42, "RANGE_7_PLUS"]]));
+    // IM's TG01/TG23/TG46/TG7UP renderer uses grouped goals only for
+    // full time. The same IDs in either half mean exactly 0, 1, 2, or 3+.
+    gp === 1 ? new Map([[39, "RANGE_0_1"], [40, "RANGE_2_3"], [41, "RANGE_4_6"], [42, "RANGE_7_PLUS"]])
+      : new Map([[39, "RANGE_0_0"], [40, "RANGE_1_1"], [41, "RANGE_2_2"], [42, "RANGE_3_PLUS"]]));
   if (bti === 9) return categorical(gp === 1 ? "FT_HALF_FULL_RESULT" : null,
     new Map([[46, "HOME_HOME"], [47, "HOME_DRAW"], [48, "HOME_AWAY"], [49, "DRAW_HOME"],
       [50, "DRAW_DRAW"], [51, "DRAW_AWAY"], [52, "AWAY_HOME"], [53, "AWAY_DRAW"], [54, "AWAY_AWAY"]]));

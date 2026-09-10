@@ -452,7 +452,32 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => [source] }}
       catalogApi={{ read: async () => ({ ...catalog, accountId: source.id, markets }) }} />);
 
-    expect(await screen.findByText("1 trận · 3 kèo")).toBeTruthy();
+    expect(await screen.findByText("1 matches · 3 markets")).toBeTruthy();
+  });
+
+  it("keeps BTI roster counts and exact English numbers when detail hydration fails", async () => {
+    const sourceList: CatalogSourceStatus[] = (["CMD", "BTI"] as const).map(provider => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", acquiredAtMs: Date.now(), reason: null
+    }));
+    const roster = (id: string): LiveCatalogResponse => {
+      const provider = sourceList.find(source => source.id === id)!.provider;
+      return { ...catalog, accountId: id, provider, observedAtMs: Date.now(),
+        events: [{ ...event, provider }], markets: [], quotes: [],
+        nativeCoverageByEvent: [{ providerEventId: event.providerEventId, normalized: 93726, excluded: 0, unmapped: 0 }] };
+    };
+    const fullRead = vi.fn(async (id: string) => ({ catalog: roster(id), revision: "full" }));
+    window.localStorage.setItem("tool-chenh.live-catalog-cache.v2", JSON.stringify(sourceList.map(source => ({
+      ...roster(source.id), observedAtMs: 100, events: [], nativeCoverageByEvent: []
+    }))));
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sourceList }} catalogApi={{
+        read: async id => roster(id), readRevision: fullRead,
+        readRosterRevision: async id => ({ catalog: roster(id), revision: "roster" }),
+        readEventsRevision: async () => { throw new Error("CATALOG_TIMEOUT"); }
+      }} />);
+    await waitFor(() => expect(screen.getAllByText("1 matches · 93,726 markets")).toHaveLength(2));
+    expect(fullRead).not.toHaveBeenCalled();
   });
 
   it("shows six evenly grouped provider reload controls and animates the active provider being reloaded", async () => {
@@ -1030,8 +1055,8 @@ describe("LiveCatalogPage", () => {
     const sabaSelector = screen.getByRole("checkbox", { name: /SABA main/u }).closest("label")!;
     const sbobetSelector = screen.getByRole("checkbox", { name: /SBOBET main/u }).closest("label")!;
     expect(within(sabaSelector).getByText("1 normalized · 0 excluded · 1 unmapped")).toBeTruthy();
-    expect(within(sabaSelector).getByText("1 trận · 1 kèo")).toBeTruthy();
-    expect(within(sbobetSelector).getByText("1 trận · 1 kèo")).toBeTruthy();
+    expect(within(sabaSelector).getByText("1 matches · 1 markets")).toBeTruthy();
+    expect(within(sbobetSelector).getByText("1 matches · 1 markets")).toBeTruthy();
     expect((await screen.findAllByText("#SABA")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("#SBOBET").length).toBeGreaterThan(0);
     expect(screen.getByText(/Starts in/u)).toBeTruthy();

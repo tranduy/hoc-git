@@ -36,6 +36,17 @@ function catalog(provider: "SABA" | "BTI", eventIds: readonly string[]): LiveCat
 }
 
 describe("pairable event plan", () => {
+  it("publishes roster counts even when matching market hydration fails", async () => {
+    const saba = catalog("SABA", ["saba-shared"]);
+    const bti = catalog("BTI", ["bti-shared", "bti-only"]);
+    const received: LiveCatalogResponse[] = [];
+    const result = await hydratePairableCatalogs({ accountIds: [bti.accountId], existingCatalogs: [saba],
+      readRoster: async () => ({ catalog: bti, revision: "roster" }),
+      readEvents: async () => { throw new Error("CATALOG_TIMEOUT"); },
+      onRoster: value => received.push(value) });
+    expect(received).toEqual([bti]);
+    expect(result[0]?.status).toBe("rejected");
+  });
   it("keeps every provider event in a cross-book fixture and excludes isolated fixtures", () => {
     const saba = catalog("SABA", ["saba-shared", "saba-only"]);
     const bti = catalog("BTI", ["bti-shared", "bti-only"]);

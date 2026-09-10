@@ -43,8 +43,9 @@ describe("extractImFootballCatalog", () => {
       const normalized = normalizeSbobetCatalog(records, { provider: "IM", observedAtMs: 100,
         receivedMonotonicMs: 0, sequence: 0 });
       expect(normalized.markets[0]?.marketType).toBe(marketType);
-      expect(normalized.quotes.map((quote) => quote.selection)).toEqual([
-        "RANGE_7_PLUS", "RANGE_0_1", "RANGE_4_6", "RANGE_2_3"]);
+      expect(normalized.quotes.map((quote) => quote.selection)).toEqual(gp === 1
+        ? ["RANGE_7_PLUS", "RANGE_0_1", "RANGE_4_6", "RANGE_2_3"]
+        : ["RANGE_3_PLUS", "RANGE_0_0", "RANGE_2_2", "RANGE_1_1"]);
       expect(normalized.quotes[0]).toMatchObject({ providerSelectionId: "7042", rawOdds: "2.2",
         rawFormat: "DECIMAL", status: "OPEN", receivedMonotonicMs: 0, sequence: 0 });
       expect(observeNativeImFootballMarkets(source, 100)[0]?.disposition).toBe("NORMALIZED");

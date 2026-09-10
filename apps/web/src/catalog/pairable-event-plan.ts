@@ -52,8 +52,13 @@ export async function hydratePairableCatalogs(options: {
   readonly existingCatalogs: readonly LiveCatalogResponse[];
   readonly readRoster: (accountId: string) => Promise<CatalogReadResult>;
   readonly readEvents: (accountId: string, providerEventIds: readonly string[]) => Promise<CatalogReadResult>;
+  readonly onRoster?: (catalog: LiveCatalogResponse) => void;
 }): Promise<readonly PromiseSettledResult<CatalogReadResult>[]> {
-  const rosterResults = await Promise.allSettled(options.accountIds.map(options.readRoster));
+  const rosterResults = await Promise.allSettled(options.accountIds.map(async (accountId) => {
+    const result = await options.readRoster(accountId);
+    options.onRoster?.(result.catalog);
+    return result;
+  }));
   const rosters = rosterResults.flatMap((result) => result.status === "fulfilled" ? [result.value.catalog] : []);
   const requested = new Set(options.accountIds);
   const plan = pairableEventIds([...rosters, ...options.existingCatalogs.filter((catalog) =>

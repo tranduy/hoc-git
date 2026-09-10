@@ -24,6 +24,8 @@ export class CatalogRevisionCoordinator {
   #selected = new Set<string>();
   #desired = new Map<string, CatalogRevisionEntry>();
   readonly #held = new Map<string, string>();
+  readonly #heldSource = new Map<string, string>();
+  readonly #forced = new Set<string>();
   readonly #externallyHeldTarget = new Map<string, CatalogRevisionEntry | undefined>();
   readonly #lastObservedAtMs = new Map<string, number>();
   readonly #pending = new Map<string, number>();
@@ -64,11 +66,22 @@ export class CatalogRevisionCoordinator {
     }
   }
 
-  setHeldRevision(accountId: string, revision: string): void {
+  setHeldRevision(accountId: string, revision: string, sourceRevision = revision): void {
     if (this.#held.get(accountId) !== revision) {
       this.#externallyHeldTarget.set(accountId, this.#desired.get(accountId));
     }
     this.#held.set(accountId, revision);
+    this.#heldSource.set(accountId, sourceRevision);
+  }
+
+  /** A peer's roster changed, so a selected view can change without new odds. */
+  refreshViews(exceptAccountId?: string): void {
+    if (this.#stopped) return;
+    for (const accountId of this.#selected) {
+      if (accountId === exceptAccountId) continue;
+      this.#forced.add(accountId);
+      this.#schedule(accountId, this.#coalesceMs);
+    }
   }
 
   acceptBaseline(entries: readonly CatalogRevisionEntry[], sequence: number): void {
@@ -105,11 +118,12 @@ export class CatalogRevisionCoordinator {
     this.#pendingDueAtMs.clear();
     this.#lastPublishedAtMs.clear();
     this.#retryAt.clear();
+    this.#forced.clear();
   }
 
   #scheduleIfChanged(accountId: string): void {
     const desired = this.#desired.get(accountId);
-    if (desired !== undefined && desired.revision !== this.#held.get(accountId)) {
+    if (this.#forced.has(accountId) || desired !== undefined && desired.revision !== this.#heldSource.get(accountId)) {
       this.#schedule(accountId, this.#coalesceMs);
     }
   }
@@ -139,9 +153,11 @@ export class CatalogRevisionCoordinator {
     const publishAtMs = (this.#lastPublishedAtMs.get(accountId) ?? 0) + this.#minimumPublishIntervalMs;
     if (publishAtMs > Date.now()) return;
     const desiredBeforeRead = this.#desired.get(accountId);
-    if (!fallback && desiredBeforeRead !== undefined &&
-      desiredBeforeRead.revision === this.#held.get(accountId)) return;
+    if (!fallback && !this.#forced.has(accountId) && desiredBeforeRead !== undefined &&
+      desiredBeforeRead.revision === this.#heldSource.get(accountId)) return;
     this.#inFlight.add(accountId);
+    const forced = this.#forced.has(accountId);
+    this.#forced.delete(accountId);
     const target = desiredBeforeRead;
     const heldBeforeRead = this.#held.get(accountId);
     const baselineGeneration = this.#baselineGeneration;
@@ -153,9 +169,10 @@ export class CatalogRevisionCoordinator {
       if (result.catalog.accountId !== accountId) throw new Error("Catalog response account mismatch");
       const latestTarget = this.#desired.get(accountId);
       const held = this.#held.get(accountId);
+      const sourceRevision = result.sourceRevision ?? result.revision;
       const followsExternalHeldUpdate = latestTarget !== undefined &&
         latestTarget !== this.#externallyHeldTarget.get(accountId) &&
-        result.revision === latestTarget.revision;
+        sourceRevision === latestTarget.revision;
       // Large reads can finish between revisions. Publish their progress unless
       // a concurrent initial/cache read already advanced the catalog we hold.
       const repeatsTargetBeforeExternalUpdate = latestTarget !== undefined &&
@@ -169,6 +186,7 @@ export class CatalogRevisionCoordinator {
         result.catalog.snapshotState !== "STALE" && observedAtMs <= latestTarget.observedAtMs;
       if (!heldAdvanced && !olderObservation && !overtakenByStale && result.revision !== held) {
         this.#held.set(accountId, result.revision);
+        this.#heldSource.set(accountId, sourceRevision);
         this.#lastObservedAtMs.set(accountId, observedAtMs);
         this.#lastPublishedAtMs.set(accountId, Date.now());
         this.#onCatalog(result);
@@ -178,12 +196,13 @@ export class CatalogRevisionCoordinator {
       if (this.#stopped || !this.#selected.has(accountId) ||
         baselineGeneration !== this.#baselineGeneration) return;
       failed = true;
+      if (forced) this.#forced.add(accountId);
       const retryDelayMs = Math.max(0, this.#retryDelayMs(error));
       this.#retryAt.set(accountId, Date.now() + retryDelayMs);
       this.#onError(accountId, error);
     } finally {
       this.#inFlight.delete(accountId);
-      if (!fallback || baselineGeneration !== this.#baselineGeneration) {
+      if (!fallback || this.#forced.has(accountId) || baselineGeneration !== this.#baselineGeneration) {
         if (failed) this.#schedule(accountId, 0);
         else this.#scheduleIfChanged(accountId);
       }

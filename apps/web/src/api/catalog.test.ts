@@ -97,6 +97,8 @@ describe("CatalogApi", () => {
       "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-a%2Cevent-b"
     ]);
     expect(roster.revision).toBe("catalog-100|roster");
+    expect(roster.sourceRevision).toBe("catalog-100");
+    expect(selected.sourceRevision).toBe("catalog-100");
     expect(selected.revision).toBe("catalog-100|events:event-a,event-b");
   });
   it("loads large event selections in a bounded request without losing any IDs", async () => {

@@ -49,6 +49,8 @@ export interface CatalogApiLike {
 export interface CatalogReadResult {
   readonly catalog: LiveCatalogResponse;
   readonly revision: string;
+  /** Server revision before the local roster/event-view suffix. */
+  readonly sourceRevision?: string;
 }
 
 export type CatalogReadErrorCode = "CATALOG_TIMEOUT" | "CATALOG_UNAVAILABLE" | "CATALOG_SCHEMA_ERROR";
@@ -189,7 +191,7 @@ export class CatalogApi implements CatalogApiLike {
   readonly #bodyTimeoutMs: number;
   readonly #nativeDetail: "full" | "summary" | "counts";
   readonly #cache = new Map<string, { readonly viewKey: string; readonly etag: string; readonly revision: string;
-    readonly catalog: LiveCatalogResponse }>();
+    readonly catalog: LiveCatalogResponse; readonly sourceRevision?: string }>();
   readonly #inFlight = new Map<string, Promise<CatalogReadResult>>();
 
   constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 10_000,
@@ -263,7 +265,8 @@ export class CatalogApi implements CatalogApiLike {
       }
       if (response.status === 304) {
         if (cached === undefined) throw new Error("Invalid live catalog response");
-        return { catalog: cached.catalog, revision: cached.revision };
+        return { catalog: cached.catalog, revision: cached.revision,
+          ...(cached.sourceRevision === undefined ? {} : { sourceRevision: cached.sourceRevision }) };
       }
       if (!response.ok) {
         let errorBody: unknown = null;
@@ -285,10 +288,12 @@ export class CatalogApi implements CatalogApiLike {
       const revision = viewKey.length === 0 ? sourceRevision : `${sourceRevision}|${viewKey}`;
       const latest = this.#cache.get(cacheKey);
       if (latest?.viewKey === viewKey && latest.catalog.observedAtMs > catalog.observedAtMs) {
-        return { catalog: latest.catalog, revision: latest.revision };
+        return { catalog: latest.catalog, revision: latest.revision,
+          ...(latest.sourceRevision === undefined ? {} : { sourceRevision: latest.sourceRevision }) };
       }
-      if (etag !== null && etag.length > 0) this.#cache.set(cacheKey, { viewKey, etag, revision, catalog });
-      return { catalog, revision };
+      const source = viewKey.length === 0 ? {} : { sourceRevision };
+      if (etag !== null && etag.length > 0) this.#cache.set(cacheKey, { viewKey, etag, revision, catalog, ...source });
+      return { catalog, revision, ...source };
     } catch (error) {
       if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
       throw error;

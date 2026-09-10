@@ -20,6 +20,41 @@ function result(accountId: string, revision: string, observedAtMs = 100): Catalo
 }
 
 describe("CatalogRevisionCoordinator", () => {
+  it("converges projected revisions and refreshes a changed peer view at the same source revision", async () => {
+    vi.useFakeTimers();
+    const id = "catalog-source:BTI:FOOTBALL";
+    let view = "roster";
+    const read = vi.fn(async () => ({ ...result(id, `r1|${view}`), sourceRevision: "r1" }));
+    const onCatalog = vi.fn();
+    const coordinator = new CatalogRevisionCoordinator({ read, onCatalog, minimumPublishIntervalMs: 3000 });
+    coordinator.setSelected([id]);
+    coordinator.acceptBaseline([entry(id, "r1")], 1);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(read).toHaveBeenCalledTimes(1);
+    view = "events:shared-with-cmd";
+    coordinator.refreshViews("catalog-source:CMD:FOOTBALL");
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(onCatalog).toHaveBeenCalledTimes(2);
+    expect(onCatalog.mock.calls[1]![0].revision).toBe("r1|events:shared-with-cmd");
+    coordinator.stop();
+  });
+  it("retries a failed forced view at an unchanged source revision", async () => {
+    vi.useFakeTimers();
+    const id = "catalog-source:BTI:FOOTBALL";
+    const read = vi.fn().mockRejectedValueOnce(new Error("CATALOG_TIMEOUT"))
+      .mockResolvedValue({ ...result(id, "r1|events:shared"), sourceRevision: "r1" });
+    const onCatalog = vi.fn();
+    const coordinator = new CatalogRevisionCoordinator({ read, onCatalog, retryDelayMs: () => 500 });
+    coordinator.setHeldRevision(id, "r1|roster", "r1");
+    coordinator.setSelected([id]);
+    coordinator.acceptBaseline([entry(id, "r1")], 1);
+    coordinator.refreshViews("catalog-source:CMD:FOOTBALL");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(onCatalog).toHaveBeenCalledTimes(1);
+    coordinator.stop();
+  });
   it("invalidates accepted stale metadata immediately even when its account is not selected", () => {
     const invalidated: CatalogRevisionEntry[] = [];
     const accountId = "catalog-source:IM:FOOTBALL";

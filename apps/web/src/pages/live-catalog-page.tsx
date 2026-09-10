@@ -275,10 +275,7 @@ export function filterAccountBackedSignals(
 }
 
 function catalogCountLabel(eventCount: number, marketCount: number | null): string {
-  const compact = (value: number) => value < 10_000 ? value.toLocaleString("vi-VN")
-    : `${(value / (value >= 1_000_000 ? 1_000_000 : 1_000)).toLocaleString("vi-VN", {
-      maximumFractionDigits: 1 })}${value >= 1_000_000 ? "m" : "k"}`;
-  return `${compact(eventCount)} trận · ${marketCount === null ? "…" : compact(marketCount)} kèo`;
+  return `${eventCount.toLocaleString("en-US")} matches · ${marketCount === null ? "…" : marketCount.toLocaleString("en-US")} markets`;
 }
 
 function formatRecoveryDuration(seconds: number | null): string {
@@ -360,13 +357,13 @@ function ProviderSelector({ accounts, eventCounts, marketCounts, nativeCoverageC
       {activeAccount === undefined ? <label className="provider-selector__unavailable">
         <input aria-label={`${provider} ${availabilityLabel}`} checked={false} disabled readOnly type="checkbox" />
         <ProviderBrand compact provider={provider} />
-        <span className="provider-selector__match-count" title={`${count.toLocaleString("vi-VN")} trận · ${marketCount?.toLocaleString("vi-VN") ?? "Chưa tải"} kèo`}>{catalogCountLabel(count, marketCount)}</span>
+        <span className="provider-selector__match-count" title={catalogCountLabel(count, marketCount)}>{catalogCountLabel(count, marketCount)}</span>
         {hasNativeCoverage && <span className="provider-selector__native-count" title={nativeCoverageText} tabIndex={0}>
           <span aria-hidden="true">ⓘ</span><span className="visually-hidden">{nativeCoverageText}</span></span>}
       </label> : <label><input checked={selected.has(activeAccount.id)}
         onChange={() => toggle(activeAccount.id)} type="checkbox" />
         <ProviderBrand compact label={activeAccount.alias} provider={activeAccount.provider} />
-        <span className="provider-selector__match-count" title={`${count.toLocaleString("vi-VN")} trận · ${marketCount?.toLocaleString("vi-VN") ?? "Chưa tải"} kèo`}>{catalogCountLabel(count, marketCount)}</span>
+        <span className="provider-selector__match-count" title={catalogCountLabel(count, marketCount)}>{catalogCountLabel(count, marketCount)}</span>
         {hasNativeCoverage && <span className="provider-selector__native-count" title={nativeCoverageText} tabIndex={0}>
           <span aria-hidden="true">ⓘ</span><span className="visually-hidden">{nativeCoverageText}</span></span>}
       </label>}
@@ -543,6 +540,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [category, setCategory] = useState<CatalogCategory>(() => fixedCategory ?? loadCatalogCategory(window.localStorage));
   const [eventPhases, setEventPhases] = useState<ReadonlySet<EventPhase>>(() => loadEventPhases(window.localStorage));
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
+  const [rosters, setRosters] = useState<readonly LiveCatalogResponse[]>([]);
   const [comparisonEvents, setComparisonEvents] = useState<readonly ComparisonEvent[]>([]);
   const [staleAccountIds, setStaleAccountIds] = useState<ReadonlySet<string>>(new Set());
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
@@ -692,7 +690,41 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     void providerTicketApi.focus(identity).catch(() => undefined);
   };
 
+  const rosterKeysRef = useRef(new Map<string, string>());
+  const rosterViewsRef = useRef(new Map<string, LiveCatalogResponse>());
+  const rememberRoster = useCallback((catalog: LiveCatalogResponse): void => {
+    const held = rosterViewsRef.current.get(catalog.accountId);
+    if (held !== undefined && held.observedAtMs > catalog.observedAtMs) return;
+    rosterViewsRef.current.set(catalog.accountId, catalog);
+    const key = JSON.stringify(catalog.events.map(event => [event.providerEventId, event.participantA,
+      event.participantB, event.competition, event.startAtUtcMs, event.isLive,
+      event.category === "FOOTBALL" ? event.isVirtual : false,
+      event.category === "FOOTBALL" ? event.sportVariant : event.category]));
+    if (rosterKeysRef.current.get(catalog.accountId) !== key) {
+      rosterKeysRef.current.set(catalog.accountId, key);
+      revisionCoordinatorRef.current?.refreshViews(catalog.accountId);
+    }
+    setRosters(previous => {
+      const held = previous.find(item => item.accountId === catalog.accountId);
+      if (held !== undefined && held.observedAtMs >= catalog.observedAtMs) return previous;
+      return [...previous.filter(item => item.accountId !== catalog.accountId), catalog];
+    });
+  }, []);
+
   const readCatalog = useCallback(async (accountId: string): Promise<CatalogReadResult> => {
+    if (catalogSourceApi !== undefined && catalogApi.readRosterRevision !== undefined &&
+      catalogApi.readEventsRevision !== undefined) {
+      const [result] = await hydratePairableCatalogs({
+        accountIds: [accountId], existingCatalogs: [...new Map([...catalogsRef.current,
+          ...rosterViewsRef.current.values()].map(catalog => [catalog.accountId, catalog])).values()],
+        readRoster: id => catalogApi.readRosterRevision!(id),
+        readEvents: (id, ids) => catalogApi.readEventsRevision!(id, ids),
+        onRoster: rememberRoster
+      });
+      if (result?.status !== "fulfilled") throw result?.reason ?? new Error("Catalog unavailable");
+      catalogRevisionsRef.current.remember(result.value.catalog, result.value.revision);
+      return result.value;
+    }
     if (catalogApi.readRevision !== undefined) {
       const result = await catalogApi.readRevision(accountId);
       catalogRevisionsRef.current.remember(result.catalog, result.revision);
@@ -700,7 +732,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     }
     const catalog = await catalogApi.read(accountId);
     return { catalog, revision: catalogRevision(catalog) };
-  }, [catalogApi, catalogRevision]);
+  }, [catalogApi, catalogRevision, catalogSourceApi, rememberRoster]);
 
   const acceptRealtimeCatalog = useCallback((result: CatalogReadResult): void => {
     const catalog = result.catalog;
@@ -817,6 +849,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         catalogApi.readEventsRevision !== undefined) {
         results = await hydratePairableCatalogs({
           accountIds: requestedIds,
+          onRoster: rememberRoster,
           existingCatalogs: catalogsRef.current.filter((catalog) => catalog.category === expectedCategory),
           readRoster: async (id) => {
           const source = sourcesRef.current.find((candidate) => candidate.id === id);
@@ -834,7 +867,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const completedResults = results.flatMap((result) => result.status === "fulfilled" &&
         result.value.catalog.category === expectedCategory ? [result.value] : []);
       for (const result of completedResults) {
-        revisionCoordinatorRef.current?.setHeldRevision(result.catalog.accountId, result.revision);
+        catalogRevisionsRef.current.remember(result.catalog, result.revision);
+        revisionCoordinatorRef.current?.setHeldRevision(result.catalog.accountId, result.revision, result.sourceRevision);
       }
       const completed = completedResults.map((result) => result.catalog);
       const previousByAccount = new Map(catalogsRef.current.map((catalog) => [catalog.accountId, catalog]));
@@ -897,7 +931,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     } finally {
       for (const id of requestedIds) catalogRefreshesInFlight.current.delete(id);
     }
-  }, [catalogSourceApi, readCatalog, sameCatalog, catalogIsStale]);
+  }, [catalogSourceApi, readCatalog, sameCatalog, catalogIsStale, rememberRoster]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1044,21 +1078,35 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   const freshCatalogs = useMemo(() => catalogs.filter((catalog) => !staleAccountIds.has(catalog.accountId)),
     [catalogs, staleAccountIds]);
-  const eventCounts = useMemo(() => new Map(catalogs.map((catalog) => [catalog.accountId,
+  // A successful roster remains visible even when market hydration times out.
+  // It supplies counts only and never supplies executable/comparison prices.
+  const countCatalogs = useMemo(() => {
+    const latest = new Map(catalogs.map(catalog => [catalog.accountId, catalog]));
+    for (const roster of rosters) {
+      if (roster.observedAtMs >= (latest.get(roster.accountId)?.observedAtMs ?? -Infinity)) {
+        latest.set(roster.accountId, roster);
+      }
+    }
+    return [...latest.values()];
+  }, [catalogs, rosters]);
+  const eventCounts = useMemo(() => new Map(countCatalogs.map((catalog) => [catalog.accountId,
     new Set(catalog.events.filter((candidate) => candidate.category === category &&
       (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
       .map((candidate) => candidate.providerEventId)).size
-  ])), [catalogs, category]);
-  const marketCounts = useMemo(() => new Map(catalogs.map((catalog) => {
+  ])), [countCatalogs, category]);
+  const marketCounts = useMemo(() => new Map(countCatalogs.map((catalog) => {
     const eligibleEventIds = new Set(catalog.events.filter((candidate) => candidate.category === category &&
       (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
       .map((candidate) => candidate.providerEventId));
     const marketIds = new Set(catalog.markets.filter((candidate) => candidate.category === category &&
       eligibleEventIds.has(candidate.providerEventId))
       .map((candidate) => `${candidate.providerEventId}\u0000${candidate.providerMarketId}`));
-    return [catalog.accountId, marketIds.size] as const;
-  })), [catalogs, category]);
-  const nativeCoverageCounts = useMemo(() => new Map(catalogs.flatMap((catalog) => {
+    const count = catalog.nativeCoverageByEvent !== undefined
+      ? catalog.nativeCoverageByEvent.filter(row => eligibleEventIds.has(row.providerEventId))
+        .reduce((sum, row) => sum + row.normalized, 0) : marketIds.size;
+    return [catalog.accountId, count] as const;
+  })), [countCatalogs, category]);
+  const nativeCoverageCounts = useMemo(() => new Map(countCatalogs.flatMap((catalog) => {
     if (catalog.nativeCoverageByEvent === undefined && catalog.nativeMarketObservations === undefined) return [];
     const eligibleEventIds = new Set(catalog.events.filter((candidate) => candidate.category === category &&
       (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
@@ -1080,7 +1128,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       excluded: observations.filter((observation) => observation.disposition === "EXCLUDED").length,
       unmapped: observations.filter((observation) => observation.disposition === "UNMAPPED").length
     } satisfies NativeCoverageCount] as const];
-  })), [catalogs, category]);
+  })), [countCatalogs, category]);
   // Stale catalogs remain cached for recovery, but stale comparisons are not
   // shown. A cross-book ticket is useful only while every contributing source
   // is fresh.
@@ -1227,7 +1275,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         manualRecover={(provider) => { void sourceRecoveryCoordinatorRef.current?.manual(provider); }}
         recoveryByProvider={recoveryByProvider} selected={selectedIds} toggle={toggle} />
       <fieldset className="event-phase-filter" aria-label="Thời điểm trận">
-        <legend>Trận</legend>
+        <legend>Matches</legend>
         <label><input checked={eventPhases.has("LIVE")} onChange={() => toggleEventPhase("LIVE")} type="checkbox" /> Live</label>
         <label><input checked={eventPhases.has("PREMATCH")} onChange={() => toggleEventPhase("PREMATCH")} type="checkbox" /> Pre-match</label>
       </fieldset>

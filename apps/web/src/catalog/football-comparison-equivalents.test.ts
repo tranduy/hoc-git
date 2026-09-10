@@ -5,6 +5,8 @@ import type { ComparisonCell } from "./comparison.js";
 import { binaryOpposingCellPairs, buildComparisonEvents } from "./comparison.js";
 import { resultCatalog } from "./result-opposition.fixture.js";
 import type { LiveCatalogResponse } from "../api/catalog.js";
+import { extractImFootballCatalog } from "../../../api/src/providers/im/im-football-catalog-source.js";
+import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 function cell(type:MarketType,line:string|null,selections:string[],live=false):ComparisonCell {
   const spec=footballBinaryMarketSpec(type)??footballCategoricalMarketSpec(type)!;
   const market={provider:"BTI" as const,category:"FOOTBALL" as const,providerEventId:"event",providerMarketId:"native",marketType:type,
@@ -94,6 +96,26 @@ function catalog(provider:"BTI"|"CMD"|"APSPORT",type:MarketType,line:string|null
     events:base.events.map(e=>reversed?{...e,participantA:e.participantB,participantB:e.participantA}:e)};
 }
 describe("equivalences in the real matcher",()=>{
+  it("does not pair Slavia IM exactly-zero half goals with CMD over 1.5", () => {
+    const cmd = catalog("CMD", "FH_TOTAL", "1.5", ["OVER"]);
+    const fixture = cmd.events[0]!;
+    const records = extractImFootballCatalog({ StatusCode: 100, sel: [{ eid: 113151564,
+      htn: fixture.participantA, atn: fixture.participantB, cn: fixture.competition,
+      edt: new Date(fixture.startAtUtcMs!).toISOString(), isrbt: false, iscyb: false,
+      mls: [{ mi: 2514625189, bti: 7, gp: 2, il: false,
+        ws: [{ wsi: 32506465725, si: 39, o: 3.14, ot: 3 }] }] }] });
+    const normalized = normalizeSbobetCatalog(records, { provider: "IM", observedAtMs: 100,
+      receivedMonotonicMs: 13, sequence: 14 });
+    expect(normalized.quotes).toHaveLength(1);
+    const im: LiveCatalogResponse = { ...cmd, ...normalized, provider: "IM", accountId: "im",
+      events: normalized.events.map(e => ({ ...e, startAtUtcMs: fixture.startAtUtcMs })) };
+    const rows = buildComparisonEvents([im, cmd]).flatMap(e => e.rows);
+    expect(rows.flatMap(row => binaryOpposingCellPairs(row.cells))).toEqual([]);
+    const overHalf = { ...cmd, markets: cmd.markets.map(m => ({ ...m, line: "0.5" })),
+      quotes: cmd.quotes.map(q => ({ ...q, line: "0.5" })) };
+    expect(buildComparisonEvents([im, overHalf]).flatMap(e => e.rows)
+      .flatMap(row => binaryOpposingCellPairs(row.cells))).toHaveLength(1);
+  });
   it.each([false,true])("matches a team zero-goal bucket with the opposing total after orientation %s",reversed=>{
     const bucket=catalog("CMD",reversed?"AWAY_FT_GOAL_RANGE":"HOME_FT_GOAL_RANGE",null,["RANGE_0_0"],reversed);
     const over=catalog("BTI","HOME_FT_TOTAL","0.5",["OVER"]);
