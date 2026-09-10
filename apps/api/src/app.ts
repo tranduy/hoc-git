@@ -148,7 +148,9 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
       }
     }
   });
-  void app.register(websocket, { options: { maxPayload: maxBufferedBytes } });
+  // One bridge socket carries six books. Yield between buffered frames so an
+  // ingress burst cannot starve HTTP catalog streams and their freshness timers.
+  void app.register(websocket, { options: { maxPayload: maxBufferedBytes, allowSynchronousEvents: false } });
   app.addHook("onSend", async (request, reply, payload) => {
     if (request.url.startsWith("/api/")) reply.header("cache-control", "no-store");
     return payload;
