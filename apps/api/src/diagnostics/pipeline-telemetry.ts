@@ -77,7 +77,7 @@ interface Bucket {
 
 interface AccountState {
   readonly buckets: Bucket[];
-  readonly selections: Map<string, Pick<ProviderQuote, "rawOdds" | "status">>;
+  selections: Map<string, Pick<ProviderQuote, "rawOdds" | "status">>;
   sourceId: string | null;
   sourceEpoch: string | null;
   tabId: number | null;
@@ -278,6 +278,7 @@ function createState(): AccountState {
 export class PipelineTelemetry {
   readonly #now: () => number;
   readonly #states = new Map<ChromeBridgeProviderAccountId, AccountState>();
+  readonly #selectionKeys = new WeakMap<ProviderQuote, string>();
 
   constructor(options: { readonly now?: () => number } = {}) {
     this.#now = options.now ?? Date.now;
@@ -367,8 +368,15 @@ export class PipelineTelemetry {
     let sample: SemanticChange | null = null;
     for (const quote of catalog.quotes) {
       if (next.size >= PIPELINE_TELEMETRY_LIMITS.maxSelectionsPerAccount) break;
-      const key = selectionKey(quote);
-      const current = { rawOdds: quote.rawOdds, status: quote.status };
+      // BTI and SBOBET retain readonly quote objects between deltas. Reuse
+      // their keys while allowing removed records to be garbage-collected.
+      const retained = catalog.provider === "BTI" || catalog.provider === "SBOBET";
+      let key = retained ? this.#selectionKeys.get(quote) : undefined;
+      if (key === undefined) {
+        key = selectionKey(quote);
+        if (retained) this.#selectionKeys.set(quote, key);
+      }
+      const current = retained ? quote : { rawOdds: quote.rawOdds, status: quote.status };
       next.set(key, current);
       const previous = state.selections.get(key);
       if (previous === undefined || (previous.rawOdds === current.rawOdds && previous.status === current.status)) continue;
@@ -380,8 +388,7 @@ export class PipelineTelemetry {
         atMs: catalog.observedAtMs
       };
     }
-    state.selections.clear();
-    for (const [key, value] of next) state.selections.set(key, value);
+    state.selections = next;
     if (changes === 0) return;
     const bucket = this.#bucket(state, catalog.observedAtMs);
     bucket.quoteChanges += changes;

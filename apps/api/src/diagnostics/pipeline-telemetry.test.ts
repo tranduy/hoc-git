@@ -341,6 +341,28 @@ describe("PipelineTelemetry", () => {
       selections: PIPELINE_TELEMETRY_LIMITS.maxSelectionsPerAccount
     });
   });
+
+  it.each(["BTI", "SBOBET"] as const)("tracks retained %s quote changes, removals and replacements", async (provider) => {
+    const telemetry = new PipelineTelemetry({ now: () => 120_000 });
+    const retainedAccount = `catalog-source:${provider}:FOOTBALL`;
+    const retained = { ...quote("0.83"), provider };
+    const publish = (atMs: number, quotes: readonly ProviderQuote[]) => telemetry.recordCatalog({
+      ...catalog(atMs, quotes), provider, accountId: retainedAccount
+    });
+    publish(60_000, [retained]);
+    publish(70_000, [retained]);
+    publish(80_000, [{ ...retained, rawOdds: "0.75" }]);
+    publish(90_000, []);
+    publish(100_000, [retained]); // Returning a removed selection is a new baseline.
+    publish(110_000, [{ ...retained, status: "SUSPENDED" }]);
+    const result = await telemetry.diagnostic({ listSources: () => [], listAuthorities: () => [],
+      listFeeds: () => [], listCatalogStatuses: async () => [], catalogRevision: () => undefined }, retainedAccount);
+    expect(result?.hops.find(hop => hop.hop === "HOP8_SEMANTIC")?.detail).toMatchObject({
+      quoteChanges60s: 2, quoteChanges300s: 2,
+      sampleChange: { before: "OPEN", after: "SUSPENDED", atMs: 110_000 }
+    });
+    expect(telemetry.storageStats().selections).toBe(1);
+  });
 });
 
 describe("ignored-envelope endpoints", () => {
