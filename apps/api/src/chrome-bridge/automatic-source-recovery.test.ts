@@ -27,6 +27,7 @@ function setup(now: () => number = () => 2_000, browserRefreshEnabled = true,
   const requestLobbySnapshot = vi.fn(() => 1);
   const reloadSource = vi.fn(() => 1);
   const reloadRecoverySource = vi.fn(() => 1);
+  const recoverySourceKey = vi.fn(() => "candidate-a");
   const restoreLobby = vi.fn(() => 1);
   const ensureLobby = vi.fn(() => 1);
   const refreshFabetLaunches = vi.fn(async (_signal?: AbortSignal) => undefined);
@@ -45,7 +46,7 @@ function setup(now: () => number = () => 2_000, browserRefreshEnabled = true,
   const onError = vi.fn();
   const onStateChange = vi.fn();
   const recovery = new AutomaticSourceRecovery({
-    controlPlane: { requestLobbySnapshot, reloadSource, reloadRecoverySource, ensureLobby, restoreLobby },
+    controlPlane: { requestLobbySnapshot, reloadSource, reloadRecoverySource, recoverySourceKey, ensureLobby, restoreLobby },
     feedRegistry,
     refreshFabetLaunches,
     browserRefreshEnabled,
@@ -57,7 +58,7 @@ function setup(now: () => number = () => 2_000, browserRefreshEnabled = true,
     onError,
     onStateChange
   });
-  return { recovery, requestLobbySnapshot, reloadSource, reloadRecoverySource,
+  return { recovery, requestLobbySnapshot, reloadSource, reloadRecoverySource, recoverySourceKey,
     restoreLobby, ensureLobby, refreshFabetLaunches,
     waitForFreshBaseline, feedRegistry, onError, onStateChange };
 }
@@ -907,6 +908,56 @@ describe("AutomaticSourceRecovery", () => {
     expect(waitForFreshBaseline).toHaveBeenNthCalledWith(
       2, CMD, 1_060_000, 10_000, expect.any(AbortSignal)
     );
+  });
+
+  it("recovers a candidate-only KSPORT after its snapshot times out with portal refresh disabled", async () => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SBOBET));
+    let reloaded = false;
+    context.reloadRecoverySource.mockImplementation(() => { reloaded = true; return 1; });
+    context.waitForFreshBaseline.mockImplementation(async () => {
+      if (!reloaded) throw new Error("PROVIDER_FEED_BASELINE_TIMEOUT");
+      return snapshot(SBOBET, { state: "LIVE", reason: null,
+        sourceId: "chrome:KSPORT:9", sourceEpoch: "new:1", activeGeneration: "new",
+        lastCompleteBaselineAtMs: 2_001 });
+    });
+    await expect(context.recovery.recover(request(SBOBET, "HARD"))).resolves.toMatchObject({
+      outcome: "RECOVERED", reason: null
+    });
+    expect(context.reloadRecoverySource).toHaveBeenCalledExactlyOnceWith(SBOBET, "KSPORT");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+  });
+
+  it("gives a KSPORT reload its own settling window after a slow snapshot timeout", async () => {
+    let clock = 2_000;
+    const context = setup(() => clock, false, { reloadBaselineTimeoutMs: 90_000 });
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SBOBET, {
+      sourceId: "chrome:KSPORT:9", sourceEpoch: "old:0", activeGeneration: "old", tabReachableAtMs: clock
+    }));
+    context.waitForFreshBaseline.mockImplementationOnce(async () => {
+      clock += 90_000;
+      throw new Error("PROVIDER_FEED_BASELINE_TIMEOUT");
+    }).mockImplementationOnce(async (_accountId: string, afterMs?: number, timeoutMs?: number) => {
+      if (afterMs !== 92_000 || timeoutMs !== 90_000) throw new Error("RELOAD_WINDOW_ALREADY_SPENT");
+      return snapshot(SBOBET, { state: "LIVE", reason: null, sourceId: "chrome:KSPORT:9",
+        sourceEpoch: "new:1", activeGeneration: "new", lastCompleteBaselineAtMs: 92_001 });
+    });
+    await expect(context.recovery.recover(request(SBOBET, "HARD"))).resolves.toMatchObject({
+      outcome: "RECOVERED", reason: null
+    });
+  });
+
+  it("does not spend a retired KSPORT candidate's snapshot timeout on its replacement", async () => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SBOBET));
+    context.waitForFreshBaseline.mockImplementation(async () => {
+      context.recoverySourceKey.mockReturnValue("candidate-b");
+      throw new Error("PROVIDER_FEED_BASELINE_TIMEOUT");
+    });
+    await expect(context.recovery.recover(request(SBOBET, "HARD"))).resolves.toMatchObject({
+      outcome: "ACTION_REQUIRED"
+    });
+    expect(context.reloadRecoverySource).not.toHaveBeenCalled();
   });
 
   it("rejects an authoritative baseline whose timestamp only equals the recovery request", async () => {

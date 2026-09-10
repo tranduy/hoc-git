@@ -13,6 +13,7 @@ interface RecoveryControlPlane {
   requestLobbySnapshot(lobby: ChromeLobbyId): number;
   reloadSource?(sourceId: string): number;
   reloadRecoverySource?(accountId: string, lobby: ChromeLobbyId): number;
+  recoverySourceKey?(accountId: string, lobby: ChromeLobbyId): string | null;
   ensureLobby(lobby: ChromeLobbyId, url: string): number;
   restoreLobby(lobby: ChromeLobbyId): number;
 }
@@ -242,6 +243,9 @@ export class AutomaticSourceRecovery {
       this.#requireRecovery(request.accountId);
       const current = this.#options.feedRegistry.snapshot(request.accountId);
       const actionStartedAtMs = this.#now();
+      const snapshotSourceKey = source.provider === "SBOBET"
+        ? this.#options.controlPlane.recoverySourceKey?.(request.accountId, source.hardLobby) ?? null : null;
+      let sbobetSnapshotTimedOut = false;
       if (source.provider === "SBOBET") {
         const delivered = this.#options.controlPlane.requestLobbySnapshot(source.hardLobby);
         let snapshotSettlingTimedOut = false;
@@ -254,6 +258,7 @@ export class AutomaticSourceRecovery {
           if (this.#disposed) return stopped(request.accountId, "HARD");
           if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
           snapshotSettlingTimedOut = true;
+          sbobetSnapshotTimedOut = true;
           // A heartbeat proves only that the content script is alive. When no
           // baseline follows during the full settling window, continue into
           // the guarded same-tab reload below; returning here left KSPORT
@@ -264,6 +269,7 @@ export class AutomaticSourceRecovery {
           if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
             return confirmation;
           }
+          sbobetSnapshotTimedOut = true;
           const retryStartedAtMs = this.#now();
           this.#requireRecovery(request.accountId);
           if (hasRecentSbobetTab(this.#options.feedRegistry.snapshot(request.accountId),
@@ -279,30 +285,36 @@ export class AutomaticSourceRecovery {
         (this.#options.controlPlane.reloadSource !== undefined ||
           this.#options.controlPlane.reloadRecoverySource !== undefined)) {
         const prior = current;
+        // Snapshot recovery can consume its whole settling window. The reload
+        // starts a separate operation and needs a new deadline and cooldown.
+        const reloadStartedAtMs = source.provider === "SBOBET" ? this.#now() : actionStartedAtMs;
         let delivered = 0;
         const lastReloadAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
-        const reloadAllowed = actionStartedAtMs - lastReloadAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS;
+        const reloadAllowed = reloadStartedAtMs - lastReloadAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS;
         if (reloadAllowed && prior.sourceId !== null &&
           this.#options.controlPlane.reloadSource !== undefined &&
           matchesRecoverySource(prior.sourceId, request.accountId, source.hardLobby)) {
           this.#requireRecovery(request.accountId);
           try {
             delivered = this.#options.controlPlane.reloadSource(prior.sourceId);
-            if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
+            if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, reloadStartedAtMs);
           } catch { /* send failure is undelivered; fall through to a fresh launch */ }
         }
-        if (source.provider !== "SBOBET" && reloadAllowed && delivered <= 0 &&
+        if ((source.provider !== "SBOBET" || (prior.sourceId === null && sbobetSnapshotTimedOut &&
+          snapshotSourceKey !== null && snapshotSourceKey ===
+            this.#options.controlPlane.recoverySourceKey?.(request.accountId, source.hardLobby))) &&
+          reloadAllowed && delivered <= 0 &&
           this.#options.controlPlane.reloadRecoverySource !== undefined) {
           this.#requireRecovery(request.accountId);
           try {
             delivered = this.#options.controlPlane.reloadRecoverySource(request.accountId, source.hardLobby);
-            if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
+            if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, reloadStartedAtMs);
           } catch { /* candidate send failure is undelivered; fall through to a fresh launch */ }
         }
         if (delivered > 0) {
           const confirmation = source.provider === "IM"
-            ? await this.#confirmAfter(request.accountId, "HARD", actionStartedAtMs)
-            : await this.#confirmReplacement(request, prior, actionStartedAtMs);
+            ? await this.#confirmAfter(request.accountId, "HARD", reloadStartedAtMs)
+            : await this.#confirmReplacement(request, prior, reloadStartedAtMs);
           if (source.provider === null || confirmation.outcome === "RECOVERED" ||
             confirmation.reason !== "BASELINE_TIMEOUT") {
             return confirmation;

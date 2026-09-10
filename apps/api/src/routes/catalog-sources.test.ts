@@ -4,6 +4,26 @@ import type { CatalogSourceStatus } from "@tool-chenh/contracts";
 import { registerCatalogSourceRoutes } from "./catalog-sources.js";
 
 describe("catalog source routes", () => {
+  it("does not serve an expired status when its refresh fails, and recovers on the next read", async () => {
+    const app = Fastify();
+    const row: CatalogSourceStatus = { id: "catalog-source:IM:FOOTBALL", alias: "IM",
+      provider: "IM", category: "FOOTBALL", sessionState: "ACTION_REQUIRED",
+      acquiredAtMs: 100, reason: "PROVIDER_VALIDATION_FAILED" };
+    let unavailable = false;
+    registerCatalogSourceRoutes(app, { listStatuses: async () => {
+      if (unavailable) throw new Error("resolver unavailable");
+      return [row];
+    } }, { cacheTtlMs: 0, maxStaleMs: 0 });
+    try {
+      expect((await app.inject("/api/catalog/sources")).statusCode).toBe(200);
+      unavailable = true;
+      const failed = await app.inject("/api/catalog/sources");
+      expect(failed.statusCode).toBe(503);
+      expect(failed.json()).toEqual({ error: "CATALOG_SOURCES_UNAVAILABLE" });
+      unavailable = false;
+      expect((await app.inject("/api/catalog/sources")).statusCode).toBe(200);
+    } finally { await app.close(); }
+  });
   it("drops a permanently hung refresh so a later status read can recover", async () => {
     const app = Fastify();
     const active: CatalogSourceStatus = {

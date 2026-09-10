@@ -198,6 +198,16 @@ export class ChromeBridgeControlPlane {
     return 0;
   }
 
+  recoverySourceKey(accountId: string, lobby: ChromeLobbyId): string | null {
+    const expectedAccountId = chromeBridgeProviderAccountIdForLobby(lobby);
+    if (accountId !== expectedAccountId || this.#authorityCoordinator === null) return null;
+    const source = this.#recoveryAuthoritySource(expectedAccountId, lobby, "ACTIVE") ??
+      this.#recoveryAuthoritySource(expectedAccountId, lobby, "CANDIDATE");
+    if (source === null || source.socket.readyState !== 1) return null;
+    const { sourceId, sourceEpoch, connectionGeneration } = source.identity;
+    return JSON.stringify([sourceId, sourceEpoch, connectionGeneration]);
+  }
+
   #recoveryAuthoritySource(accountId: ChromeBridgeProviderAccountId, lobby: ChromeLobbyId,
     disposition: "ACTIVE" | "CANDIDATE"): AttachedAuthoritySource | null {
     if (this.#authorityCoordinator === null) return null;

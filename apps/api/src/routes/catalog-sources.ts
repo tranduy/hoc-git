@@ -54,7 +54,8 @@ export function registerCatalogSourceRoutes(app: FastifyInstance, sources: Catal
       const refreshed = refresh().catch(() => undefined);
       if (ageMs < maxStaleMs) return recent.sources;
       const current = await refreshed;
-      return current ?? recent.sources;
+      if (current === undefined) throw new Error("CATALOG_SOURCE_REFRESH_UNAVAILABLE");
+      return current;
     }
     const timeout = new Promise<never>((_resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("CATALOG_SOURCE_STATUS_TIMEOUT")), initialTimeoutMs);
