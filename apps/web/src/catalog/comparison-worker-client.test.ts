@@ -44,6 +44,43 @@ function sharedCatalog(provider: ProviderId, revision = 1): LiveCatalogResponse 
 }
 
 describe("ComparisonWorkerClient", () => {
+  it.each(["fixture", "phase"])("preserves the fresh %s barrier with a continuously stale third source", kind => {
+    const worker = new FakeWorker(), engine = new ComparisonWorkerEngine(), received = vi.fn();
+    const fresh = sharedCatalog("BTI");
+    const client = new ComparisonWorkerClient({ createWorker: () => worker,
+      competitionLinkStorage: null, onResult: received });
+    client.reset([fresh, sharedCatalog("SABA"), { ...sharedCatalog("CMD"), snapshotState: "STALE" }], ["CMD"]);
+    client.upsert({ ...fresh, ...(kind === "phase" ? { observedAtMs: 1_700_001 }
+      : { events: fresh.events.map(event => ({ ...event, participantA: "Different team" })) }) }, false);
+    client.setStale("CMD", true);
+    worker.emit(engine.apply(worker.posted[0] as never));
+    expect(received).not.toHaveBeenCalled();
+    client.stop();
+  });
+
+  it.each(["upsert", "flag"] as const)("keeps fresh pairs progressing through repeated stale-source %s", mode => {
+    const worker = new FakeWorker(), engine = new ComparisonWorkerEngine();
+    const received: string[][] = [];
+    const client = new ComparisonWorkerClient({ createWorker: () => worker, competitionLinkStorage: null,
+      onResult: output => {
+        expect(output.isLatest).toBe(false);
+        expect(output.displayEvents).toEqual(output.freshEvents);
+        received.push([...new Set(output.freshEvents.flatMap(event => event.rows.flatMap(row => row.cells.map(cell => cell.provider))))].sort());
+      } });
+    client.reset([sharedCatalog("BTI"), sharedCatalog("SABA"),
+      { ...sharedCatalog("CMD"), snapshotState: "STALE" }], ["CMD"]);
+    for (let index = 0; index < 4; index += 1) {
+      const completed = engine.apply(worker.posted[index] as never);
+      expect(completed.freshEvents.some(event => event.rows.length > 0)).toBe(true);
+      if (mode === "flag") client.setStale("CMD", true);
+      else client.upsert({ ...sharedCatalog("CMD", index + 2), snapshotState: "STALE",
+        events: [] }, true);
+      worker.emit(completed);
+    }
+    expect(received).toEqual(Array.from({ length: 4 }, () => ["BTI", "SABA"]));
+    client.stop();
+  });
+
   it.each([false, true])("does not serialize 5000 unprojected offers when the large source changes=%s", changed => {
     const worker = new FakeWorker(), base = sharedCatalog("BTI"), rival = sharedCatalog("SABA");
     let unusedTermReads = 0;

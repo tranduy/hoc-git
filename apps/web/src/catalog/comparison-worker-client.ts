@@ -262,6 +262,7 @@ export class ComparisonWorkerClient {
   #generation = 0;
   #inFlightGeneration: number | null = null;
   #inFlightCatalogs: ReadonlyMap<string, LiveCatalogResponse> | null = null;
+  #inFlightStale: ReadonlySet<string> = new Set();
   #inFlightInvalidated = false;
   #pendingReset = false;
   readonly #pendingChanges = new Map<string, readonly ComparisonWorkerDelta[]>();
@@ -294,7 +295,7 @@ export class ComparisonWorkerClient {
   }
 
   upsert(catalog: LiveCatalogResponse, stale: boolean): number {
-    if (this.#inFlightGeneration !== null && this.#stale.has(catalog.accountId)) this.#inFlightInvalidated = true;
+    if (this.#inFlightGeneration !== null && this.#stale.has(catalog.accountId) !== stale) this.#inFlightInvalidated = true;
     this.#catalogs.set(catalog.accountId, catalog);
     if (stale) this.#stale.add(catalog.accountId); else this.#stale.delete(catalog.accountId);
     return this.#enqueue({ type: "UPSERT", generation: ++this.#generation, catalog, stale });
@@ -330,9 +331,12 @@ export class ComparisonWorkerClient {
   #enqueue(command: Exclude<ComparisonWorkerCommand, { type: "BATCH_DELTA" }>): number {
     if (this.#stopped) return command.generation;
     if (this.#inFlightGeneration !== null) {
+      const continuouslyStale = command.type === "SET_STALE"
+        ? command.stale && this.#inFlightStale.has(command.accountId)
+        : command.type === "UPSERT" && command.stale && this.#inFlightStale.has(command.catalog.accountId);
       if (command.type === "RESET" || command.type === "REMOVE" ||
-          command.type === "SET_STALE" ||
-          (command.type === "UPSERT" && (command.stale || command.catalog.snapshotState === "STALE"))) {
+          (command.type === "SET_STALE" && !continuouslyStale) ||
+          (command.type === "UPSERT" && (command.stale || command.catalog.snapshotState === "STALE") && !continuouslyStale)) {
         this.#inFlightInvalidated = true;
       }
       if (command.type === "RESET") {
@@ -363,6 +367,7 @@ export class ComparisonWorkerClient {
   #send(command: ComparisonWorkerCommand): void {
     this.#inFlightGeneration = command.generation;
     this.#inFlightCatalogs = new Map(this.#catalogs);
+    this.#inFlightStale = new Set(this.#stale);
     this.#inFlightInvalidated = false;
     this.#worker.postMessage(command.type === "RESET"
       ? { ...command, catalogs: command.catalogs.map(comparisonCatalog) }
@@ -378,16 +383,24 @@ export class ComparisonWorkerClient {
       const snapshots = this.#inFlightCatalogs!;
       const isLatest = event.data.generation === this.#generation;
       if (Array.isArray(event.data.competitionLinks)) this.#storeLinks(event.data.competitionLinks);
+      // An already-stale book can keep receiving roster changes while the
+      // worker runs. Those changes cannot invalidate independent fresh pairs.
+      // Validate only the fresh projection; never publish stale display rows.
+      const freshOnly = !isLatest && this.#inFlightStale.size > 0;
+      const withoutStale = (catalogs: ReadonlyMap<string, LiveCatalogResponse>) => new Map(
+        [...catalogs].filter(([id]) => !this.#inFlightStale.has(id)));
+      const projected = freshOnly ? { ...event.data, displayEvents: event.data.freshEvents } : event.data;
       const validate = isLatest || this.#inFlightInvalidated ? null
-        : intermediateValidator(snapshots, this.#catalogs, this.#stale, projectedNativeOffers(event.data));
+        : intermediateValidator(freshOnly ? withoutStale(snapshots) : snapshots,
+          freshOnly ? withoutStale(this.#catalogs) : this.#catalogs, this.#stale, projectedNativeOffers(projected));
       if (isLatest || validate !== null) {
         const project = (item: ComparisonProjection): ComparisonEvent => {
           const hydrated = hydrate(item, validate === null ? snapshots : this.#catalogs);
           return validate === null ? hydrated : validatedProjection(hydrated, validate);
         };
-        const displayEvents = event.data.displayEvents.map(project);
+        const displayEvents = projected.displayEvents.map(project);
         this.#onResult({ generation: event.data.generation, isLatest, displayEvents,
-          freshEvents: event.data.freshEvents === event.data.displayEvents ? displayEvents : event.data.freshEvents.map(project) });
+          freshEvents: projected.freshEvents === projected.displayEvents ? displayEvents : projected.freshEvents.map(project) });
       }
       this.#inFlightGeneration = null;
       this.#inFlightCatalogs = null;
