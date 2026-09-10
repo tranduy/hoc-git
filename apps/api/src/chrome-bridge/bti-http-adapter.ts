@@ -1,6 +1,6 @@
 import { isSupportedFootballTwoWayLine, normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import { footballBinaryMarketSpec, footballCategoricalMarketSpec, footballResultMarketSpec, isValidProviderPlayerIdentity,
-  type ChromeBridgeEnvelope, type MarketType, type Scope } from "@tool-chenh/contracts";
+  type ChromeBridgeEnvelope, type MarketType, type NativeMarketObservation, type Scope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { extractBtiCatalogRecords,
   extractBtiNativeMarketIdentities,
@@ -87,9 +87,11 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
     }
     const records = extractBtiCatalogRecords(payload);
     const resolvedEventIds = new Set(records.map((record) => record.eventId));
-    const nativeMarketObservations = extractBtiNativeMarketObservations(payload, envelope.observedAtMs, resolvedEventIds).map((observation) =>
-      isDetail && !resolvedEventIds.has(observation.providerEventId) && observation.disposition === "NORMALIZED"
-        ? { ...observation, disposition: "EXCLUDED" as const, reason: "EVENT_IDENTITY_UNRESOLVED" } : observation);
+    const nativeMarketObservations = extractBtiNativeMarketObservations(payload, envelope.observedAtMs, resolvedEventIds)
+      .map((observation) => isDetail && !resolvedEventIds.has(observation.providerEventId) &&
+        observation.disposition === "NORMALIZED"
+        ? { ...observation, disposition: "EXCLUDED" as const, reason: "EVENT_IDENTITY_UNRESOLVED" } : observation)
+      .map(compactBtiNativeObservation);
     const closedEventIds = new Set<string>(isDetail && Array.isArray(root?.data) ? root.data.flatMap((row) =>
       Array.isArray(row) && nativeEventId(row[0]) !== "" && row[32] === true ? [nativeEventId(row[0])] : []) : []);
     const payloadState = btiPayloadState(payload, isDetail);
@@ -310,6 +312,20 @@ function withClock(part: BtiPart, clock: { readonly requestedAtMs: number; reado
 function comparePartClock(left: Pick<BtiPart, "requestedAtMs" | "observedAtMs">,
   right: Pick<BtiPart, "requestedAtMs" | "observedAtMs">): number {
   return left.requestedAtMs - right.requestedAtMs || left.observedAtMs - right.observedAtMs;
+}
+
+/**
+ * A normalized observation duplicates its selections in canonical markets and
+ * quotes. BTI can expose hundreds of thousands of those rows, so retaining the
+ * nested native copy consumed gigabytes while adding no matching information.
+ * Unmapped/excluded observations remain complete because they are the evidence
+ * used to extend normalization coverage.
+ */
+export function compactBtiNativeObservation(observation: NativeMarketObservation): NativeMarketObservation {
+  if (observation.disposition !== "NORMALIZED") return observation;
+  const { nativeSelections: _nativeSelections, nativeRow: _nativeRow,
+    outcomeLabels: _outcomeLabels, ...identity } = observation;
+  return { ...identity, nativeLabel: null, outcomeLabels: [] };
 }
 
 function retainedDetailReplay(payload: unknown, envelope: ChromeBridgeEnvelope,

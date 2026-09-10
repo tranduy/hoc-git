@@ -450,9 +450,10 @@ describe("BtiHttpCatalogAdapter", () => {
     unmatched[0] = "unmatched-hidden-home"; unmatched[16] = -2.5;
     selections.push(unmatched);
     const catalog = adapter.decode(cachedDetail(detail, now - 100))[0]!.value as ObservedProviderCatalog;
-    expect(catalog.nativeMarketObservations).toContainEqual(expect.objectContaining({
-      providerMarketId: "hc:-2.5", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED",
-      observedAtMs: now - 100, nativeSelections: [expect.objectContaining({ selectionId: "unmatched-hidden-home" })] }));
+    const observation = catalog.nativeMarketObservations?.find((item) => item.providerMarketId === "hc:-2.5");
+    expect(observation).toMatchObject({ disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED",
+      observedAtMs: now - 100, outcomeLabels: [] });
+    expect(observation).not.toHaveProperty("nativeSelections");
     expect(catalog.quotes.filter(quote => quote.providerMarketId === "hc:-2.5")).toEqual([
       expect.objectContaining({ providerSelectionId: "unmatched-hidden-home", selection: "HOME", receivedMonotonicMs: -10_080 })
     ]);
