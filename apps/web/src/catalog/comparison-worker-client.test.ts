@@ -44,6 +44,34 @@ function sharedCatalog(provider: ProviderId, revision = 1): LiveCatalogResponse 
 }
 
 describe("ComparisonWorkerClient", () => {
+  it.each([false, true])("does not serialize 5000 unprojected offers when the large source changes=%s", changed => {
+    const worker = new FakeWorker(), base = sharedCatalog("BTI"), rival = sharedCatalog("SABA");
+    let unusedTermReads = 0;
+    const unusedMarkets = Array.from({ length: 5000 }, (_, index) => ({ ...base.markets[0]!,
+      providerMarketId: `unprojected-${index}`, marketType: "FT_CORRECT_SCORE" as const, line: null,
+      get settlementProfile() { unusedTermReads += 1; return "football-correct-score-regulation"; } }));
+    const unusedQuotes = unusedMarkets.map((market, index) => ({ ...base.quotes[0]!,
+      providerMarketId: market.providerMarketId, providerSelectionId: `unused-selection-${index}`,
+      marketType: "FT_CORRECT_SCORE" as const, line: null, selection: "SCORE_1_0",
+      get rawOdds() { unusedTermReads += 1; return "3.1"; } }));
+    const large = { ...base, markets: [...base.markets, ...unusedMarkets], quotes: [...base.quotes, ...unusedQuotes] };
+    const completed = new ComparisonWorkerEngine().apply({ type: "RESET", generation: 1,
+      catalogs: [base, rival], staleAccountIds: [] });
+    const received: Array<{ receipt: number; sharedProjection: boolean }> = [];
+    const client = new ComparisonWorkerClient({ createWorker: () => worker, competitionLinkStorage: null,
+      onResult: output => received.push({ receipt: output.freshEvents[0]!.rows[0]!.cells
+        .find(cell => cell.provider === "BTI")!.quotes[0]!.receivedMonotonicMs,
+        sharedProjection: output.displayEvents === output.freshEvents }) });
+    client.reset([large, rival], []);
+    client.upsert(changed ? { ...large, observedAtMs: 2,
+      quotes: [...base.quotes.map(quote => ({ ...quote, receivedMonotonicMs: 2, sequence: 2 })), ...unusedQuotes] }
+      : sharedCatalog("SABA", 2), false);
+    unusedTermReads = 0;
+    worker.emit(completed);
+    expect(unusedTermReads).toBe(0);
+    expect(received).toEqual([{ receipt: changed ? 2 : 1, sharedProjection: true }]);
+    client.stop();
+  });
   it("publishes useful results through continuous revisions with the validated current native receipt clocks", () => {
     const worker = new FakeWorker(), engine = new ComparisonWorkerEngine();
     const received: Array<{ generation: number; observedAtMs: number; receipt: number }> = [];

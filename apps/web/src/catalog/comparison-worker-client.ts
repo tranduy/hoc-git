@@ -99,20 +99,42 @@ function matchingRoster(catalog: LiveCatalogResponse): string {
   })]);
 }
 
-function nativeOffers(catalog: LiveCatalogResponse): Map<string, { market: NativeMarket; quotes: NativeQuote[] } | null> {
+type NeededOffers = Map<NativeMarket["provider"], Map<string, Set<string>>>;
+
+function projectedNativeOffers(output: ComparisonWorkerOutput): NeededOffers {
+  const needed: NeededOffers = new Map();
+  const projections = output.displayEvents === output.freshEvents
+    ? [output.displayEvents] : [output.displayEvents, output.freshEvents];
+  for (const events of projections) for (const event of events) {
+    for (const rows of [event.rows, event.observedRows]) for (const row of rows) for (const cell of row.cells) {
+      const market = cell.sourceMarket ?? cell.market;
+      const providerEvents = needed.get(market.provider) ?? new Map<string, Set<string>>();
+      const markets = providerEvents.get(market.providerEventId) ?? new Set<string>();
+      markets.add(market.providerMarketId); providerEvents.set(market.providerEventId, markets);
+      needed.set(market.provider, providerEvents);
+    }
+  }
+  return needed;
+}
+
+function nativeOffers(catalog: LiveCatalogResponse, needed: NeededOffers): Map<string, { market: NativeMarket; quotes: NativeQuote[] } | null> {
   const offers = new Map<string, { market: NativeMarket; quotes: NativeQuote[] } | null>();
+  const includes = (item: NativeMarket | NativeQuote): boolean =>
+    needed.get(item.provider)?.get(item.providerEventId)?.has(item.providerMarketId) === true;
   for (const market of catalog.markets) {
+    if (!includes(market)) continue;
     const key = marketIdentity(market);
     offers.set(key, offers.has(key) ? null : { market, quotes: [] });
   }
-  for (const quote of catalog.quotes) offers.get(marketIdentity(quote))?.quotes.push(quote);
+  for (const quote of catalog.quotes) if (includes(quote)) offers.get(marketIdentity(quote))?.quotes.push(quote);
   return offers;
 }
 
 /** Keep admitted fixture relations and price terms, binding only the exact
  * current native offer's receipt fields after all existing guards pass. */
 function intermediateValidator(previous: ReadonlyMap<string, LiveCatalogResponse>,
-  current: ReadonlyMap<string, LiveCatalogResponse>, stale: ReadonlySet<string>): ((cell: ComparisonCell) => ComparisonCell | null) | null {
+  current: ReadonlyMap<string, LiveCatalogResponse>, stale: ReadonlySet<string>,
+  needed: NeededOffers): ((cell: ComparisonCell) => ComparisonCell | null) | null {
   if (previous.size !== current.size) return null;
   const clock = (catalogs: ReadonlyMap<string, LiveCatalogResponse>, freshOnly: boolean): number =>
     [...catalogs.values()].reduce((latest, catalog) => freshOnly && stale.has(catalog.accountId)
@@ -120,6 +142,8 @@ function intermediateValidator(previous: ReadonlyMap<string, LiveCatalogResponse
   const clocks = [false, true].map(freshOnly => [clock(previous, freshOnly), clock(current, freshOnly)] as const);
   const unchanged = new Map<string, { before: { market: NativeMarket; quotes: NativeQuote[] };
     current: ReadonlyMap<string, NativeQuote> } | null>();
+  const candidates = new Map<string, { before: { market: NativeMarket; quotes: NativeQuote[] };
+    after: { market: NativeMarket; quotes: NativeQuote[] } } | null>();
   for (const [accountId, before] of previous) {
     const after = current.get(accountId);
     if (after === undefined || (after.snapshotState === "STALE" && before.snapshotState !== "STALE") ||
@@ -129,34 +153,44 @@ function intermediateValidator(previous: ReadonlyMap<string, LiveCatalogResponse
     // fresh-only projections. A clock-only update can invalidate that evidence.
     if (before.events.some(event => event.category === "FOOTBALL" && !event.isLive && clocks.some(([oldClock, newClock]) =>
       (event.startAtUtcMs > oldClock + 300_000) !== (event.startAtUtcMs > newClock + 300_000)))) return null;
-    const oldOffers = nativeOffers(before), newOffers = nativeOffers(after);
+    // The full roster guards above remain global. Price validation only needs
+    // offers the worker actually projected, not hundreds of thousands of
+    // unmatched native markets. Identical snapshots can share their index.
+    const oldOffers = nativeOffers(before, needed), newOffers = before === after ? oldOffers : nativeOffers(after, needed);
     for (const [key, oldOffer] of oldOffers) {
       const newOffer = newOffers.get(key);
-      let valid = oldOffer != null && newOffer != null &&
-        JSON.stringify(oldOffer.market) === JSON.stringify(newOffer.market) &&
+      candidates.set(key, candidates.has(key) || oldOffer == null || newOffer == null ? null
+        : { before: oldOffer, after: newOffer });
+    }
+  }
+  return cell => {
+    const market = cell.sourceMarket ?? cell.market;
+    const key = marketIdentity(market);
+    if (!unchanged.has(key)) {
+      const candidate = candidates.get(key);
+      const oldOffer = candidate?.before, newOffer = candidate?.after;
+      let valid = oldOffer !== undefined && newOffer !== undefined &&
+        (oldOffer.market === newOffer.market || JSON.stringify(oldOffer.market) === JSON.stringify(newOffer.market)) &&
         oldOffer.quotes.length === newOffer.quotes.length && newOffer.quotes.length > 0 &&
         new Set(newOffer.quotes.map(quote => quote.sequence)).size === 1 &&
         newOffer.quotes.every(quote => quote.sequence !== null);
-      if (valid && oldOffer != null && newOffer != null) {
-        const bySelection = new Map(newOffer.quotes.map(quote => [quote.providerSelectionId, quote]));
+      let bySelection: ReadonlyMap<string, NativeQuote> | undefined;
+      if (valid && oldOffer !== undefined && newOffer !== undefined) {
+        bySelection = new Map(newOffer.quotes.map(quote => [quote.providerSelectionId, quote]));
         valid = bySelection.size === newOffer.quotes.length &&
           new Set(oldOffer.quotes.map(quote => quote.providerSelectionId)).size === oldOffer.quotes.length &&
           oldOffer.quotes.every(quote => {
-            const next = bySelection.get(quote.providerSelectionId);
-            return next !== undefined && quoteTerms(quote) === quoteTerms(next) &&
+            const next = bySelection!.get(quote.providerSelectionId);
+            return next !== undefined && (quote === next || quoteTerms(quote) === quoteTerms(next)) &&
               next.receivedMonotonicMs >= quote.receivedMonotonicMs &&
               next.sequence !== null && quote.sequence !== null && next.sequence >= quote.sequence &&
               (quote.sourceTimestampMs === null || (next.sourceTimestampMs !== null && next.sourceTimestampMs >= quote.sourceTimestampMs));
           });
       }
-      unchanged.set(key, unchanged.has(key) || !valid ? null : { before: oldOffer!,
-        current: new Map(newOffer!.quotes.map(quote => [quote.providerSelectionId, quote])) });
+      unchanged.set(key, !valid ? null : { before: oldOffer!, current: bySelection! });
     }
-  }
-  return cell => {
-    const market = cell.sourceMarket ?? cell.market;
-    const offer = unchanged.get(marketIdentity(market));
-    if (offer == null || JSON.stringify(market) !== JSON.stringify(offer.before.market)) return null;
+    const offer = unchanged.get(key);
+    if (offer == null || (market !== offer.before.market && JSON.stringify(market) !== JSON.stringify(offer.before.market))) return null;
     // Display fallback can refer to an older native quote even in this worker
     // snapshot. Validate each original selection, never oriented synthetic IDs.
     if (!(cell.sourceQuotes ?? cell.quotes).every(quote => offer.before.quotes.some(original =>
@@ -344,15 +378,16 @@ export class ComparisonWorkerClient {
       const snapshots = this.#inFlightCatalogs!;
       const isLatest = event.data.generation === this.#generation;
       if (Array.isArray(event.data.competitionLinks)) this.#storeLinks(event.data.competitionLinks);
-      const validate = isLatest || this.#inFlightInvalidated ? null : intermediateValidator(snapshots, this.#catalogs, this.#stale);
+      const validate = isLatest || this.#inFlightInvalidated ? null
+        : intermediateValidator(snapshots, this.#catalogs, this.#stale, projectedNativeOffers(event.data));
       if (isLatest || validate !== null) {
         const project = (item: ComparisonProjection): ComparisonEvent => {
           const hydrated = hydrate(item, validate === null ? snapshots : this.#catalogs);
           return validate === null ? hydrated : validatedProjection(hydrated, validate);
         };
-        this.#onResult({ generation: event.data.generation, isLatest,
-          displayEvents: event.data.displayEvents.map(project),
-          freshEvents: event.data.freshEvents.map(project) });
+        const displayEvents = event.data.displayEvents.map(project);
+        this.#onResult({ generation: event.data.generation, isLatest, displayEvents,
+          freshEvents: event.data.freshEvents === event.data.displayEvents ? displayEvents : event.data.freshEvents.map(project) });
       }
       this.#inFlightGeneration = null;
       this.#inFlightCatalogs = null;

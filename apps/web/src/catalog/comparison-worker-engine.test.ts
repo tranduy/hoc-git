@@ -24,6 +24,43 @@ function catalog(provider: "SABA" | "SBOBET", accountId: string, odds: readonly 
 }
 
 describe("ComparisonWorkerEngine", () => {
+  it("does not touch prior markets or quotes when every current offer is already usable", () => {
+    const engine = new ComparisonWorkerEngine();
+    const initial = catalog("SABA", "saba-account", ["2.20", "1.80"]);
+    let priorReads = 0;
+    const counted = { ...initial,
+      get markets() { priorReads += 1; return initial.markets; },
+      get quotes() { priorReads += 1; return initial.quotes; } };
+    engine.apply({ type: "RESET", generation: 1, catalogs: [counted], staleAccountIds: [] });
+    priorReads = 0;
+    const current = catalog("SABA", "saba-account", ["2.30", "1.70"]);
+    const output = engine.apply({ type: "UPSERT", generation: 2, catalog: current, stale: false });
+    expect(priorReads).toBe(0);
+    // Identity is retained, so the engine does not build a second comparison
+    // from derived display arrays when there was nothing to repair.
+    expect(output.displayEvents).toBe(output.freshEvents);
+    expect(output.displayEvents[0]!.observedRows[0]!.cells[0]!.sourceMarket).toBe(current.markets[0]);
+    expect(output.displayEvents[0]!.observedRows[0]!.cells[0]!.sourceQuotes).toEqual(current.quotes);
+  });
+
+  it("preserves current order and withdrawals while falling back only the incomplete native market", () => {
+    const engine = new ComparisonWorkerEngine(), base = catalog("SABA", "saba-account", ["2.20", "1.80"]);
+    const extra = (id: string) => ({ ...base.markets[0]!, providerMarketId: id });
+    const extraQuotes = (id: string) => base.quotes.map(quote => ({ ...quote, providerMarketId: id,
+      providerSelectionId: `${id}-${quote.selection}` }));
+    const previous = { ...base, markets: [extra("removed"), extra("fallback"), base.markets[0]!],
+      quotes: [...extraQuotes("removed"), ...extraQuotes("fallback"), ...base.quotes] };
+    engine.apply({ type: "RESET", generation: 1, catalogs: [previous], staleAccountIds: [] });
+    const current = { ...base, markets: [extra("first"), extra("fallback"), extra("unrecoverable")],
+      quotes: [...extraQuotes("first"), ...extraQuotes("fallback").map((quote, index) => ({ ...quote, sequence: index + 1 }))] };
+    const output = engine.apply({ type: "UPSERT", generation: 2, catalog: current, stale: false });
+    const cells = output.displayEvents[0]!.observedRows[0]!.cells;
+    expect(cells.map(cell => cell.market.providerMarketId)).toEqual(["first", "fallback"]);
+    expect(cells[0]!.sourceMarket).toBe(current.markets[0]);
+    expect(cells[1]!.sourceMarket).toBe(previous.markets[1]);
+    expect(cells[1]!.sourceQuotes?.map(quote => quote.sequence)).toEqual([1, 1]);
+    expect(output.freshEvents[0]!.observedRows[0]!.cells.map(cell => cell.market.providerMarketId)).toEqual(["first"]);
+  });
   it("keeps complete markets when a provider reuses the same market id across events", () => {
     const withSecondEvent = (base: LiveCatalogResponse): LiveCatalogResponse => {
       const secondEventId = `${base.accountId}-second-event`;

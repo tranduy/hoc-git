@@ -12,6 +12,7 @@ import {
   type ProviderQuote
   , type NativeMarketObservation
 } from "@tool-chenh/contracts";
+import { readCatalogJsonStream } from "./catalog-json-stream.js";
 
 export interface NativeCoverageByEvent {
   readonly providerEventId: string;
@@ -92,15 +93,43 @@ function parseNativeCoverage(value: unknown): readonly NativeCoverageByEvent[] |
   });
 }
 
-export function parseLiveCatalogResponse(value: unknown, expectedAccountId: string): LiveCatalogResponse {
+function validateCatalogArray<T>(value: unknown, schema: {
+  safeParse(value: unknown): { success: true; data: T } | { success: false };
+}, consumeInput: boolean): { success: true; data: T[] } | { success: false } {
+  if (!Array.isArray(value)) return { success: false };
+  const result: T[] = consumeInput ? value : [];
+  for (let index = 0; index < value.length; index += 1) {
+    const parsed = schema.safeParse(value[index]);
+    if (!parsed.success) return { success: false };
+    // The HTTP reader owns this JSON body. Replacing a validated row releases
+    // its raw object before the next row; a million-row response must not keep
+    // the raw graph plus a second fully parsed graph alive simultaneously.
+    result[index] = parsed.data;
+  }
+  return { success: true, data: result };
+}
+
+export function parseLiveCatalogResponse(value: unknown, expectedAccountId: string,
+  options: { readonly consumeInput?: boolean } = {}): LiveCatalogResponse {
+  return validateCatalogEnvelope(value, expectedAccountId,
+    (array, schema) => validateCatalogArray(array, schema, options.consumeInput === true));
+}
+
+type CatalogArrayValidator = <T>(value: unknown, schema: {
+  safeParse(value: unknown): { success: true; data: T } | { success: false };
+}) => { success: true; data: T[] } | { success: false };
+
+function validateCatalogEnvelope(value: unknown, expectedAccountId: string,
+  validateArray: CatalogArrayValidator): LiveCatalogResponse {
   if (typeof value !== "object" || value === null) throw new Error("Invalid live catalog response");
   const record = value as Record<string, unknown>;
   const nativeCoverageByEvent = parseNativeCoverage(record.nativeCoverageByEvent);
-  const events = ProviderEventSchema.array().safeParse(record.events);
-  const markets = ProviderMarketSchema.array().safeParse(record.markets);
-  const quotes = ProviderQuoteSchema.array().safeParse(record.quotes);
-  const nativeMarketObservations = NativeMarketObservationSchema.array().optional()
-    .safeParse(record.nativeMarketObservations);
+  const events = validateArray(record.events, ProviderEventSchema);
+  const markets = validateArray(record.markets, ProviderMarketSchema);
+  const quotes = validateArray(record.quotes, ProviderQuoteSchema);
+  const nativeMarketObservations = record.nativeMarketObservations === undefined
+    ? { success: true as const, data: undefined }
+    : validateArray(record.nativeMarketObservations, NativeMarketObservationSchema);
   const category = CategorySchema.safeParse(record.category);
   if (
     record.dataMode !== "LIVE" || typeof record.accountId !== "string" || record.accountId !== expectedAccountId ||
@@ -128,6 +157,28 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
     }),
     ...(nativeCoverageByEvent === undefined ? {} : { nativeCoverageByEvent })
   };
+}
+
+/** Network bodies are decoded and strictly validated one array item at a time. */
+export async function readLiveCatalogResponse(response: Pick<Response, "body" | "json">,
+  expectedAccountId: string): Promise<LiveCatalogResponse> {
+  if (response.body === null || response.body === undefined) {
+    return parseLiveCatalogResponse(await response.json(), expectedAccountId, { consumeInput: true });
+  }
+  const body = await readCatalogJsonStream(response.body, (key, item) => {
+    const schema = key === "events" ? ProviderEventSchema : key === "markets" ? ProviderMarketSchema
+      : key === "quotes" ? ProviderQuoteSchema : key === "nativeMarketObservations" ? NativeMarketObservationSchema : null;
+    if (schema === null) return item;
+    const parsed = schema.safeParse(item);
+    if (!parsed.success) throw new Error("Invalid live catalog response");
+    return parsed.data;
+  });
+  // Only the private stream reader reaches this path: each recognized array
+  // item has already passed its exact row schema. Envelope/cross-provider and
+  // aggregate-count checks still run without cloning all those rows again.
+  return validateCatalogEnvelope(body, expectedAccountId,
+    <T>(array: unknown) => Array.isArray(array)
+      ? { success: true, data: array as T[] } : { success: false });
 }
 
 export class CatalogApi implements CatalogApiLike {
@@ -185,14 +236,13 @@ export class CatalogApi implements CatalogApiLike {
         try { errorBody = await response.json(); } catch { /* fixed safe fallback below */ }
         throw new CatalogReadError(catalogErrorCode(errorBody), response.status);
       }
-      let value: unknown;
+      let catalog: LiveCatalogResponse;
       try {
-        value = await response.json();
+        catalog = await readLiveCatalogResponse(response, accountId);
       } catch (error) {
         if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
         throw new Error("Invalid live catalog response");
       }
-      const catalog = parseLiveCatalogResponse(value, accountId);
       const etag = response.headers.get("etag");
       const revisionHeader = response.headers.get("x-catalog-revision");
       const revision = revisionHeader?.trim() || etag?.replace(/^"|"$/gu, "") ||

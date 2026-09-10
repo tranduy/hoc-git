@@ -94,20 +94,17 @@ function marketIdentity(item: { readonly providerEventId: string; readonly provi
 
 function completeDisplayCatalog(catalog: LiveCatalogResponse,
   previous?: LiveCatalogResponse): LiveCatalogResponse {
-  const quotesByMarket = new Map<string, typeof catalog.quotes>();
+  type Market = (typeof catalog.markets)[number];
+  type Quote = (typeof catalog.quotes)[number];
+  const quotesByMarket = new Map<string, Quote[]>();
   for (const quote of catalog.quotes) {
     const key = marketIdentity(quote);
-    quotesByMarket.set(key, [...(quotesByMarket.get(key) ?? []), quote]);
+    const values = quotesByMarket.get(key) ?? [];
+    values.push(quote);
+    quotesByMarket.set(key, values);
   }
-  const previousMarkets = new Map(previous?.markets.map((market) => [marketIdentity(market), market]) ?? []);
-  const previousQuotes = new Map<string, typeof catalog.quotes>();
-  for (const quote of previous?.quotes ?? []) {
-    const key = marketIdentity(quote);
-    previousQuotes.set(key, [...(previousQuotes.get(key) ?? []), quote]);
-  }
-  const markets: Array<(typeof catalog.markets)[number]> = [];
-  const quotes: Array<(typeof catalog.quotes)[number]> = [];
-  let changed = false;
+  const candidates = new Set<Market>();
+  const candidateIds = new Map<string, Set<string>>();
   for (const market of catalog.markets) {
     const key = marketIdentity(market);
     const currentQuotes = quotesByMarket.get(key) ?? [];
@@ -119,7 +116,33 @@ function completeDisplayCatalog(catalog: LiveCatalogResponse,
     const unpairablePlayer = market.marketType.startsWith("PLAYER_") &&
       (playerComparisonKey(market.player) === null || currentQuotes.some(quote => !sameNativePlayer(market.player, quote.player)));
     if (market.status !== "OPEN" || expected === null || unpairablePlayer ||
-      isAvailableTwoWayTicket({ provider: catalog.provider, market, quotes: currentQuotes })) {
+      isAvailableTwoWayTicket({ provider: catalog.provider, market, quotes: currentQuotes })) continue;
+    candidates.add(market);
+    const ids = candidateIds.get(market.providerEventId) ?? new Set<string>();
+    ids.add(market.providerMarketId); candidateIds.set(market.providerEventId, ids);
+  }
+  // The common case needs neither a prior-catalog index nor replacement arrays.
+  if (candidates.size === 0) return catalog;
+  const isCandidate = (item: Market | Quote): boolean =>
+    candidateIds.get(item.providerEventId)?.has(item.providerMarketId) === true;
+  const previousMarkets = new Map<string, Market>();
+  for (const market of previous?.markets ?? []) {
+    if (isCandidate(market)) previousMarkets.set(marketIdentity(market), market);
+  }
+  const previousQuotes = new Map<string, Quote[]>();
+  for (const quote of previous?.quotes ?? []) {
+    if (!isCandidate(quote)) continue;
+    const key = marketIdentity(quote);
+    const values = previousQuotes.get(key) ?? [];
+    values.push(quote);
+    previousQuotes.set(key, values);
+  }
+  const markets: Market[] = [];
+  const quotes: Quote[] = [];
+  for (const market of catalog.markets) {
+    const key = marketIdentity(market);
+    const currentQuotes = quotesByMarket.get(key) ?? [];
+    if (!candidates.has(market)) {
       markets.push(market);
       quotes.push(...currentQuotes);
       continue;
@@ -137,7 +160,6 @@ function completeDisplayCatalog(catalog: LiveCatalogResponse,
       markets.push(previousMarket);
       quotes.push(...lastCompleteQuotes);
     }
-    changed = true;
   }
-  return changed ? { ...catalog, markets, quotes } : catalog;
+  return { ...catalog, markets, quotes };
 }
