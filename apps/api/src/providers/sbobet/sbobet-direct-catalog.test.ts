@@ -76,14 +76,16 @@ describe("observed SBOBET three-way and unmapped outcome retention", () => {
       [{ "8": 5717357, "7": { [group]: [tokens.join(" ")] } }])[0]?.markets[0]?.selections).toHaveLength(2);
   });
 
-  it("keeps observed correct-score raw identity, score label and format without binary equivalence", () => {
+  it("normalizes an observed exact score while preserving raw identity and format", () => {
     const body = { "8": 5717357, "7": { "10": ["0:4 11.0*57291040100000004h 184617179101004 0 2 0 0 0"] } };
     expect(extractSbobetNativeMarketObservations(body, observedFallback, 1)[0]).toMatchObject({ nativeType: "10",
-      nativeLabel: "CORRECT_SCORE", nativeScope: "FULL_TIME", disposition: "UNMAPPED",
+      nativeLabel: "CORRECT_SCORE", nativeScope: "FULL_TIME", disposition: "NORMALIZED",
       nativeRow: body["7"]["10"][0],
-      reason: "CANONICAL_EQUIVALENCE_NOT_PROVEN", nativeSelections: [{ selectionId: "57291040100000004h",
+      reason: "CANONICAL_MARKET_MAPPED", nativeSelections: [{ selectionId: "57291040100000004h",
         outcomeId: "h", line: "0:4", price: "11.0", rawFormat: "DECIMAL" }] });
-    expect(normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(body, observedFallback), observedOptions).markets).toEqual([]);
+    const result = normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(body, observedFallback), observedOptions);
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_CORRECT_SCORE" })]);
+    expect(result.quotes[0]?.selection).toBe("SCORE_0_4");
   });
 });
 
@@ -250,8 +252,9 @@ describe("observed More binary formats", () => {
     const bootstrap = extractSbobetDirectCatalogRecords(observedContainers, observedFallback);
     const more = { "8": 5717357, "7": Object.fromEntries(observedMoreRows.map(({ group, row }) => [group, [row]])) };
     const result = normalizeSbobetCatalog(mergeSbobetSocketCatalogRecords(bootstrap, [more]), observedOptions);
-    expect(result.markets).toHaveLength(35);
-    expect(result.quotes).toHaveLength(72);
+    const before = normalizeSbobetCatalog(bootstrap, observedOptions);
+    expect(result.markets).toHaveLength(before.markets.length + 9);
+    expect(result.quotes).toHaveLength(before.quotes.length + 18);
     for (const quote of normalizeSbobetCatalog(bootstrap, observedOptions).quotes) expect(result.quotes).toContainEqual(quote);
   });
 
@@ -301,13 +304,15 @@ describe("observed More binary formats", () => {
     expect(extractSbobetDirectCatalogRecords({ "8": 5717357, "7": { [group]: [row] } }, observedFallback)[0]?.markets).toEqual([]);
   });
 
-  it("keeps draw-no-bet explicitly excluded for refund settlement", () => {
+  it("retains draw-no-bet with its explicit refund settlement", () => {
     const body = { "8": 5717357, "7": { "16": [
       "1.17*57173570160000000h 4.33*57173570160000000a 184852809161000 0 2 0 0 0"
     ] } };
     expect(extractSbobetNativeMarketObservations(body, observedFallback, 123)).toEqual([
-      expect.objectContaining({ nativeType: "16", disposition: "EXCLUDED", reason: "PUSH_OR_REFUND_SETTLEMENT" })
+      expect.objectContaining({ nativeType: "16", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" })
     ]);
+    expect(normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(body, observedFallback), observedOptions).markets[0])
+      .toMatchObject({ marketType: "FT_DRAW_NO_BET", settlementProfile: "football-draw-no-bet-regulation" });
   });
 });
 
@@ -324,8 +329,8 @@ describe("observed same-event goal and corner containers", () => {
     const records = extractSbobetDirectCatalogRecords(body, bootstrap);
     const result = normalizeSbobetCatalog(records, observedOptions);
     expect(records).toHaveLength(1);
-    expect(result.markets).toHaveLength(26);
-    expect(result.quotes).toHaveLength(54);
+    expect(result.markets.length).toBeGreaterThanOrEqual(26);
+    expect(result.quotes.length).toBeGreaterThanOrEqual(54);
     expect(result.markets.map((market) => market.providerMarketId).sort()).toEqual(
       independent.flatMap((catalog) => catalog.markets.map((market) => market.providerMarketId)).sort());
     expect(result.quotes).toHaveLength(independent.reduce((count, catalog) => count + catalog.quotes.length, 0));

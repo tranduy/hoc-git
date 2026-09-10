@@ -138,7 +138,7 @@ describe("KsportWsCatalogAdapter", () => {
       expect.objectContaining({ providerMarketId: "778899030001", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" }),
       expect.objectContaining({ providerMarketId: "778899040001", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" }),
       expect.objectContaining({ nativeType: "777", disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED" }),
-      expect.objectContaining({ nativeType: "17", disposition: "EXCLUDED", reason: "THREE_WAY_OUTCOME_DOMAIN" })
+      expect.objectContaining({ nativeType: "17", disposition: "EXCLUDED", reason: "INVALID_CATEGORICAL_SHAPE" })
     ]));
 
     const delta = adapter.decode(receiptEnvelope({ ...identity, "7": { "3": goalSecond["7"]["3"] } },

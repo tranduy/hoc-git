@@ -1,7 +1,8 @@
 import { isSupportedFootballTwoWayLine, normalizeSbobetCatalog,
   type SbobetCatalogInputRecord, type SbobetCatalogMarket,
   type SbobetCatalogSelection } from "@tool-chenh/adapters";
-import { footballBinaryMarketSpec, footballResultMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, footballResultMarketSpec, footballCategoricalMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
+import { parseSbobetCategoricalMarket, sbobetCategoricalLayouts, sbobetCategoricalUnknownReason } from "./sbobet-categorical-market.js";
 
 export interface SbobetMarketGroupShape {
   readonly groupKey: string;
@@ -248,6 +249,7 @@ function nativeMarketIdIndex(layout: SbobetNativeMarketLayout): number {
 }
 
 function market(value: unknown, groupKey: string): SbobetCatalogMarket | null {
+  if (sbobetCategoricalLayouts[groupKey] !== undefined) return parseSbobetCategoricalMarket(value, groupKey);
   const descriptor = sbobetMarketByGroup[groupKey];
   if (typeof value !== "string" || descriptor === undefined) return null;
   const { type, layout, format } = descriptor;
@@ -335,10 +337,13 @@ export function extractSbobetDirectCatalogRecords(
       const validContainer = nativeGroups.every(([, rows]) => Array.isArray(rows));
       let combinable = nativeGroups.length > 0 && nativeGroups.every(([, rows]) => Array.isArray(rows) && rows.length > 0);
       const parsed = nativeGroups.flatMap(([key, rows]) => {
-        if (sbobetMarketByGroup[key] === undefined || !Array.isArray(rows)) return [];
+        if ((sbobetMarketByGroup[key] === undefined && sbobetCategoricalLayouts[key] === undefined) || !Array.isArray(rows)) return [];
         return rows.flatMap((row) => {
           const candidate = market(row, key);
-          if (candidate === null) combinable = false;
+          // Newly supported categorical rows were previously inventory-only.
+          // An unavailable/unknown categorical outcome must not discard valid
+          // prices in a disjoint component with the same explicit event identity.
+          if (candidate === null && sbobetCategoricalLayouts[key] === undefined) combinable = false;
           return candidate === null ? [] : [candidate];
         });
       });
@@ -416,16 +421,16 @@ export function extractSbobetNativeMarketObservations(
           continue;
         }
         const descriptor = sbobetMarketByGroup[groupKey];
-        const mappedType = descriptor?.type ?? null;
+        const categorical = sbobetCategoricalLayouts[groupKey];
+        const idIndex = descriptor === undefined ? categorical?.idIndex : nativeMarketIdIndex(descriptor);
+        const mappedType = descriptor?.type ?? categorical?.type ?? null;
         for (const [rowIndex, rawRow] of rows.entries()) {
           const parsed = market(rawRow, groupKey);
           const rowText = typeof rawRow === "string" ? rawRow : "";
           const tokens = rowText.trim().split(/\s+/u);
           // Unknown groups have no proven market-ID position. Their opaque
           // inventory identity must never collide with a retained mapped row.
-          const nativeMarketId = descriptor === undefined
-            ? undefined
-            : tokens[nativeMarketIdIndex(descriptor)];
+          const nativeMarketId = idIndex === undefined ? undefined : tokens[idIndex];
           const fallbackMarketId = nativeMarketId !== undefined && /^\d{4,30}$/u.test(nativeMarketId)
             ? nativeMarketId : `${eventId}:native:${groupKey}:${rowIndex}`;
           const selectionSides = [...rowText.matchAll(/\*\d{1,40}([had])/gu)].map((match) => match[1]!.toUpperCase());
@@ -438,27 +443,29 @@ export function extractSbobetNativeMarketObservations(
           const excludedReason = typeof rawRow !== "string" ? "INVALID_NATIVE_ROW_SHAPE"
             : parsed !== null && !validContainer ? "INVALID_NATIVE_GROUP_SHAPE"
             : parsed !== null && !normalized ? "NORMALIZATION_REJECTED"
+            : categorical !== undefined && parsed === null ? sbobetCategoricalUnknownReason(groupKey, tokens[0]!) ?? "INVALID_CATEGORICAL_SHAPE"
             : sbobetThreeWayGroups.has(groupKey) ? "THREE_WAY_OUTCOME_DOMAIN"
             : sbobetRefundGroups.has(groupKey) ? "PUSH_OR_REFUND_SETTLEMENT"
             : inventory !== undefined ? "CANONICAL_EQUIVALENCE_NOT_PROVEN" : null;
           observations.push({ provider: "SBOBET", category: "FOOTBALL", providerEventId: eventId,
             providerMarketId: parsed?.marketId ?? fallbackMarketId, nativeType: groupKey,
-            ...(descriptor !== undefined && ["0", "1"].includes(tokens[nativeMarketIdIndex(descriptor) + 1] ?? "")
-              ? { status: tokens[nativeMarketIdIndex(descriptor) + 1] === "1" ? "SUSPENDED" as const : "OPEN" as const } : {}),
+            ...(idIndex !== undefined && ["0", "1"].includes(tokens[idIndex + 1] ?? "")
+              ? { status: tokens[idIndex + 1] === "1" ? "SUSPENDED" as const : "OPEN" as const } : {}),
             nativeLabel: inventory?.label ?? mappedType,
             ...(typeof rawRow === "string" && rawRow.length <= 4096 ? { nativeRow: rawRow } : {}),
-            nativeScope: spec?.scope ?? (mappedType === null ? null : footballResultMarketSpec(mappedType)?.scope) ?? inventory?.scope ?? null,
+            nativeScope: spec?.scope ?? (mappedType === null ? null : footballResultMarketSpec(mappedType)?.scope ?? footballCategoricalMarketSpec(mappedType)?.scope) ?? inventory?.scope ?? null,
             outcomeLabels: selectionSides,
             nativeSelections: tokens.flatMap((token, index) => {
               const match = pairPattern.exec(token);
               if (match === null) return [];
               const rawLine = descriptor?.layout === "TOTAL" || descriptor?.layout === "HANDICAP" || descriptor?.layout === "LINE_YES_NO"
-                || (inventory !== undefined && !tokens[0]!.includes("*")) ? tokens[0]! : null;
+                || ((inventory !== undefined || categorical !== undefined) && !tokens[0]!.includes("*")) ? tokens[0]! : null;
               return [{ selectionId: match[2]!, outcomeId: match[2]!.slice(-1), line: rawLine, price: match[1]!,
-                ...(descriptor !== undefined ? { rawFormat: descriptor.format } : inventory !== undefined ? { rawFormat: "DECIMAL" as const } : {}) }];
+                ...(descriptor !== undefined ? { rawFormat: descriptor.format } : inventory !== undefined || categorical !== undefined ? { rawFormat: "DECIMAL" as const } : {}) }];
             }),
             observedAtMs, disposition: normalized ? "NORMALIZED"
-              : excludedReason === "CANONICAL_EQUIVALENCE_NOT_PROVEN" || excludedReason === "THREE_WAY_OUTCOME_DOMAIN" ? "UNMAPPED"
+              : excludedReason === "CANONICAL_EQUIVALENCE_NOT_PROVEN" || excludedReason === "THREE_WAY_OUTCOME_DOMAIN" ||
+                excludedReason === "OTHER_SCORE_DOMAIN_REQUIRED" || excludedReason === "NATIVE_OUTCOME_UNMAPPED" ? "UNMAPPED"
               : excludedReason !== null || mappedType !== null ? "EXCLUDED" : "UNMAPPED",
             reason: normalized ? "CANONICAL_MARKET_MAPPED" : excludedReason ??
               (mappedType !== null ? "INVALID_TWO_WAY_SHAPE" : "NATIVE_TYPE_UNMAPPED") });
@@ -487,7 +494,7 @@ export function mergeSbobetSocketCatalogRecords(
       const incomingIds = new Set(record.markets.map((candidate) => candidate.marketId));
       const invalidatedIds = new Set(observations.filter((observation) =>
         observation.providerEventId === record.eventId &&
-        sbobetMarketByGroup[observation.nativeType] !== undefined &&
+        (sbobetMarketByGroup[observation.nativeType] !== undefined || sbobetCategoricalLayouts[observation.nativeType] !== undefined) &&
         /^\d{4,30}$/u.test(observation.providerMarketId) && !incomingIds.has(observation.providerMarketId))
         .map((observation) => observation.providerMarketId));
       records.set(record.eventId, { ...record,

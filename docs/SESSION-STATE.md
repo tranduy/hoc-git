@@ -1,6 +1,38 @@
 # Trạng thái làm việc — 2026-09-10
 
-## AP live recovery and actual pairing — 2026-09-10 latest checkpoint
+## SBO categorical normalization — 2026-09-10 latest checkpoint
+
+User requested continuation for SBO. Added 22 proven native market groups using
+SBO public outcome tables and frozen real rows. Correct scores, goal/corner
+ranges, half/full, result+BTTS/total, DC+BTTS, highest half, DNB and corner result
+now use existing contracts. Native 9:9 is OTHER, not literal score 9–9.
+Fixed categorical withdrawal on unavailable price and preserved valid disjoint
+goal/corner components when an unsupported categorical row occurs.
+
+Frozen 26,799-row SBO snapshot: 10,124→26,314 canonical; 16,353→365 unmapped;
+322→120 excluded. Existing markets/quotes and all native rows preserved.
+Same six-book inputs: SBO opposing source pairs 25,780→26,214 (+434; +287 AP,
++147 BTI), zero old pairs lost. Structural only; IM peer stale, replay clocks0.
+Remaining:324 OTHER-score rows and41 rows without a captured canonical event;
+120 existing eligibility rejections untouched. Do not claim100% or live profit.
+
+Verification:252 SBO/provider+HTTP/socket tests,39 shared normalizer tests,
+137 matching regressions; API build passed. Report and evidence:
+`docs/sbobet-categorical-normalization-2026-09-10.md`,
+`.run/sbo-normalization-2026-09-10/{before-result,after-r2-result}.json`.
+
+Deployed APIinstance5bb8d2ef-a101-46f1-b746-9c8b0dd9a493,
+APIc7cb19c19babe930219a70b4e88da2c0c13cce5be82aee992907e81d65cc77b0;
+4096MiBheap, deployment lease released. Webassetindex-DD7xKG6J.js unchanged.
+09:15local FRESH new SBO receipt:12,743canonical/44unmapped/127excluded,
+all22newtypes present. More detail still collecting after handoff; do not compare
+this smaller changing live snapshot with the fixed benchmark as a code delta.
+Local4311 and publiclive.babiesbo.uk both HTTP200.
+
+Two IM extension source/test files changed externally during this turn; these
+are not part of the SBO change and must not be staged with it.
+
+## AP live recovery and actual pairing — 2026-09-10 preceding checkpoint
 
 User challenged repeated unproven completion claims. Current work restored actual
 AP ingress and proved AP×BTI pairing on the local UI; do not claim every feed or
