@@ -30,10 +30,12 @@ export function normalizeImOdds(value: unknown): number | null {
 
 interface ImFootballMarketSemantics {
   readonly marketType: MarketType;
-  readonly outcomes: ReadonlyMap<number, FootballBinaryOutcome | FootballResultSelection>;
+  readonly outcomes: ReadonlyMap<number, string>;
   readonly linePolicy: "LINE" | "NONE";
   readonly handicap: boolean;
   readonly specifierTotal?: boolean;
+  readonly categorical?: boolean;
+  readonly retainedOnlyOutcomes?: ReadonlySet<number>;
 }
 
 /** IM publishes mixed formats per selection even when the request asks for one format. */
@@ -97,6 +99,22 @@ function imMarketSemantics(bti: number, gp: number): ImFootballMarketSemantics |
   ImFootballMarketSemantics => ({ marketType, outcomes, linePolicy: "LINE", handicap });
   const noLine = (marketType: MarketType, outcomes: ReadonlyMap<number, FootballBinaryOutcome>):
   ImFootballMarketSemantics => ({ marketType, outcomes, linePolicy: "NONE", handicap: false });
+  const categorical = (marketType: MarketType | null, outcomes: ReadonlyMap<number, string>): ImFootballMarketSemantics | null =>
+    marketType === null ? null : { marketType, outcomes, linePolicy: "NONE", handicap: false, categorical: true };
+  // Archived IM public selection enum and GetEBI market names prove these domains.
+  // Exact score tails (H5UP/A5UP/AOS) stay native-only; they are not a single score.
+  if (bti === 6) {
+    const result = categorical(periodMarket(gp, "FT_CORRECT_SCORE", "FH_CORRECT_SCORE", "SH_CORRECT_SCORE"),
+      new Map(Array.from({ length: 25 }, (_, index) => [12 + index, `SCORE_${Math.floor(index / 5)}_${index % 5}`])));
+    return result === null ? null : { ...result, retainedOnlyOutcomes: new Set([37, 38, 439]) };
+  }
+  if (bti === 7) return categorical(periodMarket(gp, "FT_GOAL_RANGE", "FH_GOAL_RANGE", "SH_GOAL_RANGE"),
+    new Map([[39, "RANGE_0_1"], [40, "RANGE_2_3"], [41, "RANGE_4_6"], [42, "RANGE_7_PLUS"]]));
+  if (bti === 9) return categorical(gp === 1 ? "FT_HALF_FULL_RESULT" : null,
+    new Map([[46, "HOME_HOME"], [47, "HOME_DRAW"], [48, "HOME_AWAY"], [49, "DRAW_HOME"],
+      [50, "DRAW_DRAW"], [51, "DRAW_AWAY"], [52, "AWAY_HOME"], [53, "AWAY_DRAW"], [54, "AWAY_AWAY"]]));
+  if (bti === 313) return categorical(periodMarket(gp, "CORNER_FT_1X2", "CORNER_FH_1X2"),
+    new Map([[5, "HOME"], [6, "AWAY"], [7, "DRAW"]]));
   if (bti === 1) {
     const marketType = periodMarket(gp, "FT_AH", "FH_AH", "SH_AH");
     return marketType === null ? null : line(marketType, handicapOutcomes, true);
@@ -218,11 +236,26 @@ function market(value: unknown): SbobetCatalogMarket | null {
   const item = record(value);
   const semantics = item === null ? null : imMarketSemantics(Number(item.bti), Number(item.gp));
   if (item === null || semantics === null || !Array.isArray(item.ws) ||
-    item.ws.length === 0 || item.ws.length > semantics.outcomes.size) return null;
+    item.ws.length === 0 || item.ws.length > semantics.outcomes.size + (semantics.retainedOnlyOutcomes?.size ?? 0)) return null;
   const marketId = identifier(item.mi);
   // Public IM L0 mapper uses market.il as isLocked. Missing legacy projection
   // metadata is not evidence that an offer is open.
-  const selections = item.ws.map((value) => selection(value, semantics, item.il !== false));
+  if (semantics.categorical) {
+    const ids = item.ws.map(value => identifier(record(value)?.wsi));
+    const outcomes = item.ws.map(value => Number(record(value)?.si));
+    if (outcomes.some(outcome => !semantics.outcomes.has(outcome) && !semantics.retainedOnlyOutcomes?.has(outcome)) ||
+      ids.some(id => id === null) || new Set(ids).size !== ids.length ||
+      new Set(outcomes).size !== outcomes.length) return null;
+  }
+  const supported = item.ws.filter(value => {
+    const candidate = record(value);
+    if (semantics.retainedOnlyOutcomes?.has(Number(candidate?.si))) return false;
+    // Native market replacements can close one categorical selection independently.
+    // Preserve other priced selections; malformed prices still reject the shape.
+    return !(semantics.categorical && (candidate?.o === undefined || candidate.o === null || candidate.o === 0));
+  });
+  const selections = supported.map((value) => selection(value, semantics, item.il !== false));
+  if (selections.length === 0) return null;
   if (marketId === null || selections.some((item) => item === null)) return null;
   const exact = selections as SbobetCatalogSelection[];
   if (new Set(exact.map((item) => item.selection)).size !== exact.length ||
@@ -230,9 +263,11 @@ function market(value: unknown): SbobetCatalogMarket | null {
   if (!consistentTotalLines(item.ws, semantics)) return null;
   const signedSingleHandicap = semantics.handicap && exact.length === 1;
   if (signedSingleHandicap && !/^(?:[+-]\d|0(?:\.0+)?$)/u.test(exact[0]?.lineText ?? "")) return null;
+  // Zero has no sign; both native zero legs still prove the same handicap.
+  const zeroHandicap = semantics.handicap && exact.every(selected => /^0(?:\.0+)?$/u.test(selected.lineText ?? ""));
   return { marketId, marketType: semantics.marketType,
     lineText: semantics.handicap || semantics.linePolicy === "NONE" ? null : exact[0]?.lineText ?? null,
-    ...(signedSingleHandicap ? { handicapLineFormat: "SIGNED" as const } : {}),
+    ...(signedSingleHandicap || zeroHandicap ? { handicapLineFormat: "SIGNED" as const } : {}),
     selections: exact };
 }
 
@@ -240,7 +275,7 @@ function markets(value: unknown): readonly SbobetCatalogMarket[] {
   return Array.isArray(value) ? value.map(market).filter((item): item is SbobetCatalogMarket => item !== null) : [];
 }
 
-const imKnownExcludedBetTypes = new Set([4, 6, 7, 9, 11, 35, 38, 39, 158, 159, 313]);
+const imKnownExcludedBetTypes = new Set([4, 11, 35, 38, 39, 158, 159]);
 
 export function observeNativeImFootballMarkets(value: unknown, observedAtMs: number):
 readonly NativeMarketObservation[] {
@@ -278,7 +313,8 @@ readonly NativeMarketObservation[] {
         : knownExcluded ? (bti === 4 || bti === 39 ? "PUSH_OR_REFUND_SETTLEMENT"
           : bti === 3 ? "THREE_WAY_OUTCOME_DOMAIN" : "NON_BINARY_OUTCOME_DOMAIN")
         : semantics === null ? "NATIVE_TYPE_UNMAPPED"
-        : normalized === null ? "INVALID_TWO_WAY_SHAPE" : "CANONICAL_MARKET_MAPPED";
+        : normalized === null ? "INVALID_TWO_WAY_SHAPE"
+        : normalized.selections.length < selections.length ? "PARTIAL_CANONICAL_OUTCOMES" : "CANONICAL_MARKET_MAPPED";
       const labels = selections.flatMap((candidateSelection) => {
         const label = text(record(candidateSelection)?.dih);
         return label === null ? [] : [label];
@@ -313,13 +349,18 @@ function validDeltaMarket(value: unknown): boolean {
   const semantics = imMarketSemantics(item.bti, item.gp);
   const supportedDomain = semantics !== null;
   if (!supportedDomain) return true;
-  if (item.ws.length === 0 || item.ws.length > semantics.outcomes.size) return false;
+  if ((item.ws.length === 0 && !semantics.categorical) ||
+    item.ws.length > semantics.outcomes.size + (semantics.retainedOnlyOutcomes?.size ?? 0)) return false;
   const actualSelections = new Set<number>();
   for (const candidate of item.ws) {
     const itemSelection = record(candidate);
     const selectionId = Number(itemSelection?.si);
-    if (itemSelection === null || identifier(itemSelection.wsi) === null || !semantics.outcomes.has(selectionId) ||
-      actualSelections.has(selectionId) || normalizeImSelectionPrice(itemSelection) === null ||
+    const retainedOnly = semantics.retainedOnlyOutcomes?.has(selectionId) === true;
+    const unavailable = semantics.categorical === true &&
+      (itemSelection?.o === undefined || itemSelection.o === null || itemSelection.o === 0);
+    if (itemSelection === null || identifier(itemSelection.wsi) === null ||
+      (!semantics.outcomes.has(selectionId) && !retainedOnly) ||
+      actualSelections.has(selectionId) || (!retainedOnly && !unavailable && normalizeImSelectionPrice(itemSelection) === null) ||
       (semantics.linePolicy === "LINE" && (semantics.specifierTotal === true
         ? specifierTotal(itemSelection) === null
         : !isLineFieldWellFormed(itemSelection.hdp) || text(itemSelection.dih) === null))) return false;

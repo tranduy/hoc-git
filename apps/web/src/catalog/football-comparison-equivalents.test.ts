@@ -15,6 +15,43 @@ function cell(type:MarketType,line:string|null,selections:string[],live=false):C
 }
 describe("proven native football equivalences",()=>{
   it.each([
+    ["FT_GOAL_RANGE","FT_TOTAL"], ["FH_GOAL_RANGE","FH_TOTAL"], ["SH_GOAL_RANGE","SH_TOTAL"],
+    ["HOME_FT_GOAL_RANGE","HOME_FT_TOTAL"], ["AWAY_FT_GOAL_RANGE","AWAY_FT_TOTAL"],
+    ["HOME_FH_GOAL_RANGE","HOME_FH_TOTAL"], ["AWAY_FH_GOAL_RANGE","AWAY_FH_TOTAL"],
+    ["CORNER_FT_RANGE","CORNER_FT_TOTAL"], ["CORNER_FH_RANGE","CORNER_FH_TOTAL"],
+    ["HOME_CORNER_FT_RANGE","HOME_CORNER_FT_TOTAL"], ["AWAY_CORNER_FT_RANGE","AWAY_CORNER_FT_TOTAL"]
+  ] as const)("matches the complete tails of %s with the same period and subject total",(type,target)=>{
+    const source=cell(type,null,["RANGE_0_1","RANGE_2_PLUS","RANGE_2_3"]);
+    const projected=footballComparisonEquivalents(source);
+    expect(projected).toHaveLength(1);
+    expect(projected[0]!.market).toMatchObject({marketType:target,line:"1.5",scope:source.market.scope});
+    expect(projected[0]!.quotes.map(q=>q.selection)).toEqual(["UNDER","OVER"]);
+    expect(projected[0]!.sourceMarket).toBe(source.market);expect(projected[0]!.sourceQuotes).toBe(source.quotes);
+    for(const q of projected[0]!.quotes)expect(q).toMatchObject({rawOdds:"2.1",receivedMonotonicMs:13,sequence:14});
+  });
+  it("checks range-tail equivalence over every nonnegative count around each threshold",()=>{
+    for(let boundary=0;boundary<=15;boundary++){
+      const out=footballComparisonEquivalents(cell("FT_GOAL_RANGE",null,[`RANGE_0_${boundary}`,`RANGE_${boundary+1}_PLUS`]))[0]!;
+      expect(out).toBeDefined();const line=Number(out.market.line);
+      for(let goals=0;goals<=40;goals++){
+        expect(goals<=boundary).toBe(goals<line);expect(goals>=boundary+1).toBe(goals>line);
+        expect(Number(goals<line)+Number(goals>line)).toBe(1);
+      }
+    }
+  });
+  it.each([["FT_CORRECT_SCORE","FT_TOTAL"],["FH_CORRECT_SCORE","FH_TOTAL"],["SH_CORRECT_SCORE","SH_TOTAL"],
+    ["CORNER_FT_CORRECT_SCORE","CORNER_FT_TOTAL"],["CORNER_FH_CORRECT_SCORE","CORNER_FH_TOTAL"]] as const)(
+    "projects only the scoreless state of %s to under half a unit",(type,target)=>{
+      const out=footballComparisonEquivalents(cell(type,null,["SCORE_0_0","SCORE_1_0","SCORE_0_1"]));
+      expect(out).toHaveLength(1);expect(out[0]!.market).toMatchObject({marketType:target,line:"0.5"});
+      expect(out[0]!.quotes.map(q=>q.selection)).toEqual(["UNDER"]);
+    });
+  it("does not project bounded interior ranges, all-counts ranges, invalid bounds or live final counts",()=>{
+    expect(footballComparisonEquivalents(cell("FT_GOAL_RANGE",null,["RANGE_1_3","RANGE_0_PLUS","RANGE_3_2"]))).toEqual([]);
+    expect(footballComparisonEquivalents(cell("FT_GOAL_RANGE",null,["RANGE_0_1"],true))).toEqual([]);
+    expect(footballComparisonEquivalents(cell("FT_CORRECT_SCORE",null,["SCORE_0_0"],true))).toEqual([]);
+  });
+  it.each([
     ["FT_EUROPEAN_HANDICAP","-1","FT_AH","-1.5","-0.5"],
     ["FH_EUROPEAN_HANDICAP","2","FH_AH","1.5","2.5"],
     ["CORNER_FT_EUROPEAN_HANDICAP","0","CORNER_FT_AH","-0.5","0.5"]
@@ -57,6 +94,22 @@ function catalog(provider:"BTI"|"CMD"|"APSPORT",type:MarketType,line:string|null
     events:base.events.map(e=>reversed?{...e,participantA:e.participantB,participantB:e.participantA}:e)};
 }
 describe("equivalences in the real matcher",()=>{
+  it.each([false,true])("matches a team zero-goal bucket with the opposing total after orientation %s",reversed=>{
+    const bucket=catalog("CMD",reversed?"AWAY_FT_GOAL_RANGE":"HOME_FT_GOAL_RANGE",null,["RANGE_0_0"],reversed);
+    const over=catalog("BTI","HOME_FT_TOTAL","0.5",["OVER"]);
+    // CMD anchors this event's canonical orientation; the BTI home team becomes
+    // the canonical away team when CMD's native participants are reversed.
+    const row=buildComparisonEvents([bucket,over]).flatMap(e=>e.rows).find(r=>r.marketType===(reversed?"AWAY_FT_TOTAL":"HOME_FT_TOTAL"));
+    expect(row).toBeDefined();expect(binaryOpposingCellPairs(row!.cells)).toHaveLength(1);
+    const leg=row!.cells.find(c=>c.provider==="CMD")!;
+    expect(leg.quotes[0]!.selection).toBe("UNDER");expect(leg.sourceMarket).toBe(bucket.markets[0]);
+    expect(leg.sourceQuotes).toEqual(bucket.quotes);
+  });
+  it("does not treat an interior goal bucket as the complement of a total",()=>{
+    const rows=buildComparisonEvents([catalog("CMD","FT_GOAL_RANGE",null,["RANGE_2_3"]),
+      catalog("BTI","FT_TOTAL","1.5",["OVER"])]).flatMap(e=>e.rows);
+    expect(rows.flatMap(r=>binaryOpposingCellPairs(r.cells))).toEqual([]);
+  });
   it.each([false,true])("matches AP non-draw without BTTS against BTI draw-or-BTTS after orientation %s",reversed=>{
     const ap=catalog("APSPORT","FT_DOUBLE_CHANCE_BTTS",null,["HOME_AWAY_NO"]);
     const bti=catalog("BTI","FT_RESULT_OR_BTTS",null,["DRAW_YES_YES"],reversed);

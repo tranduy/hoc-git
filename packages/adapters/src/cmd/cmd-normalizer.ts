@@ -1,8 +1,9 @@
 import type { NativeMarketObservation, OddsFormat, ProviderEvent, ProviderId,
   ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
-import { footballBinaryMarketSpec, footballResultMarketSpec } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, footballCategoricalMarketSpec, footballResultMarketSpec } from "@tool-chenh/contracts";
 import { isSupportedFootballSplitLine, isSupportedFootballTwoWayLine } from "../football-market-policy.js";
 import { isSabaMultiMatchAggregate } from "../saba/saba-multi-match-aggregate.js";
+import { sabaDomMarketEvidence } from "../saba/saba-dom-market-evidence.js";
 
 export interface CmdCatalogOdd {
   readonly marketOddsId: string;
@@ -19,7 +20,7 @@ export interface CmdCatalogGroup {
   readonly labels: readonly string[];
   readonly odds: readonly CmdCatalogOdd[];
   /** Collector-proven limitation; retain the full native group without publishing quotes. */
-  readonly normalizationBlockReason?: "NATIVE_MR_ODDS_UNPROVEN" | "NATIVE_MARKET_HIDDEN" | "NATIVE_MARKET_PERMISSION_UNPROVEN" | undefined;
+  readonly normalizationBlockReason?: "NATIVE_MR_ODDS_UNPROVEN" | "NATIVE_MARKET_HIDDEN" | "NATIVE_MARKET_CLOSED" | "NATIVE_MARKET_PERMISSION_UNPROVEN" | undefined;
 }
 
 export interface CmdCatalogInputRecord {
@@ -97,6 +98,7 @@ function cmdMarketSemantics(betType: string, family: CmdEventFamily) {
 type CmdCanonicalOutcome = ProviderQuote["selection"];
 
 interface CmdResolvedSemantics {
+  readonly rawFormat?: OddsFormat;
   readonly marketType: ProviderMarket["marketType"];
   readonly scope: ProviderMarket["scope"];
   readonly isHandicap: boolean;
@@ -128,7 +130,24 @@ function provedOddEvenSelections(group: CmdCatalogGroup): readonly ["ODD", "EVEN
 
 function cmdGroupSemantics(group: CmdCatalogGroup, family: CmdEventFamily, provider: ProviderId): CmdResolvedSemantics | null {
   if (group.betTypeIds.length !== 1) return null;
+  if (provider === "SABA" && family === "GOALS") {
+    const evidence = sabaDomMarketEvidence(group);
+    if (evidence !== null) return evidence;
+  }
   const betType = group.betTypeIds[0]!;
+  if (provider === "CMD" && family !== "GOALS" && (betType === "5" || betType === "FH:5")) {
+    // CMD's native result slots are HOME/DRAW/AWAY for the separately named
+    // corner/booking fixture too. Its decimal quotes retain that statistic.
+    if (group.odds.some(odd => odd.priceFormat !== "DECIMAL")) return null;
+    const marketType = family === "CORNERS" ? betType === "5" ? "CORNER_FT_1X2" : "CORNER_FH_1X2"
+      : betType === "5" ? "CARD_FT_1X2" : "CARD_FH_1X2";
+    const selections = group.labels.map(label => label.trim().toUpperCase());
+    if (group.odds.length === 0 || group.odds.length > 3 || selections.length !== group.odds.length ||
+      selections.some(selection => !["HOME", "DRAW", "AWAY"].includes(selection)) || new Set(selections).size !== selections.length) return null;
+    const spec = footballCategoricalMarketSpec(marketType)!;
+    return { marketType, scope: spec.scope, settlementProfile: spec.settlementProfile, selections,
+      isHandicap: false, linePolicy: "NONE" };
+  }
   const resultType = family === "GOALS" ? cmdResultType(betType, provider) : null;
   if (resultType !== null) {
     const spec = footballResultMarketSpec(resultType)!;
@@ -154,11 +173,12 @@ function cmdGroupSemantics(group: CmdCatalogGroup, family: CmdEventFamily, provi
   // SABA's published BetType Selection Information names 12 as first-half
   // Odd/Even; 24 is Double Chance. Labels still have to prove each outcome.
   const isFirstHalf = betType === "FH:2" || provider === "SABA" && betType === "12";
-  const selections = (["2", "MAIN:2", "FH:2"].includes(betType) || provider === "SABA" && betType === "12") && family !== "CARDS"
+  const selections = (["2", "MAIN:2", "FH:2"].includes(betType) || provider === "SABA" && betType === "12") && (family !== "CARDS" || provider === "CMD")
     ? provedOddEvenSelections(group) : null;
   if (selections === null) return null;
   const marketType = family === "GOALS"
     ? isFirstHalf ? "FH_ODD_EVEN" : "FT_ODD_EVEN"
+    : family === "CARDS" ? isFirstHalf ? "CARD_FH_ODD_EVEN" : "CARD_FT_ODD_EVEN"
     : isFirstHalf ? "CORNER_FH_ODD_EVEN" : "CORNER_FT_ODD_EVEN";
   const spec = footballBinaryMarketSpec(marketType)!;
   return { marketType, scope: spec.scope, isHandicap: false,
@@ -381,12 +401,12 @@ function validMalay(value: string): boolean {
   return Number.isFinite(numeric) && numeric !== 0 && Math.abs(numeric) <= 1;
 }
 
-function validResultPrice(odd: CmdCatalogOdd): boolean {
+function validResultPrice(odd: CmdCatalogOdd, provenFormat?: OddsFormat): boolean {
   if (odd.selectionId !== undefined && odd.selectionId.trim().length === 0) return false;
   if (!signedDecimalPattern.test(odd.priceText)) return false;
   const price = Number(odd.priceText);
   if (!Number.isFinite(price)) return false;
-  switch (odd.priceFormat) {
+  switch (odd.priceFormat ?? provenFormat) {
     case "DECIMAL": return price > 1;
     case "MALAY": return price !== 0 && Math.abs(price) <= 1;
     case "HK": return price > 0;
@@ -429,13 +449,14 @@ export function observeNativeCmdMarkets(
       const semantics = classified === null ? null : cmdGroupSemantics(group, classified.family, provider);
       const marketLine = semantics === null || semantics.linePolicy === "NONE" ? null : semantics.isHandicap
         ? canonicalHomeHandicap(group.odds, provider === "SABA") : line(group.labels);
-      const resultMarket = semantics !== null && footballResultMarketSpec(semantics.marketType) !== null;
+      const resultMarket = semantics !== null && (footballResultMarketSpec(semantics.marketType) !== null ||
+        provider === "CMD" && footballCategoricalMarketSpec(semantics.marketType) !== null);
       const expectedSelections = semantics?.selections.length ?? 2;
-      const validResultIds = group.odds.flatMap((odd, index) => validResultPrice(odd)
+      const validResultIds = group.odds.flatMap((odd, index) => validResultPrice(odd, semantics?.rawFormat)
         ? [odd.selectionId ?? `${providerMarketId}:${semantics?.selections[index]}`] : []);
       const validShape = semantics !== null && exactMarketId(group, expectedSelections) !== null &&
         (semantics.linePolicy === "NONE" || isSupportedFootballTwoWayLine(marketLine)) &&
-        (resultMarket ? validResultIds.length > 0 && new Set(validResultIds).size === validResultIds.length
+        (resultMarket || semantics.rawFormat !== undefined ? validResultIds.length > 0 && new Set(validResultIds).size === validResultIds.length
           : group.odds.every((odd) => validMalay(odd.priceText)));
       const threeWay = group.betTypeIds.length === 1 && (nativeType === "5" ||
         provider === "CMD" && nativeType === "FH:5" || provider === "SABA" && nativeType === "15");
@@ -446,12 +467,12 @@ export function observeNativeCmdMarkets(
         : unsupportedPeriod ? "EVENT_PERIOD_SETTLEMENT_UNSUPPORTED"
         : group.normalizationBlockReason !== undefined ? group.normalizationBlockReason
         : group.betTypeIds.length !== 1 ? "AMBIGUOUS_NATIVE_TYPE"
-        : resultMarket && !validShape && group.odds.every(odd => odd.priceFormat === undefined) ? "NATIVE_ODDS_FORMAT_UNPROVEN"
+        : resultMarket && !validShape && semantics.rawFormat === undefined && group.odds.every(odd => odd.priceFormat === undefined) ? "NATIVE_ODDS_FORMAT_UNPROVEN"
         : threeWay && !resultMarket ? "NATIVE_RESULT_OUTCOME_UNPROVEN"
         : semantics === null ? "NATIVE_TYPE_UNMAPPED"
         : !validShape ? "INVALID_TWO_WAY_SHAPE" : "CANONICAL_MARKET_MAPPED";
       const canonicalOutcomes = semantics?.selections ?? ["OUTCOME_1", "OUTCOME_2"];
-      const rawFormat = semantics !== null && !resultMarket && group.normalizationBlockReason !== "NATIVE_MR_ODDS_UNPROVEN" ? "MALAY" : undefined;
+      const rawFormat = semantics?.rawFormat ?? (semantics !== null && !resultMarket && group.normalizationBlockReason !== "NATIVE_MR_ODDS_UNPROVEN" ? "MALAY" : undefined);
       observations.push({ provider, category: "FOOTBALL",
         providerEventId: record.matchId || `UNKNOWN_EVENT_${recordIndex}`, providerMarketId,
         nativeType, nativeLabel: group.labels.join(" | ").slice(0, 512) || null,
@@ -459,7 +480,7 @@ export function observeNativeCmdMarkets(
         outcomeLabels: group.odds.map((_, index) => canonicalOutcomes[index] ?? `OUTCOME_${index + 1}`),
         // DOM capture provides one market ID for the group, but no native
         // selection ID. Preserve its ordered raw prices without inventing IDs
-        // or assigning unlabeled 1X2 slots to HOME, DRAW and AWAY.
+        // unless a provider-specific renderer proves their ordered outcomes.
         nativeSelections: group.odds.map((odd) => ({ selectionId: odd.selectionId ?? null, outcomeId: null,
           line: odd.lineText ?? null, price: odd.priceText,
           ...(odd.priceFormat === undefined && rawFormat === undefined ? {} : { rawFormat: odd.priceFormat ?? rawFormat }),
@@ -521,8 +542,8 @@ export function normalizeObservedFootballCatalog(
       const semantics = cmdGroupSemantics(group, classified.family, provider)!;
       const selections = semantics.selections;
       const marketId = exactMarketId(group, selections.length);
-      if (footballResultMarketSpec(semantics.marketType) !== null) {
-        const valid = group.odds.flatMap((odd, index) => validResultPrice(odd) ? [{ odd, selection: selections[index]! }] : []);
+      if (footballResultMarketSpec(semantics.marketType) !== null || provider === "CMD" && footballCategoricalMarketSpec(semantics.marketType) !== null) {
+        const valid = group.odds.flatMap((odd, index) => validResultPrice(odd, semantics.rawFormat) ? [{ odd, selection: selections[index]! }] : []);
         if (marketId === null || valid.length === 0 || new Set(valid.map(({ odd, selection }) =>
           odd.selectionId ?? `${marketId}:${selection.toLowerCase()}`)).size !== valid.length) {
           diagnostics.push("CMD_CATALOG_MARKET_REJECTED");
@@ -534,30 +555,34 @@ export function normalizeObservedFootballCatalog(
         recordQuotes.push(...valid.map(({ odd, selection }): ProviderQuote => ({ provider, category: "FOOTBALL",
           providerEventId: record.matchId, providerMarketId: marketId,
           providerSelectionId: odd.selectionId ?? `${marketId}:${selection.toLowerCase()}`, marketType, scope, selection,
-          line: null, rawOdds: odd.priceText, rawFormat: odd.priceFormat!, status: oddStatus(odd), isLive: timing!.isLive,
+          line: null, rawOdds: odd.priceText, rawFormat: (odd.priceFormat ?? semantics.rawFormat)!, status: oddStatus(odd), isLive: timing!.isLive,
           sourceTimestampMs: null, receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence })));
         continue;
       }
       const marketLine = semantics.linePolicy === "NONE" ? null
         : semantics.isHandicap ? canonicalHomeHandicap(group.odds, provider === "SABA") : line(group.labels);
-      const pricesValid = group.odds.every((odd) => validMalay(odd.priceText));
+      const validOdds = group.odds.flatMap((odd, index) => semantics.rawFormat === undefined || validResultPrice(odd, semantics.rawFormat)
+        ? [{ odd, index }] : []);
+      const pricesValid = semantics.rawFormat !== undefined ? validOdds.length > 0 : group.odds.every((odd) => validMalay(odd.priceText));
       if (marketId === null || semantics.linePolicy === "LINE" && !isSupportedFootballTwoWayLine(marketLine) || !pricesValid) {
         diagnostics.push("CMD_CATALOG_MARKET_REJECTED");
         continue;
       }
       const { marketType, scope, settlementProfile } = semantics;
-      const status = commonMarketStatus(group);
+      const status = semantics.rawFormat !== undefined
+        ? validOdds.some(({ odd }) => oddStatus(odd) === "OPEN") ? "OPEN" : "SUSPENDED"
+        : commonMarketStatus(group);
       recordMarkets.push({
         provider, category: "FOOTBALL", providerEventId: record.matchId,
         providerMarketId: marketId, marketType, scope, line: marketLine,
         settlementProfile, status
       });
-      recordQuotes.push(...group.odds.map((odd, index): ProviderQuote => ({
+      recordQuotes.push(...validOdds.map(({ odd, index }): ProviderQuote => ({
         provider, category: "FOOTBALL", providerEventId: record.matchId,
         providerMarketId: marketId, providerSelectionId: `${marketId}:${selections[index]!.toLowerCase()}`,
         marketType, scope, selection: selections[index]!, line: marketLine,
-        rawOdds: odd.priceText, rawFormat: "MALAY",
-        status, isLive: timing!.isLive, sourceTimestampMs: null,
+        rawOdds: odd.priceText, rawFormat: semantics.rawFormat ?? "MALAY",
+        status: semantics.rawFormat !== undefined ? oddStatus(odd) : status, isLive: timing!.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
       })));
     }

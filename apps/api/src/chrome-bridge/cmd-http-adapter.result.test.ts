@@ -22,6 +22,26 @@ function owner() {
 }
 
 describe("CMD native main result normalization", () => {
+  it("maps same-native decimal Double Chance slots and withdraws closures without changing native IDs", () => {
+    const adapter = new CmdHttpCatalogAdapter(), row = owner();
+    const read = (t: number, next: unknown[]) => {
+      const frame = envelope({ t, a: true, data: [], today: [next], f: [] }, t);
+      return adapter.decode({ ...frame, request: { ...frame.request, providerFunctionCode: 1 } }).at(-1)!.value as ObservedProviderCatalog;
+    };
+    const before = read(1, row);
+    expect(before.quotes.filter(q => q.marketType === "FT_DOUBLE_CHANCE").map(q => [q.selection, q.rawOdds, q.rawFormat, q.providerSelectionId]))
+      .toEqual([["HOME_DRAW", "1.2", "DECIMAL", "25403104:OneX:Home:0:0"], ["HOME_AWAY", "1.3", "DECIMAL", "25403104:OneTwo:Home:0:0"], ["DRAW_AWAY", "1.4", "DECIMAL", "25403104:XTwo:Away:0:0"]]);
+    const closed = [...row]; closed[84] = -999;
+    const after = read(2, closed);
+    expect(after.quotes.filter(q => q.marketType === "FT_DOUBLE_CHANCE").map(q => q.selection)).toEqual(["HOME_AWAY", "DRAW_AWAY"]);
+    expect(after.nativeMarketObservations!.find(o => o.nativeType === "DOUBLE_CHANCE")!.nativeSelections![0]).toMatchObject({ price: "-999", status: "CLOSED", rawFormat: "DECIMAL" });
+    const hidden = [...row]; hidden[55] = true;
+    expect(read(3, hidden).quotes.filter(q => q.marketType === "FT_DOUBLE_CHANCE")).toEqual([]);
+    const unknown = [...row]; unknown[55] = null;
+    expect(read(4, unknown).quotes.filter(q => q.marketType === "FT_DOUBLE_CHANCE")).toEqual([]);
+    const invalid = [...row]; invalid[84] = 0.99;
+    expect(read(5, invalid).quotes.filter(q => q.marketType === "FT_DOUBLE_CHANCE")).toEqual([]);
+  });
   it("applies native 118 visibility before later result prices and explicitly reopens", () => {
     const adapter = new CmdHttpCatalogAdapter(), row = owner();
     adapter.decode(envelope({ t: 1, a: true, data: [], today: [row], f: [] }, 1));
@@ -53,7 +73,7 @@ describe("CMD native main result normalization", () => {
     const result = value.quotes.filter(quote => quote.marketType.endsWith("_1X2"));
     expect(result).toHaveLength(6);
     expect(result.every(quote => quote.status === "OPEN" && quote.rawFormat === "DECIMAL")).toBe(true);
-    expect(value.quotes.filter(quote => !quote.marketType.endsWith("_1X2"))).toEqual([]);
+    expect(value.quotes.filter(quote => !quote.marketType.endsWith("_1X2") && quote.marketType !== "FT_DOUBLE_CHANCE")).toEqual([]);
     expect(value.nativeMarketObservations).toContainEqual(expect.objectContaining({ nativeType: "1",
       disposition: "EXCLUDED", reason: "NATIVE_MR_ODDS_UNPROVEN", nativeSelections: expect.arrayContaining([
         expect.not.objectContaining({ status: "SUSPENDED" })
@@ -70,7 +90,7 @@ describe("CMD native main result normalization", () => {
     }
   });
 
-  it("publishes proven main 1X2 decimal quotes and keeps DC format unproven", () => {
+  it("publishes proven main 1X2 and Double Chance decimal quotes", () => {
     const value = new CmdHttpCatalogAdapter().decode(envelope({ t: 1, a: true, data: [], today: [owner()], f: [] }, 1)).at(-1)!.value as ObservedProviderCatalog;
     expect(value.quotes.filter(quote => quote.marketType.endsWith("_1X2"))
       .map(quote => [quote.marketType, quote.selection, quote.rawOdds, quote.rawFormat])).toEqual([
@@ -78,7 +98,7 @@ describe("CMD native main result normalization", () => {
       ["FH_1X2", "HOME", "2.8", "DECIMAL"], ["FH_1X2", "DRAW", "2.2", "DECIMAL"], ["FH_1X2", "AWAY", "4.1", "DECIMAL"]
     ]);
     expect(value.nativeMarketObservations).toContainEqual(expect.objectContaining({ nativeType: "DOUBLE_CHANCE",
-      nativeScope: "FULL_TIME", reason: "NATIVE_ODDS_FORMAT_UNPROVEN", nativeSelections: expect.any(Array) }));
+      nativeScope: "FULL_TIME", reason: "CANONICAL_MARKET_MAPPED", nativeSelections: expect.any(Array) }));
   });
 
   it("applies public 51/54 and packed117 result deltas without swapping away and draw", () => {

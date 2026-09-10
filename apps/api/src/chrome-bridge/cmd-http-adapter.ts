@@ -628,11 +628,14 @@ function finiteLine(value: unknown): string | null {
 }
 
 function mainGroupBlockReason(row: readonly unknown[], nativeType: string): CmdCatalogInputRecord["groups"][number]["normalizationBlockReason"] {
-  if (nativeType === "5" || nativeType === "FH:5") {
+  if (nativeType === "5" || nativeType === "FH:5" || nativeType === "DOUBLE_CHANCE") {
     // DataFormat.IsX12InetHide is the actual result display gate. ForMMR is
     // an odds-mode selector, and MatchStatus is VAR/injury commentary.
     if (row[55] === true || row[55] === 1) return "NATIVE_MARKET_HIDDEN";
     if (row[55] !== false && row[55] !== 0) return "NATIVE_MARKET_PERMISSION_UNPROVEN";
+    if (nativeType === "DOUBLE_CHANCE" && nativeMainDcClosed(row)) return "NATIVE_MARKET_CLOSED";
+  } else if ((nativeType === "MAIN:2" || nativeType === "FH:2") && (row[54] === 1 || row[54] === true)) {
+    return "NATIVE_MARKET_HIDDEN";
   } else if (nativeType !== "DOUBLE_CHANCE" && (row[79] === 1 || row[79] === true)) {
     // The native converter skips normal Malay conversion for MR line odds.
     return "NATIVE_MR_ODDS_UNPROVEN";
@@ -642,6 +645,13 @@ function mainGroupBlockReason(row: readonly unknown[], nativeType: string): CmdC
 
 function nativeHideFlag(value: unknown): boolean {
   return value === 0 || value === 1 || typeof value === "boolean";
+}
+
+function nativeMainDcClosed(row: readonly unknown[]): boolean {
+  return row.slice(84, 87).some(value => typeof value === "number" && value > 0 && value < 1);
+}
+function nativeMainDcSelectionId(eventId: string, index: number): string {
+  return `${eventId}:${["OneX:Home", "OneTwo:Home", "XTwo:Away"][index]}:0:0`;
 }
 
 function decodeRecord(row: readonly unknown[]): CmdCatalogInputRecord | null {
@@ -704,6 +714,18 @@ function decodeRecord(row: readonly unknown[]): CmdCatalogInputRecord | null {
       status: normalizationBlockReason === undefined ? "OPEN" : null, greyedOut: null
     })) });
   }
+  // Named DC1X/DC12/DCX2 slots match More FT[2] exactly in594/597 own
+  // archived positive tuples (three moving prices). More's decimal formatter
+  // and OneX/OneTwo/XTwo native click tuples prove format and identities.
+  // HTTP-only evidence: unknown-format DOM groups are still rejected.
+  const dcReason = mainGroupBlockReason(row, "DOUBLE_CHANCE");
+  const dc = [84, 85, 86].flatMap((position, index) => {
+    const price = finiteResultOdd(row[position]);
+    return price === null ? [] : [{ price, index }];
+  });
+  if (dc.length > 0) groups.push({ betTypeIds: ["DOUBLE_CHANCE"], labels: dc.map(({ index }) => ["HOME_DRAW", "HOME_AWAY", "DRAW_AWAY"][index]!),
+    normalizationBlockReason: dcReason, odds: dc.map(({ price, index }) => ({ marketOddsId: `${eventId}:native:DOUBLE_CHANCE`,
+      selectionId: nativeMainDcSelectionId(eventId, index), priceText: price, priceFormat: "DECIMAL", status: dcReason === undefined ? "OPEN" : null, greyedOut: null })) });
   const live = row[25] === 1 || row[25] === true || /(?:^|\s)\dH(?:\s|\d|$)|LIVE/iu.test(clock);
   return { sportId: "1", leagueId, leagueName, matchId: eventId,
     timeText: live ? "LIVE" : `${date} ${clock}`, teamNames: [home, away], groups };
@@ -852,12 +874,13 @@ function nativeMainGroups(row: readonly unknown[], record: CmdCatalogInputRecord
   ] as const) {
     if (positions.every(index => row[index] === null || row[index] === undefined)) continue;
     const normalizationBlockReason = mainGroupBlockReason(row, nativeType);
-    const result = nativeType === "5" || nativeType === "FH:5";
-    groups.push({ betTypeIds: [nativeType], labels, normalizationBlockReason, odds: positions.map(index => ({
+    const result = nativeType === "5" || nativeType === "FH:5" || nativeType === "DOUBLE_CHANCE";
+    groups.push({ betTypeIds: [nativeType], labels, normalizationBlockReason, odds: positions.map((index, selectionIndex) => ({
       marketOddsId: `${record.matchId}:native:${nativeType}`, priceText: text(row[index]),
-      status: result && normalizationBlockReason === undefined ? finiteResultOdd(row[index]) !== null ? "OPEN"
+      ...(nativeType === "DOUBLE_CHANCE" ? { selectionId: nativeMainDcSelectionId(record.matchId, selectionIndex) } : {}),
+      status: nativeType === "DOUBLE_CHANCE" && nativeMainDcClosed(row) ? "CLOSED" : result && normalizationBlockReason === undefined ? finiteResultOdd(row[index]) !== null ? "OPEN"
         : closedMarketValue(row[index]) || row[index] === 0 ? "CLOSED" : null : null, greyedOut: null,
-      ...(nativeType === "5" || nativeType === "FH:5" ? { priceFormat: "DECIMAL" as const } : {}) })) });
+      ...(result ? { priceFormat: "DECIMAL" as const } : {}) })) });
   }
   return groups;
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import { extractImFootballCatalog, mergeImFootballDelta,
   mergeImFootballSnapshots, observeNativeImFootballMarkets } from "./im-football-catalog-source.js";
 
@@ -22,6 +23,91 @@ const event = {
 };
 
 describe("extractImFootballCatalog", () => {
+  it("retains two-sided zero handicaps using native signed-line semantics through the adapter", () => {
+    const source = { StatusCode: 100, sel: [{ ...event, mls: [
+      { mi: 1010, bti: 1, gp: 2, il: false, ws: [
+        { wsi: 10101, si: 1, hdp: 0, dih: "0", o: 0.58, ot: 2 },
+        { wsi: 10102, si: 2, hdp: 0, dih: "0", o: 1.38, ot: 2 }] }
+    ] }] };
+    const records = extractImFootballCatalog(source);
+    const canonical = normalizeSbobetCatalog(records, { provider: "IM", observedAtMs: 100,
+      receivedMonotonicMs: 0, sequence: 0 });
+    expect(canonical.markets).toEqual([expect.objectContaining({ marketType: "FH_AH", line: "0" })]);
+    expect(canonical.quotes).toHaveLength(2);
+  });
+  it.each([[1, "FT_GOAL_RANGE"], [2, "FH_GOAL_RANGE"], [3, "SH_GOAL_RANGE"]] as const)(
+    "maps native total-goal buckets for gp=%s without converting buckets to over/under", (gp, marketType) => {
+      const source = { StatusCode: 100, sel: [{ ...event, mls: [{ mi: 700, bti: 7, gp, il: false,
+        ws: [42, 39, 41, 40].map((si) => ({ wsi: 7000 + si, si, o: 2.2, ot: 3 })) }] }] };
+      const records = extractImFootballCatalog(source);
+      const normalized = normalizeSbobetCatalog(records, { provider: "IM", observedAtMs: 100,
+        receivedMonotonicMs: 0, sequence: 0 });
+      expect(normalized.markets[0]?.marketType).toBe(marketType);
+      expect(normalized.quotes.map((quote) => quote.selection)).toEqual([
+        "RANGE_7_PLUS", "RANGE_0_1", "RANGE_4_6", "RANGE_2_3"]);
+      expect(normalized.quotes[0]).toMatchObject({ providerSelectionId: "7042", rawOdds: "2.2",
+        rawFormat: "DECIMAL", status: "OPEN", receivedMonotonicMs: 0, sequence: 0 });
+      expect(observeNativeImFootballMarkets(source, 100)[0]?.disposition).toBe("NORMALIZED");
+    });
+
+  it("maps half/full and corner results by native code while preserving scope and suspension", () => {
+    const source = { StatusCode: 100, sel: [{ ...event, mls: [
+      { mi: 900, bti: 9, gp: 1, il: true, ws: [{ wsi: 9001, si: 49, o: 4.65, ot: 3 }] },
+      { mi: 3130, bti: 313, gp: 2, il: false, ws: [{ wsi: 31301, si: 7, o: 9.3, ot: 3 }] }
+    ] }] };
+    expect(extractImFootballCatalog(source)[0]?.markets).toEqual([
+      expect.objectContaining({ marketType: "FT_HALF_FULL_RESULT", selections: [
+        expect.objectContaining({ selection: "DRAW_HOME", locked: true })] }),
+      expect.objectContaining({ marketType: "CORNER_FH_1X2", selections: [
+        expect.objectContaining({ selection: "DRAW", locked: false })] })]);
+    expect(extractImFootballCatalog({ ...source, sel: [{ ...event, mls: [
+      { ...source.sel[0]!.mls[0]!, gp: 2 }, { ...source.sel[0]!.mls[1]!, gp: 3 }
+    ] }] })).toEqual([]);
+  });
+
+  it("retains exact scores separately from unsupported other-score outcomes and rejects foreign codes", () => {
+    const native = { mi: 600, bti: 6, gp: 3, il: false,
+      ws: [{ wsi: 601, si: 23, o: 9.63, ot: 3 }, { wsi: 602, si: 439, o: 5.95, ot: 3 }] };
+    const source = (market: unknown) => ({ StatusCode: 100, sel: [{ ...event, mls: [market] }] });
+    expect(extractImFootballCatalog(source(native))[0]?.markets[0]).toMatchObject({ marketType: "SH_CORRECT_SCORE",
+      selections: [{ selectionId: "601", selection: "SCORE_2_1", priceText: "9.63", priceFormat: "DECIMAL" }] });
+    expect(observeNativeImFootballMarkets(source(native), 100)[0]).toMatchObject({ disposition: "NORMALIZED",
+      reason: "PARTIAL_CANONICAL_OUTCOMES", outcomeLabels: ["SCORE_2_1", "439"], nativeSelections: [
+        { selectionId: "601", outcomeId: "23" }, { selectionId: "602", outcomeId: "439" }] });
+    expect(extractImFootballCatalog(source({ ...native, ws: [native.ws[1]] }))).toEqual([]);
+    expect(extractImFootballCatalog(source({ ...native, ws: [native.ws[0], { ...native.ws[1], si: 99999 }] }))).toEqual([]);
+    expect(extractImFootballCatalog(source({ ...native, ws: [native.ws[0], { ...native.ws[0], wsi: 603 }] }))).toEqual([]);
+    expect(extractImFootballCatalog(source({ ...native, ws: [native.ws[0], { ...native.ws[1], wsi: 601 }] }))).toEqual([]);
+  });
+
+  it.each([{ ws: [] }, { ws: [{ wsi: 7001, si: 39, o: 0, ot: 3 }] },
+    { ws: [{ wsi: 7001, si: 39, o: null, ot: 3 }] }])(
+    "withdraws unavailable categorical quotes on a native market replacement", ({ ws }) => {
+      const native = { mi: 700, bti: 7, gp: 1, il: false, ws: [{ wsi: 7001, si: 39, o: 5.87, ot: 3 }] };
+      const initial = extractImFootballCatalog({ StatusCode: 100, sel: [{ ...event, mls: [...event.mls, native] }] });
+      expect(initial[0]?.markets.some(market => market.marketId === "700")).toBe(true);
+      const changed = mergeImFootballDelta(initial, { StatusCode: 100,
+        dc: [{ eid: event.eid, a: 3, v: [{ ...native, ws }] }] });
+      expect(changed[0]?.markets.map(market => market.marketId)).toEqual(["10", "11", "12"]);
+    });
+  it.each([0, null, undefined])("withdraws only an unavailable exact-score price %s and retains its priced sibling", (price) => {
+    const native = { mi: 600, bti: 6, gp: 1, il: false, ws: [
+      { wsi: 601, si: 23, o: 9.63, ot: 3 }, { wsi: 602, si: 24, o: 20, ot: 3 }] };
+    const source = (market: unknown) => ({ StatusCode: 100, sel: [{ ...event, mls: [market] }] });
+    const initial = extractImFootballCatalog(source(native));
+    expect(initial[0]?.markets[0]?.selections).toHaveLength(2);
+    const replacement = { ...native, ws: [native.ws[0], { ...native.ws[1], o: price }] };
+    const changed = mergeImFootballDelta(initial, { StatusCode: 100,
+      dc: [{ eid: event.eid, a: 3, v: [replacement] }] });
+    expect(changed[0]?.markets[0]?.selections).toEqual([
+      expect.objectContaining({ selectionId: "601", selection: "SCORE_2_1", priceText: "9.63" })]);
+    expect(extractImFootballCatalog(source(replacement))).toEqual(changed);
+    expect(observeNativeImFootballMarkets(source(replacement), 100)[0]).toMatchObject({
+      disposition: "NORMALIZED", reason: "PARTIAL_CANONICAL_OUTCOMES", nativeSelections: [
+        { selectionId: "601", price: "9.63" }, { selectionId: "602", price: price === 0 ? "0" : null }] });
+    expect(extractImFootballCatalog(source({ ...replacement, ws: [native.ws[0], { ...native.ws[1], o: "bad" }] }))).toEqual([]);
+    expect(extractImFootballCatalog(source({ ...replacement, ws: [native.ws[0], { ...native.ws[1], si: 999, o: price }] }))).toEqual([]);
+  });
   it.each([true, false, undefined, "false", null])("preserves native market il=%s and never opens an unknown lock state", (il) => {
     const source = { StatusCode: 100, sel: [{ ...event, mls: [{ mi: 888, bti: 8, gp: 1, il,
       ws: [{ wsi: 8881, si: 43, o: 1.5, ot: 3 }] }] }] };

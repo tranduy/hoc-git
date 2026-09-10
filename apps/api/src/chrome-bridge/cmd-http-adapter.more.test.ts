@@ -169,7 +169,23 @@ describe("CMD authenticated native More", () => {
     expect(inventory).toHaveLength(19);
     expect(inventory.find(o => o.nativeType === "MORE:FH:0")).toMatchObject({ disposition: "EXCLUDED", reason: "NATIVE_MARKET_CLOSED" });
     expect(inventory.find(o => o.nativeType === "MORE:FT:1")).toMatchObject({ disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" });
-    expect(inventory.find(o => o.nativeType === "MORE:FT:8.3")).toMatchObject({ disposition: "UNMAPPED" });
+    expect(inventory.find(o => o.nativeType === "MORE:FT:8.3")).toMatchObject({ disposition: "NORMALIZED" });
+  });
+
+  it("removes closed categorical More quotes on the next group snapshot without refreshing retained siblings", () => {
+    const adapter = new CmdHttpCatalogAdapter(); adapter.decode(envelope(main(), 1));
+    const before = catalog(adapter.decode(envelope(fixture.body, 2, true)));
+    expect(before.quotes.filter(q => q.marketType === "FT_CORRECT_SCORE")).toHaveLength(25);
+    const closed = structuredClone(fixture.body); closed.d[2][4][5] = -999;
+    closed.d[2][6] = Array(9).fill(-999);
+    const after = catalog(adapter.decode({ ...envelope(closed, 3, true), observedAtMs: fixture.observedAtMs + 1002 }));
+    expect(after.quotes.filter(q => q.marketType === "FT_CORRECT_SCORE")).toHaveLength(24);
+    expect(after.quotes.some(q => q.marketType === "FT_HALF_FULL_RESULT")).toBe(false);
+    expect(after.quotes.filter(q => !q.providerMarketId.includes(":more:")))
+      .toEqual(before.quotes.filter(q => !q.providerMarketId.includes(":more:")));
+    const refreshed = catalog(adapter.decode(envelope(main(fixture.owner, 2), 4)));
+    expect(refreshed.quotes.filter(q => q.providerMarketId.includes(":more:")))
+      .toEqual(after.quotes.filter(q => q.providerMarketId.includes(":more:")));
   });
 
   it("retains More prices and genuine clocks through a shallow main refresh", () => {

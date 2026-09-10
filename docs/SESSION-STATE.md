@@ -1,6 +1,32 @@
 # Trạng thái làm việc — 2026-09-10
 
-## SBO categorical normalization — 2026-09-10 latest checkpoint
+## SABA / IM / CMD normalization — 2026-09-10 latest checkpoint
+
+User requested the remaining three books. Added proven SABA DOM 1X2/team
+totals, IM score/range/half-full/corner-result and zero-handicap fixes, CMD
+HTTP DC/stat results/card parity and native More categorical terms. Added
+prematch count-tail/scoreless total equivalents. No price/freshness guard relaxed.
+
+Frozen target gains: SABA +79 markets/+231 quotes; IM +5,173/+62,103;
+CMD +65/+183. All 45,111 native observations retained. Same six-book sources:
+50,134 -> 51,175 pairs with decoders only -> 56,518 with equivalents (+6,384),
+zero old pairs lost. Separate wide CMD sample gains869markets, not combined
+with the current sample. Report: `docs/three-book-normalization-2026-09-10.md`.
+
+Remaining is explicit in that report. IM offline result21,130markets is NOT
+the runtime result: IM remains STALE with old15,957market cache and source
+receipt1788964173646. Do not claim IM connection or live prices were repaired.
+CMD replay129newquotes without captured permission remainSUSPENDED.
+
+823 root focused tests passed; contracts/adapters/API/web builds passed.
+Deployed API862475c7-a851-4992-ad26-bc83eee8ddc8,
+buildd2eb28e17c61bd44deabe3d116ab0a88060562e3605042f2eb8107015ecd4572;
+heap4096MiB and lease released. Webindex-Km9esJic.js,
+workercomparison.worker-CK5UmsJE.js. Local/public HTTP200 sameasset verified
+10:08local (public IPv4). SABA/CMD FRESH with new types on accepted receipts.
+Two external IM extension source/test edits remain unstaged and untouched.
+
+## SBO categorical normalization — 2026-09-10 preceding checkpoint
 
 User requested continuation for SBO. Added 22 proven native market groups using
 SBO public outcome tables and frozen real rows. Correct scores, goal/corner

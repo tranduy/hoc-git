@@ -3,11 +3,22 @@ import { footballBinaryMarketSpec, footballCategoricalMarketSpec, isFootballCate
 import type { ComparisonCell } from "./comparison.js";
 const supported = new Set<MarketType>(["FT_EUROPEAN_HANDICAP","FH_EUROPEAN_HANDICAP","CORNER_FT_EUROPEAN_HANDICAP",
   "FT_FINAL_SCORE_AH","FT_RESULT_BTTS","FT_DOUBLE_CHANCE_BTTS","FT_RESULT_OR_BTTS"]);
+const rangeTotals: Partial<Record<MarketType, MarketType>> = {
+  FT_GOAL_RANGE:"FT_TOTAL", FH_GOAL_RANGE:"FH_TOTAL", SH_GOAL_RANGE:"SH_TOTAL",
+  HOME_FT_GOAL_RANGE:"HOME_FT_TOTAL", AWAY_FT_GOAL_RANGE:"AWAY_FT_TOTAL",
+  HOME_FH_GOAL_RANGE:"HOME_FH_TOTAL", AWAY_FH_GOAL_RANGE:"AWAY_FH_TOTAL",
+  CORNER_FT_RANGE:"CORNER_FT_TOTAL", CORNER_FH_RANGE:"CORNER_FH_TOTAL",
+  HOME_CORNER_FT_RANGE:"HOME_CORNER_FT_TOTAL", AWAY_CORNER_FT_RANGE:"AWAY_CORNER_FT_TOTAL"
+};
+const scorelessTotals: Partial<Record<MarketType, MarketType>> = {
+  FT_CORRECT_SCORE:"FT_TOTAL", FH_CORRECT_SCORE:"FH_TOTAL", SH_CORRECT_SCORE:"SH_TOTAL",
+  CORNER_FT_CORRECT_SCORE:"CORNER_FT_TOTAL", CORNER_FH_CORRECT_SCORE:"CORNER_FH_TOTAL"
+};
 
 /** Alternative comparison predicates; source identities and receipts remain native. */
 export function footballComparisonEquivalents(cell:ComparisonCell):readonly ComparisonCell[] {
   const market=cell.market,type=market.marketType;
-  if(!supported.has(type)||market.category!=="FOOTBALL"||market.player!==undefined||market.status!=="OPEN")return [];
+  if((!supported.has(type)&&!rangeTotals[type]&&!scorelessTotals[type])||market.category!=="FOOTBALL"||market.player!==undefined||market.status!=="OPEN")return [];
   const spec=footballBinaryMarketSpec(type)??footballCategoricalMarketSpec(type);
   if(spec===null||spec.scope!==market.scope||spec.settlementProfile!==market.settlementProfile||
     new Set(cell.quotes.map(q=>q.providerSelectionId)).size!==cell.quotes.length||
@@ -29,7 +40,19 @@ export function footballComparisonEquivalents(cell:ComparisonCell):readonly Comp
       sourceMarket:cell.sourceMarket??market,sourceQuotes:cell.sourceQuotes??cell.quotes});
   };
   const european:Partial<Record<MarketType,MarketType>>={FT_EUROPEAN_HANDICAP:"FT_AH",FH_EUROPEAN_HANDICAP:"FH_AH",CORNER_FT_EUROPEAN_HANDICAP:"CORNER_FT_AH"};
-  if(european[type]&&prematch&&market.line!==null&&/^-?(?:0|[1-9]\d*)$/u.test(market.line)&&Number.isSafeInteger(Number(market.line))){
+  if(rangeTotals[type]&&prematch&&market.line===null){
+    // Counts are nonnegative integers. Only a complete lower or upper tail
+    // equals a no-push total; a bounded interior bucket does not.
+    for(const q of cell.quotes){
+      const range=/^RANGE_(\d+)_(\d+|PLUS)$/u.exec(q.selection);
+      if(!range)continue;
+      const lower=Number(range[1]);
+      if(lower===0&&range[2]!=="PLUS")add(rangeTotals[type]!,String(Number(range[2])+0.5),q,"UNDER");
+      else if(lower>0&&range[2]==="PLUS")add(rangeTotals[type]!,String(lower-0.5),q,"OVER");
+    }
+  }else if(scorelessTotals[type]&&prematch&&market.line===null){
+    for(const q of cell.quotes)if(q.selection==="SCORE_0_0")add(scorelessTotals[type]!,"0.5",q,"UNDER");
+  }else if(european[type]&&prematch&&market.line!==null&&/^-?(?:0|[1-9]\d*)$/u.test(market.line)&&Number.isSafeInteger(Number(market.line))){
     for(const q of cell.quotes)if(q.selection==="HOME"||q.selection==="AWAY")
       add(european[type]!,String(Number(market.line)+(q.selection==="HOME"?-0.5:0.5)),q);
   }else if(type==="FT_FINAL_SCORE_AH"&&prematch&&market.line!==null&&/^-?(?:0|[1-9]\d*)\.5$/u.test(market.line)){

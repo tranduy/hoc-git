@@ -116,6 +116,27 @@ const value = (updates: readonly { value?: unknown }[]) => updates[0]?.value as 
 };
 
 describe("SabaWsCatalogAdapter collector boundary", () => {
+  it("withdraws an unavailable team-total OVER slot on the next accepted main roster", () => {
+    const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+    const roster = (generation: string, overPrice: string) => mainItems(generation).map(item => {
+      if (item.kind !== "CAPTURE") return item;
+      return { ...item, record: { ...item.record, groups: [{ betTypeIds: ["461"], labels: ["1.5", "u"],
+        odds: [overPrice, "1.51"].map(priceText => ({ marketOddsId: `${item.ownerMatchId}-total`,
+          priceText, status: null, greyedOut: "false" })) }] } };
+    });
+    const firstGeneration = "saba:collector:team-total-first";
+    const first = value(adapter.decode(collectorEnvelope(firstGeneration, roster(firstGeneration, "2.38"), 1)));
+    expect(first.quotes).toHaveLength(4);
+    expect(first.quotes).toContainEqual(expect.objectContaining({ selection: "OVER", rawOdds: "2.38",
+      rawFormat: "DECIMAL" }));
+    const nextGeneration = "saba:collector:team-total-next";
+    const next = value(adapter.decode(collectorEnvelope(nextGeneration, roster(nextGeneration, "0"), 2)));
+    expect(next.quotes).toHaveLength(2);
+    expect(next.quotes.every(quote => (quote as { selection?: string }).selection === "UNDER" &&
+      quote.rawOdds === "1.51")).toBe(true);
+    expect(next.nativeMarketObservations).toHaveLength(2);
+  });
+
   it("authorizes validated main rosters before any More result and marks hidden completion separately", () => {
     const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
     const generation = "saba:collector:main-authority:main";

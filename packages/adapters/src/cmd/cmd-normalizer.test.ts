@@ -22,17 +22,19 @@ describe("normalizeCmdCatalog", () => {
   });
 
   it.each([["5", "FULL_TIME"], ["15", "FIRST_HALF"]] as const)(
-    "preserves SABA %s decimal prices and period without inventing unlabeled outcome order", (nativeType, nativeScope) => {
+    "preserves SABA %s decimal prices and the public renderer's unlabeled outcome order", (nativeType, nativeScope) => {
       const input = { ...record, groups: [{ betTypeIds: [nativeType], labels: [],
         odds: ["2.39", "2.54", "3.25"].map((priceText) => ({ marketOddsId: "134039544__1062462885",
           priceText, priceFormat: "DECIMAL" as const, status: null, greyedOut: "false" })) }] };
       const options = { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 123,
         timezoneOffsetMinutes: 480, sequence: 7 };
-      expect(normalizeObservedFootballCatalog("SABA", [input], options).markets).toEqual([]);
+      const normalized = normalizeObservedFootballCatalog("SABA", [input], options);
+      expect(normalized.markets).toHaveLength(1);
+      expect(normalized.quotes.map(q => q.selection)).toEqual(["HOME", "AWAY", "DRAW"]);
       expect(observeNativeCmdMarkets("SABA", [input], options)).toEqual([
         expect.objectContaining({ providerMarketId: "134039544__1062462885", nativeType, nativeScope,
-          disposition: "EXCLUDED", reason: "NATIVE_RESULT_OUTCOME_UNPROVEN",
-          outcomeLabels: ["OUTCOME_1", "OUTCOME_2", "OUTCOME_3"],
+          disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED",
+          outcomeLabels: ["HOME", "AWAY", "DRAW"],
           nativeSelections: ["2.39", "2.54", "3.25"].map((price) => ({ selectionId: null,
             outcomeId: null, line: null, price, rawFormat: "DECIMAL", status: "OPEN" })) })
       ]);

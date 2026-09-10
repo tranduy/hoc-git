@@ -1,6 +1,7 @@
 import { normalizeObservedFootballCatalog, type CmdCatalogInputRecord } from "@tool-chenh/adapters";
-import { footballBinaryMarketSpec, type NativeMarketObservation, type ProviderMarket } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, footballCategoricalMarketSpec, type NativeMarketObservation, type ProviderMarket } from "@tool-chenh/contracts";
 import type { NormalizedCatalogPart } from "./catalog-part-merge.js";
+import { cmdMoreTerms, type CmdMoreTerms } from "./cmd-more-terms.js";
 
 export interface CmdNativeMore {
   readonly groupId: string;
@@ -52,7 +53,8 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
         // Saved More renderer: FT/FH[1] uses HOME/DRAW/AWAY via One/Home,
         // X/Home, Two/Away; FT[2] uses OneX/Home, OneTwo/Home, XTwo/Away.
         // Both call GetX12OddsFormat (decimal) and GetExtraParams's individual
-        // valid-price click gate. This does not prove main-row DC's format.
+        // valid-price click gate. The HTTP main DC mapping separately verifies
+        // the same named native fields against archived main/More tuples.
         const doubleChance = path === "2";
         const outcomes = doubleChance ? dcOutcomes : resultOutcomes;
         const marketId = `${native.eventId}:more:${period}:${doubleChance ? "DoubleChance" : "1X2"}`;
@@ -67,6 +69,31 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
         observe(row, path, part.markets.length > 0 ? "NORMALIZED" : "EXCLUDED",
           part.markets.length > 0 ? "CANONICAL_MARKET_MAPPED" : row.length !== 3 ? "INVALID_RESULT_SHAPE"
             : valid.length === 0 ? "NATIVE_MARKET_CLOSED" : "EVENT_NOT_COMPARABLE", marketId);
+        return;
+      }
+      const terms = cmdMoreTerms(native.eventId, period, path, row);
+      if (terms !== null) {
+        // An already classified corners/bookings event must not acquire goal terms.
+        const event = identity.events[0];
+        const goalEvent = event !== undefined && !unsupportedPeriod &&
+          !/\s*-\s*(?:CORNERS|BOOKINGS)\s*(?:\(\s*loading\s*\))?\s*$/iu.test(owner.leagueName);
+        const added = new Set<string>();
+        if (goalEvent) for (const leg of terms.legs) {
+          const spec = footballCategoricalMarketSpec(leg.marketType);
+          if (spec === null) continue;
+          const providerMarketId = `${native.eventId}:more:${period}:${path}:${leg.marketType}`;
+          if (!added.has(providerMarketId)) {
+            added.add(providerMarketId);
+            markets.push({ provider: "CMD", category: "FOOTBALL", providerEventId: native.eventId, providerMarketId,
+              marketType: leg.marketType, scope: spec.scope, line: leg.line, settlementProfile: spec.settlementProfile, status: "OPEN" });
+          }
+          quotes.push({ provider: "CMD", category: "FOOTBALL", providerEventId: native.eventId, providerMarketId,
+            providerSelectionId: leg.selectionId, marketType: leg.marketType, scope: spec.scope, selection: leg.selection,
+            line: leg.line, rawOdds: String(row[leg.index]), rawFormat: "DECIMAL", status: "OPEN", isLive: event.isLive,
+            sourceTimestampMs: null, receivedMonotonicMs: receipt.receivedMonotonicMs, sequence: receipt.sequence });
+        }
+        observe(row, path, added.size > 0 ? "NORMALIZED" : "EXCLUDED", !goalEvent ? "EVENT_NOT_COMPARABLE"
+          : terms.reason ?? (added.size > 0 ? "CANONICAL_MARKET_MAPPED" : "NATIVE_MARKET_CLOSED"), undefined, terms);
         return;
       }
       if (path !== "0") {
@@ -90,7 +117,7 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
         return;
       }
       const marketType = (period === "FT" ? base.marketType : base.marketType === "FT_ODD_EVEN"
-        ? "FH_ODD_EVEN" : "CORNER_FH_ODD_EVEN");
+        ? "FH_ODD_EVEN" : base.marketType === "CARD_FT_ODD_EVEN" ? "CARD_FH_ODD_EVEN" : "CORNER_FH_ODD_EVEN");
       const spec = footballBinaryMarketSpec(marketType)!;
       const market: ProviderMarket = { ...base, marketType, scope: spec.scope, settlementProfile: spec.settlementProfile };
       markets.push(market);
@@ -100,7 +127,7 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
       observe(row, path, "NORMALIZED", "CANONICAL_MARKET_MAPPED", marketId);
     };
     const observe = (row: readonly unknown[], path: string, disposition: NativeMarketObservation["disposition"],
-      reason: string, marketId = `${native.eventId}:more:${period}:${path}`): void => {
+      reason: string, marketId = `${native.eventId}:more:${period}:${path}`, terms?: CmdMoreTerms): void => {
       const result = path === "1" || period === "FT" && path === "2";
       const outcomes = path === "2" ? dcOutcomes : resultOutcomes;
       const wholeRowClosed = period === "FT" && path === "2" && nativeDcRowClosed(row);
@@ -117,6 +144,7 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
             : typeof price === "number" && price > 1 ? { status: "OPEN" as const }
             : price === -999 || price === 0 || typeof price === "number" && price > 0 && price < 1 ? { status: "CLOSED" as const } : {})
         })) } : {}),
+        ...(terms === undefined ? {} : { outcomeLabels: terms.outcomeLabels, nativeSelections: terms.nativeSelections }),
         observedAtMs: receipt.observedAtMs, disposition: identity.events.length === 0 || unsupportedPeriod ? "EXCLUDED" : disposition,
         reason: identity.events.length === 0 ? "EVENT_NOT_COMPARABLE"
           : unsupportedPeriod ? "EVENT_PERIOD_SETTLEMENT_UNSUPPORTED" : reason });

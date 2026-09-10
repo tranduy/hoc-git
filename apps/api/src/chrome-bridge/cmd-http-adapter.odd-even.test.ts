@@ -27,6 +27,18 @@ const main = (row = owner()) => ({ t: 1, a: true, data: [], today: [row], f: [] 
 const oddEven = (value: ObservedProviderCatalog) => value.quotes.filter((quote) => quote.marketType.endsWith("ODD_EVEN"));
 
 describe("CMD native main Odd/Even normalization", () => {
+  it("withdraws both odd/even periods when the native visibility command hides OE, including later price deltas", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    adapter.decode(envelope(main(), 1));
+    const hide = [fixture.owner[0], 1, 118, false, false, true, fixture.owner[3], String(fixture.owner[32]), null, fixture.owner[25], null, fixture.owner[67]];
+    const hidden = catalog(adapter.decode(envelope({ t: 2, a: true, data: [hide] }, 2)));
+    expect(oddEven(hidden)).toEqual([]);
+    expect(hidden.nativeMarketObservations).toContainEqual(expect.objectContaining({ nativeType: "MAIN:2", reason: "NATIVE_MARKET_HIDDEN" }));
+    const prices = catalog(adapter.decode(envelope({ t: 3, a: true, data: [[fixture.owner[0], 1, 48, 0.95, 0.93]] }, 3)));
+    expect(oddEven(prices)).toEqual([]);
+    const reopened = catalog(adapter.decode(envelope({ t: 4, a: true, data: [[...hide.slice(0, 5), false, ...hide.slice(6)]] }, 4)));
+    expect(oddEven(reopened)).toHaveLength(4);
+  });
   it("emits FT and FH canonical markets from the native main row without a More receipt", () => {
     const value = catalog(new CmdHttpCatalogAdapter().decode(envelope(main(), 1)));
     expect(oddEven(value).map((quote) => [quote.providerMarketId, quote.marketType, quote.scope,
