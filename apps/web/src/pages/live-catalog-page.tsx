@@ -39,6 +39,7 @@ import type { TicketReportApiLike } from "../api/ticket-report.js";
 import { CatalogRevisionCoordinator } from "../catalog/catalog-revision-coordinator.js";
 import { CatalogRevisionCache } from "../catalog/catalog-revision-cache.js";
 import { ComparisonWorkerClient, type HydratedComparisonWorkerOutput } from "../catalog/comparison-worker-client.js";
+import { hydratePairableCatalogs } from "../catalog/pairable-event-plan.js";
 import { ProviderSourceRecoveryApi, type ProviderSourceRecoveryApiLike } from "../api/provider-source-recovery.js";
 import { ProviderSourceRecoveryCoordinator, type ProviderAutomaticRecoveryTiming, type ProviderRecoverySnapshot,
   type RecoverableProvider } from "../watch/provider-source-recovery.js";
@@ -786,7 +787,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     if (requestedIds.length === 0) return;
     for (const id of requestedIds) catalogRefreshesInFlight.current.add(id);
     try {
-      const results = await Promise.allSettled(requestedIds.map((id) => (async () => {
+      const readOne = async (id: string): Promise<CatalogReadResult> => {
         const requestedSource = sourcesRef.current.find((source) => source.id === id);
         if (requestedSource === undefined) throw new Error("Catalog source is unavailable");
         const legacyFallbackIds = catalogSourceApi === undefined ? accountsRef.current.filter((account) =>
@@ -808,7 +809,26 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         }
         if (value === null) throw lastError;
         return value;
-      })().finally(() => catalogRefreshesInFlight.current.delete(id))));
+      };
+      let results: readonly PromiseSettledResult<CatalogReadResult>[];
+      if (catalogSourceApi !== undefined && catalogApi.readRosterRevision !== undefined &&
+        catalogApi.readEventsRevision !== undefined) {
+        results = await hydratePairableCatalogs({
+          accountIds: requestedIds,
+          existingCatalogs: catalogsRef.current.filter((catalog) => catalog.category === expectedCategory),
+          readRoster: async (id) => {
+          const source = sourcesRef.current.find((candidate) => candidate.id === id);
+          if (source === undefined) throw new Error("Catalog source is unavailable");
+          const result = await catalogApi.readRosterRevision!(id);
+          if (result.catalog.accountId !== id || result.catalog.provider !== source.provider ||
+            result.catalog.category !== expectedCategory) throw new Error("Catalog identity mismatch");
+          return result;
+          },
+          readEvents: (id, eventIds) => catalogApi.readEventsRevision!(id, eventIds)
+        });
+      } else {
+        results = await Promise.allSettled(requestedIds.map(readOne));
+      }
       const completedResults = results.flatMap((result) => result.status === "fulfilled" &&
         result.value.catalog.category === expectedCategory ? [result.value] : []);
       for (const result of completedResults) {
@@ -930,9 +950,12 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       setCategory(initialCategory); saveCatalogCategory(window.localStorage, initialCategory);
       if (!autoLoaded.current && initial.size > 0) {
         autoLoaded.current = true;
-        for (const id of [...initial].sort((left, right) =>
-          catalogReadPriority(left) - catalogReadPriority(right))) {
-          void loadIds([id], true, initialCategory);
+        if (catalogSourceApi !== undefined && catalogApi.readRosterRevision !== undefined &&
+          catalogApi.readEventsRevision !== undefined) {
+          void loadIds([...initial], true, initialCategory);
+        } else {
+          for (const id of [...initial].sort((left, right) =>
+            catalogReadPriority(left) - catalogReadPriority(right))) void loadIds([id], true, initialCategory);
         }
       }
     };

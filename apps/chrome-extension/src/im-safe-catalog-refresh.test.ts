@@ -98,6 +98,37 @@ describe("IM safe roster collection", () => {
       elapsedMs: 0, headAtMs: 0, localFailureCount: 1 } });
   });
 
+  it("keeps the first local rounds prompt then escalates the wait to a 15-minute cap", async () => {
+    const origin = shared(), h = harness(origin); await h.tick(); vi.setSystemTime(START + 30_000);
+    const key = "__fieldlineImSafeCatalogGateV1";
+    const failRound = async () => {
+      const running = h.tick("round"); await h.settle();
+      await vi.advanceTimersByTimeAsync(15_000);
+      for (const request of h.requests.slice(-2)) request.fail();
+      return running;
+    };
+    // Clearing the persisted deadline stands in for waiting it out, so the test
+    // does not have to advance fake timers across a quarter of an hour.
+    const openGate = (patch: Record<string, unknown> = {}) => {
+      const gate = JSON.parse(origin.storage.getItem(key)!);
+      origin.storage.setItem(key, JSON.stringify({ ...gate, armedAtMs: 0, nextAtMs: 0, ...patch }));
+    };
+    for (const [index, expected] of [30_000, 30_000, 30_000, 60_000, 120_000].entries()) {
+      expect(await failRound()).toMatchObject({ coverage: { failureStage: "NETWORK",
+        headAtMs: null, localFailureCount: index + 1, retryInMs: expected } });
+      openGate();
+    }
+    // A long run saturates rather than growing without bound.
+    openGate({ failures: 20, localFailures: 20 });
+    expect(await failRound()).toMatchObject({ coverage: { retryInMs: 900_000 } });
+    // An unanswered run still never arms the provider breaker: nothing was read
+    // from the provider that could be called a refusal.
+    expect(JSON.parse(origin.storage.getItem(key)!)).toMatchObject({ providerFailures: 0, hardBlocked: false });
+    openGate();
+    const recovered = h.tick("recovered"); await h.success();
+    expect(await recovered).toMatchObject({ status: "catalog-requested", coverage: { localFailureCount: 0 } });
+  }, 20_000);
+
   it("reports the original timeout stage and clock through cooldown without counting another failed round", async () => {
     const origin = shared(), h = harness(origin);
     await h.tick(); vi.setSystemTime(START + 30_000);

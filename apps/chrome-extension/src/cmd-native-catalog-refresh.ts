@@ -14,6 +14,12 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
   for (const name of ["rosterFailed", "requestPaused"]) {
     if (typeof status[name] === "boolean") fields.push(`${name}:${status[name] ? 1 : 0}`);
   }
+  // Predicate name and row count only; anything else the page could put here is
+  // dropped rather than carried into diagnostics.
+  const reject = status.rosterReject;
+  if (typeof reject === "string" && /^r[01]-[a-z-]{1,32}(?:-\d{1,9})?$/u.test(reject)) {
+    fields.push(`rosterReject:${reject}`);
+  }
   return `CMD_NATIVE[${fields.join(";")}]`;
 }
 
@@ -31,7 +37,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     let state = root[key];
     if (!state) state = root[key] = { generation, enabled: true, lastTick: 0, nextRosterAt: 0,
       rosterActive: 0, cycle: null, owners: new Map(), queue: [], active: new Map(),
-      todayRows: 0, earlyRows: 0, runningRows: 0, rosterAtMs: 0, rosterFailed: false };
+      todayRows: 0, earlyRows: 0, runningRows: 0, rosterAtMs: 0, rosterFailed: false,
+      rosterReject: null };
     // Keep backpressure in the document across worker/source-epoch changes.
     state.retryAtMs ??= 0; state.failureAtMs ??= -1; state.requestFailures ??= 0;
     state.requestStatus ??= 0; state.nextMoreAt ??= 0; state.pumpTimer ??= null;
@@ -100,13 +107,28 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       row.length % 2 === 0 && row.every((value, index) => index % 2 === 0
         ? typeof value === 'number' && Number.isSafeInteger(value) && value > 0
         : typeof value === 'string' && value.length > 0 && value.length <= 256);
-    const rows = (value) => Array.isArray(value) && value.length <= 20000 &&
-      value.every((row) => fullRow(row) || metadataRow(row));
-    const fullResponse = (value, index) => value && typeof value === 'object' && value.a === true &&
-      /^(?:0|[1-9]\d*)$/u.test(String(value.t)) && Number.isSafeInteger(Number(value.t)) &&
-      Object.prototype.hasOwnProperty.call(value, 'f') && rows(value.today) &&
-      (index === 0 ? rows(value.data) : value.data === undefined || rows(value.data)) &&
-      Object.keys(value).every((name) => ['a', 't', 'data', 'today', 'f'].includes(name));
+    // A roster that fails validation used to report only that it failed, which
+    // cannot tell a provider outage from our own bound being too small. The
+    // reason is a predicate name and a row count - shape, never native content.
+    const rowsReject = (value, label) => {
+      if (!Array.isArray(value)) return label + '-absent';
+      if (value.length > 20000) return label + '-over-cap-' + value.length;
+      return value.every((row) => fullRow(row) || metadataRow(row)) ? null : label + '-row-shape';
+    };
+    const responseReject = (value, index) => {
+      if (!value || typeof value !== 'object') return 'not-object';
+      if (value.a !== true) return 'flag-a';
+      if (!/^(?:0|[1-9]\d*)$/u.test(String(value.t)) || !Number.isSafeInteger(Number(value.t))) return 'field-t';
+      if (!Object.prototype.hasOwnProperty.call(value, 'f')) return 'field-f';
+      const today = rowsReject(value.today, 'today');
+      if (today !== null) return today;
+      if (index === 0 || value.data !== undefined) {
+        const data = rowsReject(value.data, 'data');
+        if (data !== null) return data;
+      }
+      return Object.keys(value).every((name) => ['a', 't', 'data', 'today', 'f'].includes(name))
+        ? null : 'extra-key';
+    };
     const diagnostics = () => {
       const owners = [...state.owners.values()];
       const done = owners.filter((owner) => owner.doneAt > 0).length;
@@ -116,7 +138,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         failed: owners.filter((owner) => owner.failed).length, active: state.active.size,
         rosterActive: state.rosterActive, rosterFailed: state.rosterFailed, rosterAtMs: state.rosterAtMs,
         requestPaused: paused(), requestStatus: state.requestStatus,
-        requestRetryInMs: Math.max(0, state.retryAtMs - Date.now()) };
+        requestRetryInMs: Math.max(0, state.retryAtMs - Date.now()),
+        rosterReject: state.rosterReject ?? null };
       root.dataset.fieldlineCmdNativeCoverage = JSON.stringify(result);
       return result;
     };
@@ -196,7 +219,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       state.owners = owners;
       state.queue = state.queue.filter((id) => owners.has(id));
       state.todayRows = today.length; state.earlyRows = early.length; state.runningRows = live.length;
-      state.rosterAtMs = Date.now(); state.rosterFailed = false; state.nextRosterAt = Date.now() + 30000;
+      state.rosterAtMs = Date.now(); state.rosterFailed = false; state.rosterReject = null;
+      state.nextRosterAt = Date.now() + 30000;
       pump();
     };
     if (!paused() && state.rosterActive === 0 && Date.now() >= state.nextRosterAt) {
@@ -209,8 +233,9 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         const finish = (value) => {
           if (finished) return;
           finished = true; state.rosterActive -= 1; cycle.pending -= 1;
-          if (fullResponse(value, index)) { cycle.values[index] = value; requestSucceeded(startedAtMs); }
-          else cycle.failed = true;
+          const reject = responseReject(value, index);
+          if (reject === null) { cycle.values[index] = value; requestSucceeded(startedAtMs); }
+          else { cycle.failed = true; state.rosterReject = 'r' + index + '-' + reject; }
           if (cycle.pending === 0) commit(cycle);
           diagnostics();
         };

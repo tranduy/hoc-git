@@ -111,11 +111,33 @@ export function buildImCatalogRefreshExpression(generation: string,
     });
     // Existing source-proven football request scope; acquisition does not infer
     // additional native bet types or game periods from normalized market names.
+    const betTypeIds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313];
+    // The provider answers one GetSE from a budget of about fifteen seconds and
+    // returns StatusCode 9999 with an empty body when a query exceeds it.
+    // Measured 2026-09-10 against the live account, Market 1, same minute:
+    //
+    //   bet types |  head  |   body  | events | markets | StatusCode
+    //           3 |  4.8s  |  6.7MB  |   1979 |       - |        100
+    //           5 |  5.8s  |  7.1MB  |   1979 |  26 021 |        100
+    //          10 | 15.3s  | 15.8MB  |   1979 |  40 333 |        100
+    //          20 | 15.0s  |    28B  |      0 |       0 |       9999
+    //          40 | 15.1s  |    28B  |      0 |       0 |       9999
+    //
+    // So the unfiltered set never returned anything on this market: the roster
+    // had been asking for a query the provider cannot answer, which is what
+    // took the book dark. Market 2 carries far fewer events and answers the
+    // whole set in about five seconds, so only Market 1 is bounded here.
+    // Five types already yield more markets than the pipeline published when
+    // it was last healthy, and leave the request at half the provider budget.
+    const MARKET_1_BET_TYPE_LIMIT = 5;
     const common = { SportId: 1,
-      BetTypeIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313],
+      BetTypeIds: betTypeIds,
       GamePeriods: [1, 2, 3], IsCombo: false, ['O' + 'ddsType']: 2,
       DateFrom: new Date(startedAt).toISOString().slice(0, 10).replace(/-/g, '/'),
       CompetitionIds: [], SortType: 2, ProgrammeIds: [] };
+    const scopeFor = (Market) => Market === 1
+      ? { ...common, BetTypeIds: betTypeIds.slice(0, MARKET_1_BET_TYPE_LIMIT), Market }
+      : { ...common, Market };
     const request = async (path, body) => {
       const controller = new AbortController();
       state.controllers.add(controller);
@@ -265,7 +287,7 @@ export function buildImCatalogRefreshExpression(generation: string,
     if (!state.mainOperation) {
       if (!allowDetails) { state.safeFailures = []; state.lastFailure = null; }
       const pair = [1, 2].map(async (Market) => ({ market: Market,
-        ...await request('/api/EventV6/GetSE', { ...common, Market }) }));
+        ...await request('/api/EventV6/GetSE', scopeFor(Market)) }));
       // The safe caller holds an origin lock until both physical requests settle.
       const paired = allowDetails ? Promise.all(pair) : Promise.allSettled(pair).then(results => {
         const failed = results.find(result => result.status === 'rejected');

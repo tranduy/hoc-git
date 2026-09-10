@@ -80,6 +80,25 @@ describe("CatalogApi", () => {
     await new CatalogApi(fetcher, 10_000, 30_000, "summary").read("account-1");
     expect(fetcher.mock.calls[0]?.[0]).toBe("/api/catalog/accounts/account-1?nativeDetail=summary");
   });
+
+  it("loads a fixture roster first and then only the requested events", async () => {
+    const calls: string[] = [];
+    const api = new CatalogApi(async (input) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify(response), { status: 200,
+        headers: { etag: '"catalog-100"', "x-catalog-revision": "catalog-100" } });
+    }, 10_000, 30_000, "counts");
+
+    const roster = await api.readRosterRevision("account-1");
+    const selected = await api.readEventsRevision("account-1", ["event-b", "event-a", "event-a"]);
+
+    expect(calls).toEqual([
+      "/api/catalog/accounts/account-1?nativeDetail=counts&markets=none",
+      "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-a%2Cevent-b"
+    ]);
+    expect(roster.revision).toBe("catalog-100|roster");
+    expect(selected.revision).toBe("catalog-100|events:event-a,event-b");
+  });
   it("loads a live account catalog through a path parameter", async () => {
     const calls: string[] = [];
     const api = new CatalogApi(async (input) => {

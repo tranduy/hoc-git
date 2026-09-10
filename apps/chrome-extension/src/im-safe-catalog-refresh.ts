@@ -63,6 +63,15 @@ export function buildImSafeCatalogRefreshExpression(generation: string): string 
           if (gate.hardBlocked) return empty('collector-paused', gate.lastFailure, null, gate);
           if (now < Math.max(gate.armedAtMs, gate.nextAtMs)) return empty('rate-limited', gate.lastFailure, 'COOLDOWN', gate);
           // Persist before signing or fetching. A crash consumes this admission.
+          // This spacing is the whole book's update rhythm: the provider sends
+          // no delta, so nothing refreshes between admissions. Halving it to ten
+          // seconds was tried on 2026-09-10 and measured again over a clean
+          // window: p50 moved 15.6s to 15.3s and p95 stayed outside the
+          // thirty-second contract, so it bought nothing, while doubling this
+          // book's request rate against a shared response-body capture that
+          // later began losing bodies on every book. The rate stays where the
+          // evidence puts it; the contract is missed for reasons upstream of
+          // this number.
           gate.nextAtMs = now + 20_000;
           save(gate);
           let roundFailed = false;
@@ -78,9 +87,6 @@ export function buildImSafeCatalogRefreshExpression(generation: string): string 
               !(Number.isFinite(failure.retryAfterMs) && failure.retryAfterMs > 0);
             if (!local && !providerRoundFailed) { gate.providerFailures++; providerRoundFailed = true; }
             if (local && !localRoundFailed) { gate.localFailures++; localRoundFailed = true; }
-            // Counting local rounds does not change any deadline. It is the
-            // record that tells a run of unanswered requests apart from one
-            // slow round when the diagnostic is read later.
             if (!gate.hardBlocked || hard) gate.lastFailure = { status: failure.status,
               nativeStatusCode: failure.nativeStatusCode, errorCategory: failure.errorCategory,
               observedAtMs: failure.observedAtMs,
@@ -88,9 +94,18 @@ export function buildImSafeCatalogRefreshExpression(generation: string): string 
               elapsedMs: Number.isSafeInteger(failure.elapsedMs) ? failure.elapsedMs : null,
               headAtMs: Number.isSafeInteger(failure.headAtMs) ? failure.headAtMs : null };
             gate.hardBlocked = gate.hardBlocked || hard;
-            // Local inability to obtain a response is not provider refusal.
-            // Unknown failures retain the conservative provider breaker.
-            gate.nextAtMs = Math.max(gate.nextAtMs, Date.now() + (!local && gate.providerFailures >= 3 ? 900_000 : 30_000),
+            // Local inability to obtain a response is not provider refusal, and
+            // the first rounds stay prompt so an ordinary blip recovers fast.
+            // A long run is different: measured 2026-09-10, this lane spent
+            // 11.7 hours making 548 requests that never received a response
+            // head at all (elapsedMs 15008, headAtMs null, every one of them),
+            // because a flat wait retries a dead lane forever at full rate.
+            // Escalating after the third keeps the prompt retries and stops the
+            // run from sustaining itself. It still never sets the provider
+            // breaker: an unanswered request is not a refusal we can read.
+            const localWaitMs = Math.min(900_000, 30_000 * 2 ** Math.max(0, gate.localFailures - 3));
+            gate.nextAtMs = Math.max(gate.nextAtMs,
+              Date.now() + (!local && gate.providerFailures >= 3 ? 900_000 : local ? localWaitMs : 30_000),
               Number.isFinite(failure.retryAfterMs) ? failure.retryAfterMs : 0);
             try { save(gate); } catch (error) { window.__fieldlineImSafeStorageFailed = true; throw error; }
           };

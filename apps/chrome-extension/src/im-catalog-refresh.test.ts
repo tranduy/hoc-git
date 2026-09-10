@@ -119,6 +119,24 @@ describe("IM native detail acquisition", () => {
     expect(h.parsed(await resumed).sel.map((e: any) => e.eid)).toEqual([3]);
   });
 
+  it("keeps the Market 1 roster inside the provider's query budget", async () => {
+    const h = harness(); const run = h.tick("source:1:document:1", { allowDetails: false });
+    await h.settle();
+    const pair = h.mains().slice(-2);
+    const live = pair.find(r => r.body.Market === 1)!;
+    const other = pair.find(r => r.body.Market === 2)!;
+    // Measured 2026-09-10 against the live account: this market answers five bet
+    // types in under six seconds and refuses twenty or forty with StatusCode
+    // 9999 and an empty body, which is what took the book dark. The other market
+    // carries far fewer events and answers the whole set in about five seconds.
+    expect(live.body.BetTypeIds).toEqual([1, 2, 3, 4, 5]);
+    expect(other.body.BetTypeIds).toHaveLength(40);
+    expect(live.body.GamePeriods).toEqual([1, 2, 3]);
+    expect(other.body.GamePeriods).toEqual([1, 2, 3]);
+    await h.commit([event(1)]);
+    expect(h.parsed(await run).sel).toHaveLength(1);
+  });
+
   it("requests the source-proven unfiltered event route and retains every actual native family", async () => {
     // Actual signed response 1788866173879; only execution clocks are synthetic.
     // abtp is a tab subset: this complete response has 68 types, not the old40.

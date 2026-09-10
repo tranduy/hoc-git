@@ -1318,7 +1318,10 @@ describe("NetworkObserver", () => {
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("profile?.StatusCode === 100 && profile.im === true");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("credentials: 'omit'");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SportId: 1");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("BetTypeIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313]");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("const betTypeIds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313]");
+    // The provider refuses a Market 1 query over its own budget, so that market
+    // asks for a bounded prefix while Market 2 still carries the whole set.
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("betTypeIds.slice(0, MARKET_1_BET_TYPE_LIMIT)");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("GamePeriods: [1, 2, 3]");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("IsCombo: false");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SortType: 2");

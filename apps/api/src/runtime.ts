@@ -64,6 +64,7 @@ export interface RuntimeOpportunityPolicy {
 export interface RuntimeOptions {
   readonly adapters: readonly ProviderAdapter[];
   readonly clock?: RuntimeClock;
+  readonly eventMapper?: typeof mapEvents;
   readonly mappingPolicy?: MappingPolicy;
   readonly freshnessPolicies?: Readonly<Record<string, SourceFreshnessPolicy>>;
   readonly opportunityPolicy?: RuntimeOpportunityPolicy;
@@ -236,6 +237,33 @@ function candidateEventId(left: NormalizedEvent, right: NormalizedEvent): string
   ])}`;
 }
 
+function indexedEventIdentity(event: NormalizedEvent): string | null {
+  if (
+    event.competition.length === 0 ||
+    event.seasonStage === null ||
+    event.seasonStage.length === 0 ||
+    event.canonicalParticipantA === null ||
+    event.canonicalParticipantA.length === 0 ||
+    event.canonicalParticipantB === null ||
+    event.canonicalParticipantB.length === 0 ||
+    event.eventScope === null ||
+    event.startAtUtcMs === null
+  ) return null;
+
+  const participants = event.category === "LOL"
+    ? [event.canonicalParticipantA, event.canonicalParticipantB].sort(compareText)
+    : [event.canonicalParticipantA, event.canonicalParticipantB];
+  return composite([
+    event.category,
+    event.competition,
+    event.seasonStage,
+    participants[0]!,
+    participants[1]!,
+    event.eventScope,
+    event.isLive ? "LIVE" : "PREMATCH"
+  ]);
+}
+
 function canonicalEvent(candidate: Omit<EventCandidate, "canonical">): CanonicalEvent {
   const { left, right, result } = candidate;
   return {
@@ -273,6 +301,7 @@ function canonicalOutcome(quote: ProviderQuote, event: NormalizedEvent): string 
 export class Runtime {
   readonly #adapters: readonly ProviderAdapter[];
   readonly #clock: RuntimeClock;
+  readonly #eventMapper: typeof mapEvents;
   readonly #mappingPolicy: MappingPolicy;
   readonly #freshnessPolicies: Readonly<Record<string, SourceFreshnessPolicy>>;
   readonly #opportunityPolicy: RuntimeOpportunityPolicy;
@@ -305,6 +334,7 @@ export class Runtime {
   constructor(options: RuntimeOptions) {
     this.#adapters = [...options.adapters];
     this.#clock = options.clock ?? defaultClock;
+    this.#eventMapper = options.eventMapper ?? mapEvents;
     this.#mappingPolicy = options.mappingPolicy ?? defaultMappingPolicy;
     const providers = new Set([
       "SABA",
@@ -722,12 +752,27 @@ export class Runtime {
       const [category, leftProvider, rightProvider] = sourcePair.split("|").map(decodeURIComponent) as [Category, string, string];
       const leftEvents = normalized.filter((event) => event.category === category && event.provider === leftProvider);
       const rightEvents = normalized.filter((event) => event.category === category && event.provider === rightProvider);
-      const edges = leftEvents.flatMap((left) => rightEvents.map((right) => ({
-        left,
-        right,
-        result: mapEvents(left, right, this.#mappingPolicy),
-        distanceMs: Math.abs((left.startAtUtcMs ?? 0) - (right.startAtUtcMs ?? 0))
-      }))).sort((first, second) => first.distanceMs - second.distanceMs ||
+      const rightByIdentity = new Map<string, NormalizedEvent[]>();
+      for (const right of rightEvents) {
+        const identity = indexedEventIdentity(right);
+        if (identity === null) continue;
+        const candidates = rightByIdentity.get(identity) ?? [];
+        candidates.push(right);
+        rightByIdentity.set(identity, candidates);
+      }
+      const edges = leftEvents.flatMap((left) => {
+        const identity = indexedEventIdentity(left);
+        if (identity === null || left.startAtUtcMs === null) return [];
+        return (rightByIdentity.get(identity) ?? [])
+          .filter((right) => right.startAtUtcMs !== null &&
+            Math.abs(left.startAtUtcMs! - right.startAtUtcMs) <= this.#mappingPolicy.prematchToleranceMs)
+          .map((right) => ({
+            left,
+            right,
+            result: this.#eventMapper(left, right, this.#mappingPolicy),
+            distanceMs: Math.abs(left.startAtUtcMs! - right.startAtUtcMs!)
+          }));
+      }).sort((first, second) => first.distanceMs - second.distanceMs ||
         compareText(first.left.providerEventId, second.left.providerEventId) ||
         compareText(first.right.providerEventId, second.right.providerEventId));
       const usedLeft = new Set<string>();
@@ -767,6 +812,29 @@ export class Runtime {
           usedLeft.add(edge.left.providerEventId);
           usedRight.add(edge.right.providerEventId);
         }
+      }
+      const remainingLeft = leftEvents
+        .filter((event) => !usedLeft.has(event.providerEventId))
+        .sort((first, second) =>
+          (first.startAtUtcMs ?? Number.MAX_SAFE_INTEGER) -
+            (second.startAtUtcMs ?? Number.MAX_SAFE_INTEGER) ||
+          compareText(first.providerEventId, second.providerEventId));
+      const remainingRight = rightEvents
+        .filter((event) => !usedRight.has(event.providerEventId))
+        .sort((first, second) =>
+          (first.startAtUtcMs ?? Number.MAX_SAFE_INTEGER) -
+            (second.startAtUtcMs ?? Number.MAX_SAFE_INTEGER) ||
+          compareText(first.providerEventId, second.providerEventId));
+      const fallbackCount = Math.min(remainingLeft.length, remainingRight.length);
+      for (let index = 0; index < fallbackCount; index += 1) {
+        const left = remainingLeft[index]!;
+        const right = remainingRight[index]!;
+        selected.push({
+          left,
+          right,
+          result: this.#eventMapper(left, right, this.#mappingPolicy),
+          distanceMs: Math.abs((left.startAtUtcMs ?? 0) - (right.startAtUtcMs ?? 0))
+        });
       }
       for (const { left, right, result } of selected) {
         const ordered = [left, right] as const;

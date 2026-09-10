@@ -15,7 +15,8 @@ import {
   type ProviderMarket,
   type ProviderQuote
 } from "@tool-chenh/contracts";
-import { describe, expect, it } from "vitest";
+import { mapEvents } from "@tool-chenh/core";
+import { describe, expect, it, vi } from "vitest";
 import { Runtime, type RuntimeClock } from "./runtime.js";
 
 const immediateScheduler: ReplayScheduler = {
@@ -185,6 +186,65 @@ function emitQuoteUpdate(
 }
 
 describe("Runtime", () => {
+  it("maps only indexed fixture candidates while preserving every verified cross-provider event", async () => {
+    const eventCount = 120;
+    const aliases = Object.fromEntries(
+      Array.from({ length: eventCount }, (_, index) => [
+        [`home_${index}`, `home_${index}`],
+        [`away_${index}`, `away_${index}`]
+      ]).flat()
+    );
+    const eventsFor = (provider: string): ProviderEvent[] =>
+      Array.from({ length: eventCount }, (_, index) => ({
+        provider,
+        category: "FOOTBALL" as const,
+        providerEventId: `${provider.toLowerCase()}-${index}`,
+        competition: `League ${index}`,
+        seasonStage: "2026/27",
+        startAtUtcMs: 1_800_000_000_000 + index * 600_000,
+        participantA: `Home ${index}`,
+        participantB: `Away ${index}`,
+        eventScope: "REGULATION" as const,
+        bestOf: null,
+        isLive: false,
+        rematchCandidate: false,
+        fixtureDiscriminator: null,
+        isVirtual: false,
+        sportVariant: "FOOTBALL",
+        liveState: null
+      }));
+    const adapter = (provider: string): ProviderAdapter => ({
+      id: `${provider.toLowerCase()}-indexed-candidates`,
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        sink.beginBatch?.();
+        for (const event of eventsFor(provider)) sink.onEvent(event);
+        sink.endBatch?.();
+      }
+    });
+    const eventMapper = vi.fn(mapEvents);
+    const runtime = new Runtime({
+      adapters: [adapter("SABA"), adapter("IM")],
+      clock,
+      eventMapper,
+      mappingPolicy: {
+        prematchToleranceMs: 120_000,
+        liveClockToleranceMs: 20_000,
+        aliasRegistry: {
+          version: "indexed-candidate-test-v1",
+          aliases: { FOOTBALL: aliases, LOL: {} }
+        }
+      },
+      opportunityPolicy: opportunityPolicy()
+    });
+
+    await runtime.start(new AbortController().signal);
+
+    expect(runtime.getSnapshot().events.filter((event) => event.mappingStatus === "VERIFIED"))
+      .toHaveLength(eventCount);
+    expect(eventMapper).toHaveBeenCalledTimes(eventCount);
+  });
+
   it("removes every cached HIGH after a malformed source envelope globally quarantines its QuoteBook", async () => {
     let sabaSink: ProviderSink | undefined;
     const runtime = new Runtime({

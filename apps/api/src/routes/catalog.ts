@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { Readable } from "node:stream";
 import { z } from "zod";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { CatalogTelemetryRegistry } from "./catalog-telemetry.js";
@@ -6,6 +7,7 @@ import type { CatalogStoreLike } from "../catalog/durable-catalog-store.js";
 import { CatalogCoverageGuard } from "../catalog/catalog-coverage-guard.js";
 import type { CatalogRevisionStore, StoredCatalogRevision } from "../catalog/catalog-revision-store.js";
 import { catalogWithNativeCounts } from "../catalog/catalog-native-coverage.js";
+import { streamCatalogJson } from "../catalog/catalog-json-stream.js";
 
 export interface CatalogReaderLike {
   readonly requestTimeoutMs?: number;
@@ -26,6 +28,16 @@ export interface CatalogObserverLike {
 }
 
 const paramsSchema = z.strictObject({ accountId: z.string().trim().min(1).max(128) });
+
+/** Stable short digest of a request-scoped set, for cache identity only. */
+function fnv1a(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
 
 export function withinComparisonHorizon(catalog: ObservedProviderCatalog): ObservedProviderCatalog {
   return catalog;
@@ -98,10 +110,19 @@ export function registerCatalogRoutes(
   };
 
   const forAccount = (
-    catalog: ObservedProviderCatalog, accountId: string, snapshotState: "FRESH" | "STALE"
-  ): ObservedProviderCatalog & { readonly snapshotState: "FRESH" | "STALE" } => ({
-    ...withinComparisonHorizon(catalog), accountId, snapshotState
-  });
+    catalog: ObservedProviderCatalog, accountId: string, snapshotState: "FRESH" | "STALE",
+    withoutMarkets = false, wantedEvents: ReadonlySet<string> | null = null
+  ): ObservedProviderCatalog & { readonly snapshotState: "FRESH" | "STALE" } => {
+    const horizon = withinComparisonHorizon(catalog);
+    const wanted = (row: { readonly providerEventId?: unknown }): boolean =>
+      wantedEvents === null || wantedEvents.has(String(row.providerEventId));
+    const projected = withoutMarkets ? { ...horizon, markets: [], quotes: [] }
+      : wantedEvents === null ? horizon
+      : { ...horizon, markets: horizon.markets.filter(wanted), quotes: horizon.quotes.filter(wanted),
+        ...(horizon.nativeMarketObservations === undefined ? {}
+          : { nativeMarketObservations: horizon.nativeMarketObservations.filter(wanted) }) };
+    return { ...projected, accountId, snapshotState };
+  };
 
   const publishInBackground = (catalog: ObservedProviderCatalog): void => {
     if (observer === undefined) return;
@@ -212,15 +233,44 @@ export function registerCatalogRoutes(
   app.get("/api/catalog/accounts/:accountId", async (request, reply) => {
     const parsed = paramsSchema.safeParse(request.params);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
-    const query = z.object({ nativeDetail: z.enum(["full", "summary", "counts"]).optional() }).safeParse(request.query);
+    const query = z.object({ nativeDetail: z.enum(["full", "summary", "counts"]).optional(),
+      markets: z.enum(["none"]).optional(),
+      events: z.string().max(65_536).optional() }).safeParse(request.query);
     if (!query.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     const summary = query.data.nativeDetail === "summary";
     const counts = query.data.nativeDetail === "counts";
+    // Fixtures without their prices. Deciding which events two books share needs
+    // only the events, and markets are the overwhelming majority of a catalog:
+    // measured 2026-09-10, one book's response was 99.9 MB of the 146.4 MB the
+    // dashboard fetched per polling round. A caller can settle that question
+    // cheaply here and then ask for markets only where they can actually pair,
+    // which is a reduction that cannot cost a pair - unlike narrowing what is
+    // collected, which decides coverage before anyone has looked.
+    const withoutMarkets = query.data.markets === "none";
+    // Prices for named fixtures only. The caller has already decided, from the
+    // fixtures alone, which of them another book also lists; markets for the
+    // rest cannot form a cross-book pair and are the bulk of the transfer.
+    // Every event still travels either way, so a fixture that becomes pairable
+    // later is simply asked for on the next round.
+    const wantedEvents = query.data.events === undefined ? null
+      : new Set(query.data.events.split(",").map((id) => id.trim()).filter((id) => id.length > 0));
+    if (wantedEvents !== null && (wantedEvents.size === 0 || wantedEvents.size > 5_000 ||
+      [...wantedEvents].some((id) => !/^[A-Za-z0-9._:|-]{1,128}$/u.test(id)))) {
+      return reply.code(400).send({ error: "INVALID_REQUEST" });
+    }
     const view = (catalog: ReturnType<typeof forAccount>) =>
       counts ? catalogWithNativeCounts(catalog) : !summary || catalog.nativeMarketObservations === undefined ? catalog : { ...catalog,
         nativeMarketObservations: catalog.nativeMarketObservations.map(({ nativeSelections: _selections, nativeRow: _rawRow,
           ...observation }) => observation) };
-    const etagSuffix = counts ? "-native-counts" : summary ? "-native-summary" : "";
+    const sendView = (catalog: ReturnType<typeof forAccount>) => reply
+      .type("application/json; charset=utf-8")
+      .send(Readable.from(streamCatalogJson(view(catalog) as Readonly<Record<string, unknown>>)));
+    // A narrowed response must never answer a request for a different
+    // narrowing, so the tag identifies the exact set, not its size.
+    const eventsTag = wantedEvents === null ? ""
+      : `-events:${wantedEvents.size}:${fnv1a([...wantedEvents].sort().join(","))}`;
+    const etagSuffix = `${counts ? "-native-counts" : summary ? "-native-summary" : ""}` +
+      `${query.data.markets === "none" ? "-no-markets" : ""}${eventsTag}`;
     try {
       const accountId = parsed.data.accountId;
       const accountSnapshotFreshnessMaxAgeMs = reader.snapshotFreshnessMaxAgeMsFor?.(accountId) ??
@@ -233,7 +283,7 @@ export function registerCatalogRoutes(
         const etag = `"${entry.revision}${etagSuffix}"`;
         reply.header("etag", etag).header("x-catalog-revision", entry.revision);
         if (request.headers["if-none-match"] === etag) return reply.code(304).send();
-        return view(forAccount(entry.catalog, accountId, entry.snapshotState));
+        return sendView(forAccount(entry.catalog, accountId, entry.snapshotState, withoutMarkets, wantedEvents));
       };
       const sendCatalog = (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => {
         if (revisions !== undefined) return sendRevision(revisions.publish(accountId, catalog, {
@@ -242,7 +292,7 @@ export function registerCatalogRoutes(
         const etag = `"${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${snapshotState}${etagSuffix}"`;
         reply.header("etag", etag);
         if (request.headers["if-none-match"] === etag) return reply.code(304).send();
-        return view(forAccount(catalog, accountId, snapshotState));
+        return sendView(forAccount(catalog, accountId, snapshotState, withoutMarkets, wantedEvents));
       };
       const deadlineMs = performance.now() + requestTimeoutMs;
       const sourceKey = await within(

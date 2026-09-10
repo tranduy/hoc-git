@@ -1,6 +1,7 @@
 import vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildCmdNativeCatalogRefreshExpression } from "./cmd-native-catalog-refresh.js";
+import { buildCmdNativeCatalogRefreshExpression,
+  formatCmdNativeCatalogDiagnostic } from "./cmd-native-catalog-refresh.js";
 
 const START = 1_788_862_500_000;
 const group = (index: number) => `fa97fe7b-13d3-4b03-96db-${String(index).padStart(12, "0")}`;
@@ -139,6 +140,31 @@ describe("CMD native catalog collector", () => {
     vi.setSystemTime(START + 30_001); h.tick();
     h.lists().at(-2)!.fail(); h.lists().at(-1)!.fail();
     expect(h.tick()).toMatchObject({ groups: 2, rosterFailed: true });
+  });
+
+  it("names why a roster response was refused instead of only that it failed", () => {
+    const h = harness(); h.tick();
+    const current = h.lists().slice(-2);
+    const oversized = Array.from({ length: 20_001 }, () => row(1));
+    current.find(r => new URLSearchParams(r.body).get("fc") === "1")!.success({ a: true, t: 10, data: [], today: [], f: {} });
+    current.find(r => new URLSearchParams(r.body).get("fc") === "6")!.success({ a: true, t: 11, today: oversized, f: {} });
+    // Our own bound and a provider outage both used to read as rosterFailed:1.
+    expect(h.tick()).toMatchObject({ rosterFailed: true, rosterReject: "r1-today-over-cap-20001" });
+  });
+
+  it("clears the refusal reason once a roster commits", () => {
+    const h = harness(); h.tick();
+    h.lists().slice(-2).forEach(request => request.success({ a: true, t: 1, today: [], data: [], f: {} }));
+    expect(h.tick()).toMatchObject({ rosterFailed: false, rosterReject: null });
+  });
+
+  it("carries a bounded refusal reason into the diagnostic and drops anything else", () => {
+    expect(formatCmdNativeCatalogDiagnostic({ status: "ready", rosterFailed: true,
+      rosterReject: "r1-today-over-cap-20001" })).toContain("rosterReject:r1-today-over-cap-20001");
+    for (const reject of ["../escape", "r9-x", "r1-" + "x".repeat(40), { nested: true }, 12]) {
+      expect(formatCmdNativeCatalogDiagnostic({ status: "ready", rosterReject: reject }))
+        .not.toContain("rosterReject");
+    }
   });
 
   it("retires omitted owners only after both refreshed rosters complete and does not drain after caller retirement", () => {

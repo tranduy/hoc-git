@@ -42,6 +42,8 @@ export interface LiveCatalogResponse {
 export interface CatalogApiLike {
   read(accountId: string): Promise<LiveCatalogResponse>;
   readRevision?(accountId: string): Promise<CatalogReadResult>;
+  readRosterRevision?(accountId: string): Promise<CatalogReadResult>;
+  readEventsRevision?(accountId: string, providerEventIds: readonly string[]): Promise<CatalogReadResult>;
 }
 
 export interface CatalogReadResult {
@@ -203,20 +205,40 @@ export class CatalogApi implements CatalogApiLike {
   }
 
   readRevision(accountId: string): Promise<CatalogReadResult> {
-    const existing = this.#inFlight.get(accountId);
+    return this.#readViewRevision(accountId, "", "");
+  }
+
+  readRosterRevision(accountId: string): Promise<CatalogReadResult> {
+    return this.#readViewRevision(accountId, "roster", "markets=none");
+  }
+
+  readEventsRevision(accountId: string, providerEventIds: readonly string[]): Promise<CatalogReadResult> {
+    const events = [...new Set(providerEventIds)].sort();
+    if (events.length === 0) return this.readRosterRevision(accountId);
+    return this.#readViewRevision(accountId, `events:${events.join(",")}`,
+      `events=${encodeURIComponent(events.join(","))}`);
+  }
+
+  #readViewRevision(accountId: string, viewKey: string, viewQuery: string): Promise<CatalogReadResult> {
+    const cacheKey = `${accountId}\u0000${viewKey}`;
+    const existing = this.#inFlight.get(cacheKey);
     if (existing !== undefined) return existing;
     // Initial loading and revision updates share the full transfer and validation.
-    const request = this.#readRevision(accountId).finally(() => this.#inFlight.delete(accountId));
-    this.#inFlight.set(accountId, request);
+    const request = this.#readRevision(accountId, cacheKey, viewKey, viewQuery)
+      .finally(() => this.#inFlight.delete(cacheKey));
+    this.#inFlight.set(cacheKey, request);
     return request;
   }
 
-  async #readRevision(accountId: string): Promise<CatalogReadResult> {
+  async #readRevision(accountId: string, cacheKey: string, viewKey: string,
+    viewQuery: string): Promise<CatalogReadResult> {
     const controller = new AbortController();
     let timeout = window.setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
-      const cached = this.#cache.get(accountId);
-      const query = this.#nativeDetail === "full" ? "" : `?nativeDetail=${this.#nativeDetail}`;
+      const cached = this.#cache.get(cacheKey);
+      const queryParts = [this.#nativeDetail === "full" ? "" : `nativeDetail=${this.#nativeDetail}`, viewQuery]
+        .filter((part) => part.length > 0);
+      const query = queryParts.length === 0 ? "" : `?${queryParts.join("&")}`;
       const response = await this.#fetch(`/api/catalog/accounts/${encodeURIComponent(accountId)}${query}`, {
         method: "GET", cache: "no-store", signal: controller.signal,
         ...(cached === undefined ? {} : { headers: { "if-none-match": cached.etag } })
@@ -245,14 +267,15 @@ export class CatalogApi implements CatalogApiLike {
       }
       const etag = response.headers.get("etag");
       const revisionHeader = response.headers.get("x-catalog-revision");
-      const revision = revisionHeader?.trim() || etag?.replace(/^"|"$/gu, "") ||
+      const sourceRevision = revisionHeader?.trim() || etag?.replace(/^"|"$/gu, "") ||
         `${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${catalog.snapshotState ?? "FRESH"}` +
         (catalog.observedMonotonicMs === undefined ? "" : `-receipt:${catalog.observedMonotonicMs}`);
-      const latest = this.#cache.get(accountId);
+      const revision = viewKey.length === 0 ? sourceRevision : `${sourceRevision}|${viewKey}`;
+      const latest = this.#cache.get(cacheKey);
       if (latest !== undefined && latest.catalog.observedAtMs > catalog.observedAtMs) {
         return { catalog: latest.catalog, revision: latest.revision };
       }
-      if (etag !== null && etag.length > 0) this.#cache.set(accountId, { etag, revision, catalog });
+      if (etag !== null && etag.length > 0) this.#cache.set(cacheKey, { etag, revision, catalog });
       return { catalog, revision };
     } catch (error) {
       if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
