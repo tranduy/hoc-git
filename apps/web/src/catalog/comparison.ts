@@ -149,14 +149,27 @@ function displayEvent(event: ProviderEvent): ProviderEvent {
     participantB: decodeHtmlEntities(event.participantB) };
 }
 
+// Only pure text normalization is memoized. Live evidence and learned
+// competition links are evaluated afresh on every comparison.
+const identityTextCache = new Map<string, string>();
+const competitionIdentityCache = new Map<string, string>();
+const participantFingerprintCache = new Map<string, FootballParticipantFingerprint>();
+function rememberTextIdentity<T>(cache: Map<string, T>, key: string, value: T): T {
+  if (cache.size >= 16_384) cache.clear();
+  cache.set(key, value);
+  return value;
+}
+
 function identityText(value: string): string {
+  const cached = identityTextCache.get(value);
+  if (cached !== undefined) return cached;
   const normalized = decodeHtmlEntities(value).normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
     .replace(/đ/gu, "d").replace(/\s*\((?:n|neutral)\)\s*$/u, "")
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim()
     .replace(/^(?:(?:clb|fc|sc|scu|afc|cf|jk|fa)\s+)+/u, "")
     .replace(/\s+(?:fc|sc|scu|afc|cf)$/u, "")
     .replace(/\butd\b/gu, "united").replace(/\bii\b/gu, "2").replace(/\s+/gu, " ");
-  return footballTeamAliases.get(normalized) ?? normalized;
+  return rememberTextIdentity(identityTextCache, value, footballTeamAliases.get(normalized) ?? normalized);
 }
 
 const footballCompetitionAliases = new Map<string, string>([
@@ -351,6 +364,8 @@ const footballCompetitionAliases = new Map<string, string>([
 ]);
 
 function competitionIdentity(value: string): string {
+  const cached = competitionIdentityCache.get(value);
+  if (cached !== undefined) return cached;
   // The Vietnamese d-with-stroke survives NFKD, which decomposes accents but
   // leaves alone a letter that was never a composition. Every alias for a
   // Vietnamese competition therefore had to be spelled with a character no
@@ -361,7 +376,7 @@ function competitionIdentity(value: string): string {
   const normalized = decodeHtmlEntities(value).normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
     .replace(/đ/gu, "d")
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/gu, " ");
-  return footballCompetitionAliases.get(normalized) ?? normalized;
+  return rememberTextIdentity(competitionIdentityCache, value, footballCompetitionAliases.get(normalized) ?? normalized);
 }
 
 /**
@@ -605,6 +620,7 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
   const observedAtMs = catalogs.reduce((latest, catalog) =>
     Math.max(latest, catalog.observedAtMs), 0);
   const sharedFixtures = new Map<string, Set<number>>();
+  const sharedBookPairs = new Map<string, readonly [string, string]>();
   const rememberedCounts = new Map<string, number>();
   const pairKey = (left: string, right: string): string =>
     left < right ? `${left}\u0000${right}` : `${right}\u0000${left}`;
@@ -617,6 +633,7 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
           if (fixturesByBookCompetition.get(other.key)?.provider === entry.provider) continue;
           if (!learnedFixturesMatch(fixture, other.fixture)) continue;
           const pair = pairKey(key, other.key);
+          if (!sharedBookPairs.has(pair)) sharedBookPairs.set(pair, [key, other.key]);
           (sharedFixtures.get(pair) ?? sharedFixtures.set(pair, new Set()).get(pair)!)
             .add(key < other.key ? index : other.index);
           const remembered = rememberedFixtureKey(fixture);
@@ -643,23 +660,22 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
     const [keep, drop] = leftRoot < rightRoot ? [leftRoot, rightRoot] : [rightRoot, leftRoot];
     parent.set(drop, keep);
   };
-  const entries = [...fixturesByBookCompetition.entries()];
-  for (let left = 0; left < entries.length; left += 1) {
-    for (let right = left + 1; right < entries.length; right += 1) {
-      const [leftKey, leftEntry] = entries[left]!;
-      const [rightKey, rightEntry] = entries[right]!;
-      if (leftKey.split("\u0000")[0] === rightKey.split("\u0000")[0]) continue;
-      if (leftEntry.identity === rightEntry.identity) continue;
-      if (leftEntry.family !== rightEntry.family) continue;
-      // A pair the memory has watched agree on two fixtures is carrying the
-      // same evidence as two sitting on one board, gathered over more than one
-      // glance because that is how a 24-hour window shows a league its season.
-      const pair = pairKey(leftKey, rightKey);
-      const shared = Math.max(sharedFixtures.get(pair)?.size ?? 0, rememberedCounts.get(pair) ?? 0);
-      if (shared >= SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS) {
-        union(competitionLinkKey(leftEntry.identity, leftEntry.family),
-          competitionLinkKey(rightEntry.identity, rightEntry.family));
-      }
+  // Only pairs with an observed shared fixture can acquire either current or
+  // remembered evidence above. Scanning every unrelated league pair is wasted
+  // quadratic work on each of the six roster refreshes.
+  for (const [pair, [leftKey, rightKey]] of sharedBookPairs) {
+    const leftEntry = fixturesByBookCompetition.get(leftKey)!;
+    const rightEntry = fixturesByBookCompetition.get(rightKey)!;
+    if (leftEntry.provider === rightEntry.provider) continue;
+    if (leftEntry.identity === rightEntry.identity) continue;
+    if (leftEntry.family !== rightEntry.family) continue;
+    // A pair the memory has watched agree on two fixtures is carrying the
+    // same evidence as two sitting on one board, gathered over more than one
+    // glance because that is how a 24-hour window shows a league its season.
+    const shared = Math.max(sharedFixtures.get(pair)?.size ?? 0, rememberedCounts.get(pair) ?? 0);
+    if (shared >= SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS) {
+      union(competitionLinkKey(leftEntry.identity, leftEntry.family),
+        competitionLinkKey(rightEntry.identity, rightEntry.family));
     }
   }
   const links = new Map<string, string>();
@@ -698,6 +714,8 @@ interface FootballParticipantFingerprint {
 }
 
 function footballParticipantFingerprint(value: string): FootballParticipantFingerprint {
+  const cached = participantFingerprintCache.get(value);
+  if (cached !== undefined) return cached;
   const identity = participantIdentity("FOOTBALL", value);
   const tokens = identity.split(" ").filter(Boolean);
   // This observed team name must retain its distinction from Austria Vienna
@@ -705,11 +723,11 @@ function footballParticipantFingerprint(value: string): FootballParticipantFinge
   const namedTeamQualifiers = /\byoung violets\b/u.test(identity) ? ["young violets"] : [];
   const canonicalQualifier = (token: string): string => ["ladies", "nu", "w", "women"].includes(token)
     ? "women" : ["res", "reserve", "reserves"].includes(token) ? "reserve" : token;
-  return { identity,
+  return rememberTextIdentity(participantFingerprintCache, value, { identity,
     qualifiers: [...tokens.filter((token) => footballParticipantQualifiers.has(token)).map(canonicalQualifier),
       ...namedTeamQualifiers].sort(),
     meaningful: tokens.filter((token) => !footballClubDesignators.has(token) &&
-      !footballParticipantQualifiers.has(token)) };
+      !footballParticipantQualifiers.has(token)) });
 }
 
 function footballParticipantSimilarity(left: string, right: string): number {
