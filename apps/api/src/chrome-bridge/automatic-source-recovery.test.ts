@@ -273,6 +273,26 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.ensureLobby).not.toHaveBeenCalled();
   });
 
+  it("reloads the same KSPORT tab after a live heartbeat never produces a baseline", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SBOBET, {
+      sourceId: "chrome:KSPORT:9", sourceEpoch: "observer-a:0", tabReachableAtMs: 1_999
+    }));
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(SBOBET, {
+        state: "LIVE", reason: null, sourceId: "chrome:KSPORT:9", sourceEpoch: "observer-b:0",
+        activeGeneration: "generation-2", lastCompleteBaselineAtMs: 2_001
+      }));
+
+    await expect(context.recovery.recover(request(SBOBET, "HARD"))).resolves.toEqual({
+      accountId: SBOBET, stage: "HARD", outcome: "RECOVERED", reason: null
+    });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:KSPORT:9");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+  });
+
   it("accepts a fresh IM pair in the same generation after a non-navigating refresh", async () => {
     const context = setup(() => 2_000, false, { baselineTimeoutMs: 10_000, reloadBaselineTimeoutMs: 90_000 });
     const prior = snapshot(IM, { sourceId: "chrome:IM:5", sourceEpoch: "observer-a:0", activeGeneration: "im:5:1" });
@@ -726,10 +746,13 @@ describe("AutomaticSourceRecovery", () => {
       state: "HARD_RECOVERY", recoveryStage: "HARD", sourceId: "chrome:KSPORT:9",
       sourceEpoch: "observer-a:0", tabReachableAtMs: clock - 5_000
     }));
-    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+    context.waitForFreshBaseline.mockResolvedValue(snapshot(SBOBET, {
+      state: "LIVE", reason: null, sourceId: "chrome:KSPORT:9", sourceEpoch: "observer-a:0",
+      activeGeneration: "generation-2", lastCompleteBaselineAtMs: clock + 1
+    }));
 
     await expect(context.recovery.recover(request(SBOBET, "HARD"))).resolves.toEqual({
-      accountId: SBOBET, stage: "HARD", outcome: "DELIVERED", reason: "BASELINE_TIMEOUT"
+      accountId: SBOBET, stage: "HARD", outcome: "RECOVERED", reason: null
     });
     expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("KSPORT");
     expect(context.reloadSource).not.toHaveBeenCalled();

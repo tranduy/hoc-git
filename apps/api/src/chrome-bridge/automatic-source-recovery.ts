@@ -244,11 +244,22 @@ export class AutomaticSourceRecovery {
       const actionStartedAtMs = this.#now();
       if (source.provider === "SBOBET") {
         const delivered = this.#options.controlPlane.requestLobbySnapshot(source.hardLobby);
+        let snapshotSettlingTimedOut = false;
         if (delivered > 0 && hasRecentSbobetTab(current, actionStartedAtMs)) {
-          return this.#confirmAfter(request.accountId, "HARD", actionStartedAtMs,
+          const confirmation = await this.#confirmAfter(request.accountId, "HARD", actionStartedAtMs,
             this.#reloadBaselineTimeoutMs);
+          if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
+            return confirmation;
+          }
+          if (this.#disposed) return stopped(request.accountId, "HARD");
+          if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+          snapshotSettlingTimedOut = true;
+          // A heartbeat proves only that the content script is alive. When no
+          // baseline follows during the full settling window, continue into
+          // the guarded same-tab reload below; returning here left KSPORT
+          // permanently connected to the bridge but disconnected from odds.
         }
-        if (delivered > 0) {
+        if (delivered > 0 && !snapshotSettlingTimedOut) {
           const confirmation = await this.#confirmAfter(request.accountId, "HARD", actionStartedAtMs);
           if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
             return confirmation;
