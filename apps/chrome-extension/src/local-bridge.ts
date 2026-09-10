@@ -194,7 +194,8 @@ export class LocalBridge {
     const waitsForIndividualAcknowledgement = (envelope.lobby === "KSPORT" &&
       envelope.transport === "HTTP_RESPONSE"
       && "providerContentIntent" in envelope.request
-      && envelope.request.providerContentIntent === "FOOTBALL_FULL_CATALOG") ||
+      && envelope.request.providerContentIntent === "FOOTBALL_FULL_CATALOG"
+      && !isIntermediateNetworkBodyChunkEnvelope(envelope)) ||
       (envelope.lobby === "IM" && isFinalNetworkBodyChunkEnvelope(envelope)) ||
       isBtiAuthFailureEnvelope(envelope);
     let settleAcknowledgement: (() => void) | null = null;
@@ -618,6 +619,20 @@ function isFinalNetworkBodyChunkEnvelope(envelope: ChromeBridgeEnvelope): boolea
   try {
     const parsed = ChromeNetworkBodyChunkSchema.safeParse(JSON.parse(envelope.payload.body));
     return parsed.success && parsed.data.chunkIndex === parsed.data.chunkCount - 1;
+  } catch {
+    return false;
+  }
+}
+
+// Intermediate fragments remain retained in the byte-bounded queue until ACK,
+// but must not spend one ACK round trip each before the body can be assembled.
+// Final fragments and unchunked KSPORT catalogs still hold the producer until
+// ingestion completes, preserving its paired-catalog publication boundary.
+function isIntermediateNetworkBodyChunkEnvelope(envelope: ChromeBridgeEnvelope): boolean {
+  if (envelope.transport !== "HTTP_RESPONSE" || envelope.payload.encoding !== "UTF8") return false;
+  try {
+    const parsed = ChromeNetworkBodyChunkSchema.safeParse(JSON.parse(envelope.payload.body));
+    return parsed.success && parsed.data.chunkIndex < parsed.data.chunkCount - 1;
   } catch {
     return false;
   }

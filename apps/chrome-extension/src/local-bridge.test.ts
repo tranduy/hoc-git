@@ -973,7 +973,9 @@ describe("LocalBridge", () => {
 
       const sentKsportCount = () => socket.sentSourceIds
         .filter((sourceId) => sourceId === "chrome:KSPORT:14").length;
-      expect(sentKsportCount()).toBe(1);
+      // Send a whole response before waiting for its final acknowledgement.
+      // Per-fragment stop-and-wait makes scheduler latency consume the body TTL.
+      expect(sentKsportCount()).toBe(77);
       expect(onSourceResync).not.toHaveBeenCalled();
       await bridge.enqueue(envelope(7, "healthy", "chrome:IM:8"));
       expect(socket.sentSourceIds).toContain("chrome:IM:8");
@@ -983,12 +985,8 @@ describe("LocalBridge", () => {
         socket.onmessage?.({ data: JSON.stringify({
           version: 1, kind: "ACK", sourceId: "chrome:KSPORT:14", sequence: index
         }) });
-        if (index + 1 < chunks.length) {
-          for (let turn = 0; turn < 4 && sentKsportCount() < index + 2; turn += 1) {
-            await Promise.resolve();
-          }
-          expect(sentKsportCount()).toBe(index + 2);
-        }
+        if (index === 76) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        expect(sentKsportCount()).toBe(index < 76 ? 77 : 154);
         maximumQueueBytes = Math.max(maximumQueueBytes, bridge.queueBytes);
       }
       await publish;
@@ -1136,15 +1134,32 @@ describe("LocalBridge", () => {
     expect(socket.readyState).toBe(1);
   });
 
+  it("keeps the acknowledgement barrier for an unchunked KSPORT catalog", async () => {
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key" });
+    bridge.connect();
+    socket.open();
+    let settled = false;
+    const pending = bridge.enqueue({ ...ksportCatalogChunk(0, "KSPORT_LIVE", 0, 1),
+      payload: { encoding: "UTF8", body: "[]" } }).then(() => { settled = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "ACK",
+      sourceId: "chrome:KSPORT:14", sourceEpoch: "worker-a:0", sequence: 0 }) });
+    await pending;
+    expect(settled).toBe(true);
+  });
+
   it("releases an acknowledged KSPORT producer when the bridge is closed", async () => {
     const socket = new FakeSocket();
     const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key" });
     bridge.connect();
     socket.open();
     let settled = false;
-    const pending = bridge.enqueue(ksportCatalogChunk(0, "KSPORT_LIVE", 0, 2))
+    const pending = bridge.enqueue(ksportCatalogChunk(0, "KSPORT_LIVE", 1, 2))
       .then(() => { settled = true; });
-
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
     bridge.close();
     for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
 

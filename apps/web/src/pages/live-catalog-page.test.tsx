@@ -452,7 +452,7 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => [source] }}
       catalogApi={{ read: async () => ({ ...catalog, accountId: source.id, markets }) }} />);
 
-    expect(await screen.findByText("(1 match · 3 markets)")).toBeTruthy();
+    expect(await screen.findByText("1 trận · 3 kèo")).toBeTruthy();
   });
 
   it("shows six evenly grouped provider reload controls and animates the active provider being reloaded", async () => {
@@ -475,9 +475,10 @@ describe("LiveCatalogPage", () => {
     const selector = await screen.findByRole("group", { name: "Books to compare" });
     expect(selector.querySelectorAll(".provider-selector__item")).toHaveLength(6);
     expect(selector.querySelectorAll(".provider-recovery-status")).toHaveLength(6);
-    expect(selector.querySelectorAll(".provider-recovery-status--empty")).toHaveLength(6);
+    expect(selector.querySelectorAll(".provider-recovery-status--empty")).toHaveLength(1);
     for (const provider of ["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"] as const) {
       expect(screen.getByRole("button", { name: `Reload ${provider}` })).toBeTruthy();
+      expect(screen.getByRole("button", { name: `Reload ${provider}` }).textContent).toBe("");
       expect(screen.getByTestId(`provider-reload-icon-${provider}`)).toBeTruthy();
     }
 
@@ -1029,8 +1030,8 @@ describe("LiveCatalogPage", () => {
     const sabaSelector = screen.getByRole("checkbox", { name: /SABA main/u }).closest("label")!;
     const sbobetSelector = screen.getByRole("checkbox", { name: /SBOBET main/u }).closest("label")!;
     expect(within(sabaSelector).getByText("1 normalized · 0 excluded · 1 unmapped")).toBeTruthy();
-    expect(within(sabaSelector).getByText("(1 match · 1 market)")).toBeTruthy();
-    expect(within(sbobetSelector).getByText("(1 match · 1 market)")).toBeTruthy();
+    expect(within(sabaSelector).getByText("1 trận · 1 kèo")).toBeTruthy();
+    expect(within(sbobetSelector).getByText("1 trận · 1 kèo")).toBeTruthy();
     expect((await screen.findAllByText("#SABA")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("#SBOBET").length).toBeGreaterThan(0);
     expect(screen.getByText(/Starts in/u)).toBeTruthy();
@@ -2186,7 +2187,8 @@ describe("LiveCatalogPage", () => {
     expect(recover).toHaveBeenNthCalledWith(2, "BTI", "MANUAL");
     const coolingDown = await screen.findByRole("button", { name: "Reload BTI" });
     expect((coolingDown as HTMLButtonElement).disabled).toBe(true);
-    expect(coolingDown.textContent).toBe("Reload sau 60s");
+    expect(coolingDown.textContent).toBe("");
+    expect(coolingDown.getAttribute("title")).toBe("Reload sau 60s");
     fireEvent.click(coolingDown);
     expect(recover).toHaveBeenCalledTimes(2);
   });
@@ -2222,7 +2224,8 @@ describe("LiveCatalogPage", () => {
     expect((coolingDown as HTMLButtonElement).disabled).toBe(true);
     // Source discovery may already have resumed persisted verification. Both
     // states must preserve the manual cooldown and refuse another request.
-    expect(["Reload sau 60s", "Đang reload…"]).toContain(coolingDown.textContent);
+    expect(coolingDown.textContent).toBe("");
+    expect(["Reload sau 60s", "Đang reload SABA"]).toContain(coolingDown.getAttribute("title"));
     expect(Number(window.localStorage.getItem("tool-chenh.provider-source-recovery.manual.v1.BTI")))
       .toBeGreaterThan(Date.now());
     fireEvent.click(coolingDown);

@@ -275,10 +275,10 @@ export function filterAccountBackedSignals(
 }
 
 function catalogCountLabel(eventCount: number, marketCount: number | null): string {
-  const events = `${eventCount.toLocaleString("en-US")} ${eventCount === 1 ? "match" : "matches"}`;
-  const markets = marketCount === null ? "… markets"
-    : `${marketCount.toLocaleString("en-US")} ${marketCount === 1 ? "market" : "markets"}`;
-  return `${events} · ${markets}`;
+  const compact = (value: number) => value < 10_000 ? value.toLocaleString("vi-VN")
+    : `${(value / (value >= 1_000_000 ? 1_000_000 : 1_000)).toLocaleString("vi-VN", {
+      maximumFractionDigits: 1 })}${value >= 1_000_000 ? "m" : "k"}`;
+  return `${compact(eventCount)} trận · ${marketCount === null ? "…" : compact(marketCount)} kèo`;
 }
 
 function formatRecoveryDuration(seconds: number | null): string {
@@ -348,37 +348,39 @@ function ProviderSelector({ accounts, eventCounts, marketCounts, nativeCoverageC
     const recovery = recoveryByProvider?.get(recoverableProvider);
     const reloading = recovery?.phase === "RECOVERING" || recovery?.phase === "WAITING";
     const cooldown = recovery?.manualRetryAfterSeconds ?? 0;
-    const buttonText = reloading ? "\u0110ang reload\u2026" : cooldown > 0 ? `Reload sau ${cooldown}s` : "Reload";
     const recoveryStatus = recovery?.phase === "COUNTDOWN" && recovery.countdownKind === "INITIAL"
       ? `T\u1ef1 reload sau ${formatRecoveryDuration(recovery.countdownSeconds)}`
       : recovery?.phase === "COUNTDOWN" && recovery.countdownKind === "RETRY"
         ? `Th\u1eed l\u1ea1i sau ${formatRecoveryDuration(recovery.countdownSeconds)}`
         : recovery?.phase === "RECOVERING" || recovery?.phase === "WAITING"
           ? `\u0110ang ph\u1ee5c h\u1ed3i \u00b7 ${formatRecoveryDuration(recovery.countdownSeconds)}` : null;
+    const sourceStatus = recoveryStatus ?? (activeAccount === undefined ? detail : null);
     return <div className={`provider-selector__item${activeAccount === undefined
       ? " provider-selector__item--unavailable" : " provider-selector__item--active"}`} key={provider}>
       {activeAccount === undefined ? <label className="provider-selector__unavailable">
         <input aria-label={`${provider} ${availabilityLabel}`} checked={false} disabled readOnly type="checkbox" />
         <ProviderBrand compact provider={provider} />
-        <span className="provider-selector__match-count">({catalogCountLabel(count, marketCount)})</span>
-        {hasNativeCoverage && <span className="provider-selector__native-count">{nativeCoverageText}</span>}
-        <small>{detail}</small>
+        <span className="provider-selector__match-count" title={`${count.toLocaleString("vi-VN")} trận · ${marketCount?.toLocaleString("vi-VN") ?? "Chưa tải"} kèo`}>{catalogCountLabel(count, marketCount)}</span>
+        {hasNativeCoverage && <span className="provider-selector__native-count" title={nativeCoverageText} tabIndex={0}>
+          <span aria-hidden="true">ⓘ</span><span className="visually-hidden">{nativeCoverageText}</span></span>}
       </label> : <label><input checked={selected.has(activeAccount.id)}
         onChange={() => toggle(activeAccount.id)} type="checkbox" />
         <ProviderBrand compact label={activeAccount.alias} provider={activeAccount.provider} />
-        <span className="provider-selector__match-count">({catalogCountLabel(count, marketCount)})</span>
-        {hasNativeCoverage && <span className="provider-selector__native-count">{nativeCoverageText}</span>}
+        <span className="provider-selector__match-count" title={`${count.toLocaleString("vi-VN")} trận · ${marketCount?.toLocaleString("vi-VN") ?? "Chưa tải"} kèo`}>{catalogCountLabel(count, marketCount)}</span>
+        {hasNativeCoverage && <span className="provider-selector__native-count" title={nativeCoverageText} tabIndex={0}>
+          <span aria-hidden="true">ⓘ</span><span className="visually-hidden">{nativeCoverageText}</span></span>}
       </label>}
       <button aria-label={reloading ? `\u0110ang reload ${provider}` : `Reload ${provider}`}
         className={`provider-recovery-button${reloading ? " provider-recovery-button--reloading" : ""}`}
         disabled={!loaded || reloading || cooldown > 0}
         onClick={() => manualRecover?.(recoverableProvider)}
-        title={recovery?.lastError ?? (cooldown > 0 ? `Reload sau ${cooldown}s` : `Reload ${provider}`)} type="button">
-        <ProviderReloadIcon provider={recoverableProvider} spinning={reloading} /><span>{buttonText}</span>
+        title={reloading ? `Đang reload ${provider}` : cooldown > 0 ? `Reload sau ${cooldown}s`
+          : recovery?.lastError ?? `Reload ${provider}`} type="button">
+        <ProviderReloadIcon provider={recoverableProvider} spinning={reloading} />
       </button>
-      <small aria-hidden={recoveryStatus === null ? "true" : undefined}
-        className={`provider-recovery-status${recoveryStatus === null ? " provider-recovery-status--empty" : ""}`}
-        role={recoveryStatus === null ? undefined : "status"}>{recoveryStatus ?? "\u00a0"}</small>
+      <small aria-hidden={sourceStatus === null ? "true" : undefined}
+        className={`provider-recovery-status${sourceStatus === null ? " provider-recovery-status--empty" : ""}`}
+        role={recoveryStatus === null ? undefined : "status"}>{sourceStatus ?? "\u00a0"}</small>
     </div>;
   })}</fieldset>;
 }
