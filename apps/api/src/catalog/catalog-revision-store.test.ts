@@ -30,6 +30,31 @@ function pricedCatalog(observedAtMs: number, receivedMonotonicMs: number,
 }
 
 describe("CatalogRevisionStore", () => {
+  it("reuses unchanged immutable blocks without serializing every AP quote again", () => {
+    const store = new CatalogRevisionStore({ now: () => 100 }); stores.push(store);
+    const base = pricedCatalog(100, 10, 1, "APSPORT");
+    let reads = 0;
+    const quotes = Array.from({ length: 257 }, (_, index) => ({ ...base.quotes[0]!,
+      providerSelectionId: `selection-${index}`, get rawOdds() { reads += 1; return "0.95"; } }));
+    const first = { ...base, quotes };
+    const publish = (value: ObservedProviderCatalog) => store.publish(value.accountId, value,
+      { snapshotState: "FRESH", freshnessMs: 20 });
+    const before = publish(first);
+    expect(reads).toBe(257);
+    const renewed = publish({ ...first, observedAtMs: 101, quotes: [...quotes] });
+    expect(renewed.revision).toBe(before.revision);
+    expect(reads).toBe(257);
+    const nextQuotes = [...quotes];
+    nextQuotes[129] = { ...base.quotes[0]!, providerSelectionId: "selection-129", rawOdds: "0.50" };
+    const replacement = { ...first, observedAtMs: 102, quotes: nextQuotes };
+    const changed = publish(replacement);
+    expect(changed.revision).not.toBe(before.revision);
+    expect(reads).toBe(257 + 127);
+    const cold = new CatalogRevisionStore({ now: () => 100 }); stores.push(cold);
+    expect(changed.revision).toBe(cold.publish(replacement.accountId, replacement,
+      { snapshotState: "FRESH", freshnessMs: 20 }).revision);
+  });
+
   it("coalesces a burst per account and exposes the latest catalog immediately to reads", () => {
     vi.useFakeTimers();
     try {
@@ -109,10 +134,14 @@ describe("CatalogRevisionStore", () => {
           nativeMarketObservations: value.nativeMarketObservations.map(({ observedAtMs: _nativeTime, ...item }) => item)
         }) };
       const digest = (record: unknown) => createHash("sha256").update(JSON.stringify(record)).digest("base64url");
-      const catalog = Object.fromEntries(Object.entries(projected).map(([key, records]) => [key,
-        Array.isArray(records) && (key === "nativeMarketObservations" || value.provider === "BTI" || value.provider === "SBOBET")
-          ? records.map(digest) : records]));
-      return createHash("sha256").update(JSON.stringify({ revisionFormat: 2, catalog, snapshotState })).digest("base64url");
+      const catalog = Object.fromEntries(Object.entries(projected).map(([key, records]) => {
+        if (!Array.isArray(records)) return [key, records];
+        const rows = key === "nativeMarketObservations" || value.provider === "BTI" || value.provider === "SBOBET"
+          ? records.map(digest) : records;
+        return [key, Array.from({ length: Math.ceil(rows.length / 128) }, (_, index) =>
+          digest(rows.slice(index * 128, (index + 1) * 128)))];
+      }));
+      return createHash("sha256").update(JSON.stringify({ revisionFormat: 3, catalog, snapshotState })).digest("base64url");
     };
     for (const provider of ["BTI", "APSPORT", "SABA", "SBOBET"] as const) {
       for (const snapshotState of ["FRESH", "STALE"] as const) {
