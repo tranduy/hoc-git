@@ -359,12 +359,13 @@ describe("ChromeNetworkBodyChunkSchema", () => {
   it("accepts strict bounded HTTP response chunks", () => {
     expect(contracts.ChromeNetworkBodyChunkSchema.safeParse(valid).success).toBe(true);
     expect(contracts.ChromeNetworkBodyChunkSchema.safeParse({ ...valid, chunkCount: 256 }).success).toBe(true);
+    expect(contracts.ChromeNetworkBodyChunkSchema.safeParse({ ...valid, chunkIndex: 1_023, chunkCount: 1_024 }).success).toBe(true);
   });
 
   it("rejects invalid indexes, excessive counts, and extra fields", () => {
     for (const invalid of [
       { ...valid, chunkIndex: 2 },
-      { ...valid, chunkCount: 257 },
+      { ...valid, chunkCount: 1_025 },
       { ...valid, bodyFragment: "x".repeat(131_073) },
       { ...valid, token: "secret" }
     ]) expect(contracts.ChromeNetworkBodyChunkSchema.safeParse(invalid).success).toBe(false);

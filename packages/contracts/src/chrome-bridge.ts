@@ -162,11 +162,14 @@ export const CmdSnapshotChunkSchema = z.strictObject({
   }
 });
 
+// Escaping a body fragment inside a JSON envelope may require more fragments
+// than a raw-byte split. The assembler still caps each body at 24 MiB.
+export const MAX_CHROME_NETWORK_BODY_CHUNKS = 1_024;
 export const ChromeNetworkBodyChunkSchema = z.strictObject({
   schemaVersion: z.literal(1),
   snapshotId: z.string().trim().min(16).max(128).regex(/^[a-z0-9._:-]+$/iu),
   chunkIndex: SafeIntegerSchema,
-  chunkCount: z.number().int().min(1).max(256),
+  chunkCount: z.number().int().min(1).max(MAX_CHROME_NETWORK_BODY_CHUNKS),
   bodyEncoding: z.literal("UTF8"),
   bodyFragment: z.string().min(1).superRefine((value, context) => {
     if (new TextEncoder().encode(value).byteLength > 128 * 1024) {

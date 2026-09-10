@@ -33,6 +33,14 @@ function ksportEnvelope(index: number, count = 2, fragment = index === 0 ? "live
 }
 
 describe("NetworkBodyAssembler", () => {
+  it("assembles escape-sized bodies with over 256 fragments without publishing a prefix", () => {
+    const assembler = new NetworkBodyAssembler({ now: () => 1_000 });
+    for (let index = 0; index < 1_023; index++) expect(assembler.ingest(envelope(index, 1_024, "x"))).toBeNull();
+    const complete = assembler.ingest(envelope(1_023, 1_024, "x"));
+    expect(complete?.payload.body).toBe("x".repeat(1_024));
+    expect(assembler.stats()).toMatchObject({ pendingBodies: 0, pendingBytes: 0, blockedSourceEpochs: 0 });
+  });
+
   it("retains the first TTL fault and its original scalar counts through retries, promotion and rollback", () => {
     let now = 1_000;
     const accountId = "catalog-source:IM:FOOTBALL";

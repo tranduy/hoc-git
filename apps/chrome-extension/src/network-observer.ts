@@ -4,7 +4,8 @@ import { cmdNativeRequestMetadata, CMD_MORE_PATH } from "./cmd-native-request.js
 import { buildCmdNativeCatalogRefreshExpression, formatCmdNativeCatalogDiagnostic } from "./cmd-native-catalog-refresh.js";
 import { SbobetRequestBackoff, SBOBET_RETRY_AFTER_EXPRESSION, sbobetRetryAfterMs } from "./sbobet-request-backoff.js";
 import type { ChromeBridgeEnvelope, ChromeBridgeHttpMethod, ChromeLobbyId } from "@tool-chenh/contracts";
-import { splitUtf8Text, utf8ByteLength } from "./utf8-length.js";
+import { utf8ByteLength } from "./utf8-length.js";
+import { splitNetworkBodyText } from "./network-body-chunker.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
 import { SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION } from "./saba-catalog-discovery.js";
@@ -61,7 +62,6 @@ import type { ApsportPageHealth } from "./apsport-page-recovery.js";
 import { BTI_PAGE_HEALTH_EXPRESSION, parseBtiPageHealthProbe,
   type BtiPageHealth } from "./bti-page-health.js";
 
-const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const PENDING_FORWARD_BYTES_PER_SOURCE = 32 * 1024 * 1024;
 const PENDING_FORWARD_ENTRIES_PER_SOURCE = 1_024;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
@@ -6014,7 +6014,7 @@ export class NetworkObserver {
       requestFrameKey: pending.requestFrameKey, requestDocumentKey: pending.requestDocumentKey,
       streamId: `sbobet-early:${pending.source.tabId}:${pending.observerRequestOrdinal}`,
       reconcileCutoffSequence: early.requestStartSequence };
-    const fragments = splitUtf8Text(JSON.stringify(batch), NETWORK_CHUNK_BODY_BYTES);
+    const fragments = splitNetworkBodyText(JSON.stringify(batch));
     const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
     let forwarded = 0;
     const forwarding = (async () => { for (const [chunkIndex, bodyFragment] of fragments.entries()) {
@@ -6283,7 +6283,7 @@ export class NetworkObserver {
     const request = { ...pendingRequestMetadata(pending),
       streamId: `sbobet-more:${pending.source.tabId}:${pending.observerRequestOrdinal}`,
       reconcileCutoffSequence: more.requestStartSequence };
-    const fragments = splitUtf8Text(JSON.stringify(batch), NETWORK_CHUNK_BODY_BYTES);
+    const fragments = splitNetworkBodyText(JSON.stringify(batch));
     const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
     // No snapshot replay/cache or full-event membership claim for complementary More.
     let forwarded = 0;
@@ -6503,7 +6503,7 @@ export class NetworkObserver {
       streamId: `sbobet-detail:${source.tabId}:${identity.observerRequestOrdinal}`,
       reconcileCutoffSequence: batch.requestStartSequence };
     const url = template.url.replace(/([?&]eventId=)\d{1,30}(?=&|$)/u, `$1${batch.eventId}`);
-    const fragments = splitUtf8Text(JSON.stringify(batch), NETWORK_CHUNK_BODY_BYTES);
+    const fragments = splitNetworkBodyText(JSON.stringify(batch));
     const snapshotId = networkSnapshotId(source.tabId, identity.observerRequestOrdinal);
     let admitted = true;
     const beforeForward = () => {
@@ -7718,7 +7718,7 @@ export class NetworkObserver {
           this.#forwardOverflowSources.has(source.sourceId)) return;
         const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
         this.#rememberHttpSnapshot(pending, safeBody, clocks);
-        const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
+        const fragments = splitNetworkBodyText(safeBody);
         if (fragments.length === 1) {
           let forwarded = false;
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
@@ -7865,7 +7865,7 @@ export class NetworkObserver {
       this.#forwardOverflowSources.has(source.sourceId)) return;
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
-    const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
+    const fragments = splitNetworkBodyText(safeBody);
     const sanitizedRequestMetadata = pendingRequestMetadata(pending);
     const request = Object.keys(sanitizedRequestMetadata).length === 0 ? {} : { request: sanitizedRequestMetadata };
     let forwarded = 0;
@@ -8576,7 +8576,7 @@ export class NetworkObserver {
     for (const [sourceId, snapshots] of this.#httpSnapshots) {
       if (requestedSourceId !== undefined && sourceId !== requestedSourceId) continue;
       for (const snapshot of snapshots) {
-        const fragments = splitUtf8Text(snapshot.body, NETWORK_CHUNK_BODY_BYTES);
+        const fragments = splitNetworkBodyText(snapshot.body);
         if (fragments.length === 1) {
           if (!await emitReplay(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: snapshot.body
@@ -9138,6 +9138,9 @@ export class NetworkObserver {
         }
       } catch (error) {
         if (!(error instanceof Error) || !/^BRIDGE_PAYLOAD_/u.test(error.message)) throw error;
+        // A missing HTTP fragment cannot be repaired by sending its suffix.
+        // Retire this source immediately so the next attempt has a new epoch.
+        if (transport === "HTTP_RESPONSE") this.#retireOverflowingForwarding(source);
       }
     });
     if (current === null) this.#retireOverflowingForwarding(source);

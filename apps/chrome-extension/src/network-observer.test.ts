@@ -8245,6 +8245,40 @@ describe("NetworkObserver", () => {
     expect(forward).not.toHaveBeenCalled();
   });
 
+  it("delivers every quote-heavy HTTP fragment through the serialized envelope limit", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const onForwardOverflow = vi.fn();
+    const observer = new NetworkObserver({ observerSessionId: "test-worker", now: () => 1_000,
+      monotonicNow: () => 50, sendCommand: vi.fn(async () => ({})),
+      forward: async message => { forwarded.push(message); }, onForwardOverflow });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    const body = JSON.stringify({ StatusCode: 100, sel: [], before: "x".repeat(110_000),
+      empty: Array(40_000).fill(""), after: "x".repeat(110_000) });
+    await observer.ingestHttpResponse(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch", body,
+      { method: "POST", currentDocumentConfirmed: true });
+    const chunks = forwarded.map(message => JSON.parse(message.payload.body));
+    expect(chunks.map(chunk => chunk.bodyFragment).join("")).toBe(body);
+    expect(chunks.map(chunk => chunk.chunkIndex)).toEqual(chunks.map((_, index) => index));
+    expect(chunks.every(chunk => chunk.chunkCount === chunks.length)).toBe(true);
+    expect(forwarded.every(message => new TextEncoder().encode(JSON.stringify(message)).byteLength <= 256 * 1024)).toBe(true);
+    expect(onForwardOverflow).not.toHaveBeenCalled();
+    observer.releaseTab(8);
+  });
+
+  it("retires an undeliverable HTTP body immediately instead of silently sending its suffix", async () => {
+    const onForwardOverflow = vi.fn();
+    const forward = vi.fn(async (_message: ChromeBridgeEnvelope) => {
+      if (forward.mock.calls.length === 2) throw new Error("BRIDGE_PAYLOAD_TOO_LARGE");
+    });
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward, onForwardOverflow });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.ingestHttpResponse(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
+      JSON.stringify({ pad: "x".repeat(340_000) }), { method: "POST", currentDocumentConfirmed: true });
+    expect(forward).toHaveBeenCalledTimes(2);
+    expect(onForwardOverflow).toHaveBeenCalledOnce();
+    observer.releaseTab(8);
+  });
+
   it("validates one direct IM document once before forwarding all of its snapshot chunks", async () => {
     const largeBody = JSON.stringify({ StatusCode: 100,
       sel: Array.from({ length: 5_000 }, (_, index) => ({ eid: index + 1, pad: "x".repeat(80) })) });
