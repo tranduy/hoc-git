@@ -595,6 +595,15 @@ function socketEpoch(epoch: string, streamId: string, streamOrdinal: number): So
     authorityLost: false, lastEnvelopeSequence: -1 };
 }
 
+// Retained entries are replaced on every receipt. Reuse normalization only
+// while all three owners are identical; a detail removal/replacement must
+// invalidate it too. Weak ownership releases retired source generations.
+const normalizedEntries = new WeakMap<RetainedRecord, {
+  readonly complete: RetainedRecord | undefined;
+  readonly more: RetainedRecord | undefined;
+  readonly part: NormalizedCatalogPart;
+}>();
+
 function catalogFromSource(source: SourceEpochState, observedAtMs: number): ReturnType<typeof mergeObservedCatalogParts> {
   const partitions = source.http.committedPartitions;
   const retained = new Map(source.early?.records);
@@ -610,17 +619,26 @@ function catalogFromSource(source: SourceEpochState, observedAtMs: number): Retu
   }
   const parts: NormalizedCatalogPart[] = [];
   for (const mainEntry of retained.values()) {
+    const complete = source.details.get(mainEntry.record.eventId);
+    const more = source.moreDetails.get(mainEntry.record.eventId);
+    const cached = normalizedEntries.get(mainEntry);
+    if (cached !== undefined && cached.complete === complete && cached.more === more) {
+      parts.push(cached.part);
+      continue;
+    }
     const entry = combineDetail(mainEntry, eventDetail(source, mainEntry.record.eventId));
     const normalized = normalizeSbobetCatalog([entry.record], {
       observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
       sequence: entry.sequence, provider: "SBOBET",
       settlementProfile: "football-regulation-including-added-time"
     });
-    parts.push({ ...normalized, quotes: normalized.quotes.map((quote) => {
+    const part = { ...normalized, quotes: normalized.quotes.map((quote) => {
       const receipt = entry.marketReceipts.get(quote.providerMarketId);
       return receipt === undefined ? quote : { ...quote,
         receivedMonotonicMs: receipt.receivedMonotonicMs, sequence: receipt.sequence };
-    }), nativeMarketObservations: entry.nativeMarketObservations });
+    }), nativeMarketObservations: entry.nativeMarketObservations };
+    normalizedEntries.set(mainEntry, { complete, more, part });
+    parts.push(part);
   }
   const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET", observedAtMs, parts });
   const normalizedMarketIds = new Set(catalog.markets.map((market) =>

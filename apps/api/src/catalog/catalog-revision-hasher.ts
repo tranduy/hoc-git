@@ -8,7 +8,7 @@ type SnapshotState = "FRESH" | "STALE";
  * second JSON copy of the catalog. Weak keys also release retired records.
  *
  * Revision v2 is an opaque ETag: native observations and BTI records contribute
- * SHA-256 digests. Other provider rows are often rebuilt on every update, so
+ * SHA-256 digests, as do SBOBET's retained normalized records. Other provider rows are often rebuilt on every update, so
  * hashing those individually would add work without useful cache reuse.
  */
 export class CatalogRevisionHasher {
@@ -35,7 +35,8 @@ export class CatalogRevisionHasher {
         continue;
       }
       const cache = key === "nativeMarketObservations" ? this.#native
-        : catalog.provider !== "BTI" ? undefined : key === "quotes" ? this.#quotes : this.#records;
+        : catalog.provider !== "BTI" && catalog.provider !== "SBOBET" ? undefined
+          : key === "quotes" ? this.#quotes : this.#records;
       hash.update("[");
       for (let index = 0; index < value.length; index += 128) {
         const group = value.slice(index, index + 128).map((record: object) => {

@@ -41,11 +41,11 @@ describe("CatalogRevisionStore", () => {
         }) };
       const digest = (record: unknown) => createHash("sha256").update(JSON.stringify(record)).digest("base64url");
       const catalog = Object.fromEntries(Object.entries(projected).map(([key, records]) => [key,
-        Array.isArray(records) && (key === "nativeMarketObservations" || value.provider === "BTI")
+        Array.isArray(records) && (key === "nativeMarketObservations" || value.provider === "BTI" || value.provider === "SBOBET")
           ? records.map(digest) : records]));
       return createHash("sha256").update(JSON.stringify({ revisionFormat: 2, catalog, snapshotState })).digest("base64url");
     };
-    for (const provider of ["BTI", "APSPORT", "SABA"] as const) {
+    for (const provider of ["BTI", "APSPORT", "SABA", "SBOBET"] as const) {
       for (const snapshotState of ["FRESH", "STALE"] as const) {
         for (const includeNative of [false, true]) {
           const original: ObservedProviderCatalog = { ...pricedCatalog(100, 10, 1), provider,

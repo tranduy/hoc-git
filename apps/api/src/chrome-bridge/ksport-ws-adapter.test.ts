@@ -52,6 +52,25 @@ function httpEnvelope(payload: unknown, partition: "live" | "today", generation:
 }
 
 describe("KsportWsCatalogAdapter", () => {
+  it("reuses untouched event normalization while replacing changed prices and receipt clocks", () => {
+    const event = (id: number, odds = "0.92") => ({ "0": "2026-08-20T16:00:00Z",
+      "2": `Home ${id}`, "3": `Away ${id}`, "7": {
+        "3": [`2.5 ${odds}*${id}0030002005h -0.98*${id}0030002005a ${id}181025`]
+      }, "8": id });
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(httpEnvelope([{ "1": "Live", "2": [event(5643423), event(5643424)] }], "live", 1, 10));
+    const before = adapter.decode(httpEnvelope([], "today", 1, 11))[0]!.value as ObservedProviderCatalog;
+    const after = adapter.decode({ ...receiptEnvelope(event(5643423, "0.75"), "live", 12, 101,
+      "ksport-stream-1", "worker-a:0"), receivedMonotonicMs: 120 })[0]!.value as ObservedProviderCatalog;
+    const untouched = before.quotes.find(quote => quote.providerEventId === "5643424")!;
+    expect(untouched).toBeDefined();
+    expect(after.quotes.find(quote => quote.providerSelectionId === untouched.providerSelectionId)).toBe(untouched);
+    const changed = after.quotes.filter(quote => quote.providerEventId === "5643423");
+    expect(changed).toContainEqual(expect.objectContaining({ rawOdds: "0.75", receivedMonotonicMs: 120, sequence: 12 }));
+    expect(before.quotes.filter(quote => quote.providerEventId === "5643423"))
+      .toContainEqual(expect.objectContaining({ rawOdds: "0.92", receivedMonotonicMs: 60 }));
+  });
+
   it("rejects the auxiliary Volta root socket even when it shares an sb21 host", () => {
     const adapter = new KsportWsCatalogAdapter();
     const input = envelope([]);
