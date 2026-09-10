@@ -36,6 +36,7 @@ import { resolveLocalAppData } from "./local-app-data.js";
 import { LatestCatalogPersister } from "./catalog/latest-catalog-persister.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
+import { installCatalogCompression } from "./catalog/catalog-compression.js";
 import { ProviderAuthorityCoordinator } from "./chrome-bridge/provider-authority-coordinator.js";
 import { chromeBridgeSourceIdentity } from "./chrome-bridge/chrome-bridge-account.js";
 import { PipelineTelemetry } from "./diagnostics/pipeline-telemetry.js";
@@ -715,6 +716,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     ? null
     : startExtensionReloadSweep(chromeBridgeControlPlane, () => readExtensionBuildIdentity());
   if (extensionReload !== null) app.addHook("onClose", async () => { extensionReload.dispose(); });
+  installCatalogCompression(app.server);
   await app.listen({ host: config.host, port: config.port });
   let sessionTimer: ReturnType<typeof setInterval> | null = null;
   if (shouldRunLegacySessionMaintenance(env)) {
