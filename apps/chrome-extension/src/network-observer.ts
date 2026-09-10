@@ -3813,6 +3813,7 @@ export class NetworkObserver {
   }
 
   async #refreshCatalog(source: ObservedSource, _options: CatalogRefreshOptions): Promise<void> {
+    const emitReplay = this.#captureReplayEmitter();
     if (source.lobby === "IM") {
       const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
       const tabGeneration = this.#captureTabGeneration(source.tabId);
@@ -3925,7 +3926,7 @@ export class NetworkObserver {
       } finally {
         this.#ksportRefreshesInFlight.delete(source.sourceId);
       }
-      if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
+      if (await this.#replayCatalogWsSnapshots(source.sourceId, emitReplay)) return;
       // A KSPORT socket becomes canonical only after the page itself sends a
       // football live/today SUBSCRIBE. Closing that socket here used to race
       // the provider's first full receipts: the explicit same-tab recovery
@@ -3943,7 +3944,7 @@ export class NetworkObserver {
       return;
     }
     if (source.lobby === "SBO") {
-      if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
+      if (await this.#replayCatalogWsSnapshots(source.sourceId, emitReplay)) return;
       await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
       return;
     }
@@ -8503,8 +8504,9 @@ export class NetworkObserver {
     if (requestedSourceId !== undefined) {
       const existing = this.#snapshotReplays.get(requestedSourceId);
       if (existing !== undefined) return existing;
+      const emitReplay = this.#captureReplayEmitter();
       const operation = this.#runPeriodicDomWork(requestedSourceId,
-        () => this.#replaySnapshots(requestedSourceId)).finally(() => {
+        () => this.#replaySnapshots(requestedSourceId, emitReplay)).finally(() => {
           if (this.#snapshotReplays.get(requestedSourceId) === operation) {
             this.#snapshotReplays.delete(requestedSourceId);
           }
@@ -8521,7 +8523,33 @@ export class NetworkObserver {
     return results.some(Boolean);
   }
 
-  async #replaySnapshots(requestedSourceId?: string): Promise<boolean> {
+  #captureReplayEmitter() {
+    // Capture at admission, before scheduler/forward waits. Recapturing for
+    // each fragment lets an old body suffix become sequence zero of a new epoch.
+    const sourceGenerations = new Map([...this.#sourceGenerations, ...this.#activeWorkGenerations]);
+    const bridgeGenerations = new Map(this.#bridgeEpochGenerations);
+    const tabGenerations = new Map(this.#tabGenerations);
+    return async (source: ObservedSource, url: string, resourceType: string,
+      transport: ChromeBridgeEnvelope["transport"], payload: ChromeBridgeEnvelope["payload"],
+      metadata: { readonly request: EmissionRequestMetadata; readonly observedAtMs: number;
+        readonly receivedMonotonicMs: number }): Promise<boolean> => {
+      const sourceGeneration = sourceGenerations.get(source.sourceId) ?? 0;
+      const bridgeGeneration = bridgeGenerations.get(source.sourceId) ?? 0;
+      const tabGeneration = tabGenerations.get(source.tabId) ?? 0;
+      const isCurrent = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+        this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration &&
+        this.#captureTabGeneration(source.tabId) === tabGeneration &&
+        !this.#forwardOverflowSources.has(source.sourceId);
+      if (!isCurrent()) return false;
+      let forwarded = false;
+      await this.#emit(source, url, resourceType, transport, payload, { ...metadata,
+        sourceGeneration, tabGeneration, beforeForward: isCurrent,
+        onForwarded: () => { forwarded = true; } });
+      return forwarded && isCurrent();
+    };
+  }
+
+  async #replaySnapshots(requestedSourceId?: string, emitReplay = this.#captureReplayEmitter()): Promise<boolean> {
     let replayed = false;
     for (const [sourceId, snapshot] of this.#cmdSnapshots) {
       if (requestedSourceId !== undefined && sourceId !== requestedSourceId) continue;
@@ -8538,10 +8566,10 @@ export class NetworkObserver {
       if (hostname === null) continue;
       const snapshotId = `cmd-replay:${source.tabId}:${this.#now()}`;
       for (const chunk of chunkCmdSnapshot(records, snapshotId)) {
-        await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
+        if (!await emitReplay(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
           encoding: "UTF8", body: JSON.stringify(chunk)
         }, { request: { replayed: true }, observedAtMs: snapshot.sentAtMs,
-          receivedMonotonicMs: snapshot.receivedMonotonicMs });
+          receivedMonotonicMs: snapshot.receivedMonotonicMs })) return replayed;
       }
       replayed = true;
     }
@@ -8550,18 +8578,18 @@ export class NetworkObserver {
       for (const snapshot of snapshots) {
         const fragments = splitUtf8Text(snapshot.body, NETWORK_CHUNK_BODY_BYTES);
         if (fragments.length === 1) {
-          await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
+          if (!await emitReplay(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: snapshot.body
           }, { request: replayRequestMetadata(snapshot),
-            observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
+            observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs })) return replayed;
         } else {
           const snapshotId = `network-replay:${snapshot.source.tabId}:${snapshot.observerRequestOrdinal}`;
           for (const [chunkIndex, bodyFragment] of fragments.entries()) {
-            await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
+            if (!await emitReplay(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
               encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
                 chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
             }, { request: replayRequestMetadata(snapshot),
-              observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
+              observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs })) return replayed;
           }
         }
         replayed = true;
@@ -8570,18 +8598,18 @@ export class NetworkObserver {
     for (const [sourceId, snapshots] of this.#tsportSnapshots) {
       if (requestedSourceId !== undefined && sourceId !== requestedSourceId) continue;
       for (const snapshot of snapshots.values()) {
-        await this.#emit(snapshot.source, snapshot.url, "WebSocket", "WS_FRAME", {
+        if (!await emitReplay(snapshot.source, snapshot.url, "WebSocket", "WS_FRAME", {
           encoding: "UTF8", body: snapshot.body
         }, { request: { streamId: snapshot.streamId, replayed: true },
-          observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
+          observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs })) return replayed;
         replayed = true;
       }
     }
-    replayed = await this.#replayCatalogWsSnapshots(requestedSourceId) || replayed;
+    replayed = await this.#replayCatalogWsSnapshots(requestedSourceId, emitReplay) || replayed;
     return replayed;
   }
 
-  async #replayCatalogWsSnapshots(requestedSourceId?: string): Promise<boolean> {
+  async #replayCatalogWsSnapshots(requestedSourceId?: string, emitReplay = this.#captureReplayEmitter()): Promise<boolean> {
     let replayed = false;
     for (const [sourceId, partitions] of this.#catalogWsSnapshots) {
       if (requestedSourceId !== undefined && sourceId !== requestedSourceId) continue;
@@ -8605,12 +8633,12 @@ export class NetworkObserver {
           if (!ksportFramesContainCompleteBaseline(replayableSnapshots)) continue;
         }
         for (const snapshot of replayableSnapshots) {
-          await this.#emit(snapshot.source, snapshot.url, "WebSocket", "WS_FRAME", {
+          if (!await emitReplay(snapshot.source, snapshot.url, "WebSocket", "WS_FRAME", {
             encoding: "UTF8", body: snapshot.body
           }, { request: { streamId: snapshot.streamId, replayed: true,
             ...(snapshot.recoveryGeneration === undefined ? {} :
               { recoveryGeneration: snapshot.recoveryGeneration }) },
-            observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
+            observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs })) return replayed;
           replayed = true;
         }
       }
