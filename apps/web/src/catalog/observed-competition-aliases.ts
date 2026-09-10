@@ -3,6 +3,19 @@
  * A competition alias still requires matching participants, kickoff and event variant.
  */
 export const observedCompetitionAliases: readonly (readonly [string, string])[] = [
+  // Additional exact translations from the 2026-09-10 frozen capture.
+  ["latvia virsliga", "latvia-virsliga"], ["giai ngoai hang latvia", "latvia-virsliga"],
+  ["giai virsliga latvia", "latvia-virsliga"],
+  ["cyprus division 1", "cyprus-first-division"], ["cyprus 1st division", "cyprus-first-division"],
+  ["giai hang nhat sip", "cyprus-first-division"],
+  ["azerbaijan premier league", "azerbaijan-premier-league"], ["giai azerbaijan premier", "azerbaijan-premier-league"],
+  ["azerbaijan division 1", "azerbaijan-first-division"], ["giai hang nhat azerbaijan", "azerbaijan-first-division"],
+  ["uefa youth league", "uefa-youth-league"], ["giai tre u19 uefa", "uefa-youth-league"],
+  ["fifa u20 women world cup in poland", "fifa-u20-women-world-cup"],
+  ["2026 u20 women world cup in poland", "fifa-u20-women-world-cup"],
+  ["giai fifa world cup u20 nu", "fifa-u20-women-world-cup"],
+  ["giai vo dich u20 bong da nu the gioi", "fifa-u20-women-world-cup"],
+  ["giai vo dich bong da nu u20 the gioi 2026 tai ba lan", "fifa-u20-women-world-cup"],
   ["cup hy lap", "greece-cup"], ["cup quoc gia hy lap", "greece-cup"], ["greece cup", "greece-cup"],
   ["giai scotland league cup", "scotland-league-cup"], ["scottish league cup", "scotland-league-cup"],
   ["scotland league cup", "scotland-league-cup"],

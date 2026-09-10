@@ -4,6 +4,7 @@ import { footballBinaryMarketSpec, footballCategoricalMarketSpec, isFootballCate
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { compareProviders, sortProviderItems } from "./provider-order.js";
 import { observedCompetitionAliases } from "./observed-competition-aliases.js";
+import { observedFootballTeamAliases } from "./observed-team-aliases.js";
 import { footballComparisonEquivalents } from "./football-comparison-equivalents.js";
 
 export interface ComparisonCell {
@@ -671,6 +672,7 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
 
 function participantIdentity(category: ProviderEvent["category"], value: string): string {
   const normalized = identityText(value);
+  if (category === "FOOTBALL") return observedFootballTeamAliases.get(normalized) ?? normalized;
   // Esports feeds commonly disagree only on brand spacing (for example
   // ThunderTalk vs Thunder Talk). Both participants, scope, variant, BO and
   // kickoff evidence still have to agree before an event can be paired.
