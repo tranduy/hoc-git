@@ -108,6 +108,9 @@ function mockNetworkObserver(start = vi.fn(async (_source: { readonly tabId: num
     }
     beginSourceEpoch = vi.fn();
     beginBridgeSourceEpoch = vi.fn();
+    bootstrapSabaCatalog = vi.fn(async () => undefined);
+    canRequestSbobet = vi.fn(() => true);
+    sbobetRequestsPaused = vi.fn(async () => false);
     captureCmdSnapshot = vi.fn(async () => undefined);
     ensureCompleteKsportBaseline = vi.fn(async () => true);
     focusSelection = vi.fn(async () => true);
@@ -215,7 +218,7 @@ describe("background source launch memory", () => {
     expect(start.mock.calls.map(([source]) => source.tabId)).toEqual([7, 8]);
   });
 
-  it("renews an attached BTI lease in the exact tab without creating a replacement", async () => {
+  it("preserves a healthy BTI document beyond the old automatic renewal deadline", async () => {
     const harness = createChromeHarness("https://prod20091.fxf774.com/old?operatorToken=secret");
     vi.stubGlobal("chrome", harness.api);
     mockNetworkObserver();
@@ -227,9 +230,9 @@ describe("background source launch memory", () => {
 
     await vi.advanceTimersByTimeAsync(1_340_000);
 
-    expect(harness.api.tabs.update).toHaveBeenCalledWith(7, {
-      url: "https://prod20091.fxf774.com/vi/asian-view/today/B%C3%B3ng-%C4%91%C3%A1?operatorToken=logout"
-    });
+    expect(harness.api.tabs.update).not.toHaveBeenCalled();
+    expect(harness.api.tabs.reload).not.toHaveBeenCalled();
+    expect(harness.api.tabs.remove).not.toHaveBeenCalled();
     expect(harness.api.tabs.create).not.toHaveBeenCalled();
   });
 
