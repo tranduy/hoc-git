@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { onBudgetedBridgeMessage } from "./bridge-message-budget.js";
 import { CHROME_BRIDGE_MAX_ENVELOPE_BYTES, ChromeBridgeEnvelopeSchema,
   type ChromeBridgeControlMessage } from "@tool-chenh/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -139,7 +140,7 @@ export function registerChromeBridgeRoute(
       registry.releaseConnection(connection);
       options.controlPlane?.detach(writableSocket);
     });
-    socket.on("message", (raw: RawData) => {
+    onBudgetedBridgeMessage(socket, (raw: RawData) => {
       const bytes = rawDataBytes(raw);
       if (bytes > MAX_FRAME_BYTES) {
         socket.send(JSON.stringify(reject("PAYLOAD_TOO_LARGE")));
