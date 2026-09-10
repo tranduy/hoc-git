@@ -16,6 +16,59 @@ const response = {
 afterEach(() => vi.useRealTimers());
 
 describe("CatalogApi", () => {
+  it("starts queued detail deadlines after admission and releases slots on timeout", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(0);
+    const starts: number[] = [];
+    const api = new CatalogApi((_input, init) => {
+      starts.push(Date.now());
+      return new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () =>
+        reject(new DOMException("aborted", "AbortError"))));
+    }, 10);
+    const results = Promise.allSettled([api.readEventsRevision("account-1", ["a"]),
+      api.readEventsRevision("account-1", ["b"]), api.readRevision("account-2"),
+      api.readEventsRevision("account-3", ["c"])]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(starts).toEqual([0, 0, 10, 10]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect((await results).every(result => result.status === "rejected" &&
+      result.reason.code === "CATALOG_TIMEOUT")).toBe(true);
+  });
+
+  it("limits large transfers across views while roster reads remain available", async () => {
+    const started: string[] = [];
+    const bodies = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const id = decodeURIComponent(url.pathname.split("/").at(-1)!);
+      const key = `${id}:${url.searchParams.get("events") ?? "roster"}`;
+      started.push(key);
+      if (url.searchParams.has("markets")) return new Response(JSON.stringify({ ...response, accountId: id }));
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) { bodies.set(key, controller); } }));
+    });
+    const api = new CatalogApi(fetcher);
+    const first = api.readEventsRevision("account-1", ["a"]);
+    const changedView = api.readEventsRevision("account-1", ["b"]);
+    const second = api.readEventsRevision("account-2", ["c"]);
+    const third = api.readEventsRevision("account-3", ["d"]);
+    await vi.waitFor(() => expect(started).toEqual(["account-1:a", "account-2:c"]));
+    await api.readRosterRevision("account-3");
+    expect(started).toContain("account-3:roster");
+    const finish = (key: string, id: string) => {
+      bodies.get(key)!.enqueue(new TextEncoder().encode(JSON.stringify({ ...response, accountId: id })));
+      bodies.get(key)!.close();
+    };
+    finish("account-1:a", "account-1");
+    await first;
+    await vi.waitFor(() => expect(started).toContain("account-1:b"));
+    expect(started).not.toContain("account-3:d");
+    finish("account-2:c", "account-2");
+    await second;
+    await vi.waitFor(() => expect(started).toContain("account-3:d"));
+    finish("account-1:b", "account-1"); finish("account-3:d", "account-3");
+    expect((await changedView).revision).toContain("events:b");
+    await third;
+  });
+
   it.each([0, 21_000, 21_000.5])("preserves the optional paired catalog receipt anchor %s", observedMonotonicMs => {
     expect(parseLiveCatalogResponse({ ...response, observedMonotonicMs }, "account-1"))
       .toHaveProperty("observedMonotonicMs", observedMonotonicMs);

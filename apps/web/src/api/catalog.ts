@@ -193,6 +193,8 @@ export class CatalogApi implements CatalogApiLike {
   readonly #cache = new Map<string, { readonly viewKey: string; readonly etag: string; readonly revision: string;
     readonly catalog: LiveCatalogResponse; readonly sourceRevision?: string }>();
   readonly #inFlight = new Map<string, Promise<CatalogReadResult>>();
+  readonly #activeDetails = new Set<string>();
+  readonly #detailQueue: Array<{ accountId: string; start: () => void }> = [];
 
   constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 10_000,
     bodyTimeoutMs = timeoutMs, nativeDetail: "full" | "summary" | "counts" = "full") {
@@ -231,10 +233,37 @@ export class CatalogApi implements CatalogApiLike {
     const existing = this.#inFlight.get(requestKey);
     if (existing !== undefined) return existing;
     // Initial loading and revision updates share the full transfer and validation.
-    const request = this.#readRevision(accountId, cacheKey, viewKey, viewQuery)
+    const request = this.#readAdmittedRevision(accountId, cacheKey, viewKey, viewQuery)
       .finally(() => this.#inFlight.delete(requestKey));
     this.#inFlight.set(requestKey, request);
     return request;
+  }
+
+  async #readAdmittedRevision(accountId: string, cacheKey: string, viewKey: string,
+    viewQuery: string): Promise<CatalogReadResult> {
+    if (viewKey === "roster") return this.#readRevision(accountId, cacheKey, viewKey, viewQuery);
+    // Initial loading and realtime views can otherwise stream several large
+    // snapshots of the same book at once. Keep metadata unblocked and start
+    // network deadlines only when a detail transfer actually gets its slot.
+    await new Promise<void>(resolve => {
+      this.#detailQueue.push({ accountId, start: resolve });
+      this.#admitDetails();
+    });
+    try { return await this.#readRevision(accountId, cacheKey, viewKey, viewQuery); }
+    finally {
+      this.#activeDetails.delete(accountId);
+      this.#admitDetails();
+    }
+  }
+
+  #admitDetails(): void {
+    while (this.#activeDetails.size < 2) {
+      const index = this.#detailQueue.findIndex(job => !this.#activeDetails.has(job.accountId));
+      if (index < 0) return;
+      const [job] = this.#detailQueue.splice(index, 1);
+      this.#activeDetails.add(job!.accountId);
+      job!.start();
+    }
   }
 
   async #readRevision(accountId: string, cacheKey: string, viewKey: string,
