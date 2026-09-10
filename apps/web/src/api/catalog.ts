@@ -188,7 +188,7 @@ export class CatalogApi implements CatalogApiLike {
   readonly #timeoutMs: number;
   readonly #bodyTimeoutMs: number;
   readonly #nativeDetail: "full" | "summary" | "counts";
-  readonly #cache = new Map<string, { readonly etag: string; readonly revision: string;
+  readonly #cache = new Map<string, { readonly viewKey: string; readonly etag: string; readonly revision: string;
     readonly catalog: LiveCatalogResponse }>();
   readonly #inFlight = new Map<string, Promise<CatalogReadResult>>();
 
@@ -220,13 +220,18 @@ export class CatalogApi implements CatalogApiLike {
   }
 
   #readViewRevision(accountId: string, viewKey: string, viewQuery: string): Promise<CatalogReadResult> {
-    const cacheKey = `${accountId}\u0000${viewKey}`;
-    const existing = this.#inFlight.get(cacheKey);
+    // Event sets change whenever a fixture enters/leaves the comparison window.
+    // Keep one replaceable event-detail slot per source; keying the cache by the
+    // entire set retained another large catalog on every polling round.
+    const cacheView = viewKey.startsWith("events:") ? "events" : viewKey;
+    const cacheKey = `${accountId}\u0000${cacheView}`;
+    const requestKey = `${accountId}\u0000${viewKey}`;
+    const existing = this.#inFlight.get(requestKey);
     if (existing !== undefined) return existing;
     // Initial loading and revision updates share the full transfer and validation.
     const request = this.#readRevision(accountId, cacheKey, viewKey, viewQuery)
-      .finally(() => this.#inFlight.delete(cacheKey));
-    this.#inFlight.set(cacheKey, request);
+      .finally(() => this.#inFlight.delete(requestKey));
+    this.#inFlight.set(requestKey, request);
     return request;
   }
 
@@ -235,7 +240,8 @@ export class CatalogApi implements CatalogApiLike {
     const controller = new AbortController();
     let timeout = window.setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
-      const cached = this.#cache.get(cacheKey);
+      const slot = this.#cache.get(cacheKey);
+      const cached = slot?.viewKey === viewKey ? slot : undefined;
       const queryParts = [this.#nativeDetail === "full" ? "" : `nativeDetail=${this.#nativeDetail}`, viewQuery]
         .filter((part) => part.length > 0);
       const query = queryParts.length === 0 ? "" : `?${queryParts.join("&")}`;
@@ -272,10 +278,10 @@ export class CatalogApi implements CatalogApiLike {
         (catalog.observedMonotonicMs === undefined ? "" : `-receipt:${catalog.observedMonotonicMs}`);
       const revision = viewKey.length === 0 ? sourceRevision : `${sourceRevision}|${viewKey}`;
       const latest = this.#cache.get(cacheKey);
-      if (latest !== undefined && latest.catalog.observedAtMs > catalog.observedAtMs) {
+      if (latest?.viewKey === viewKey && latest.catalog.observedAtMs > catalog.observedAtMs) {
         return { catalog: latest.catalog, revision: latest.revision };
       }
-      if (etag !== null && etag.length > 0) this.#cache.set(cacheKey, { etag, revision, catalog });
+      if (etag !== null && etag.length > 0) this.#cache.set(cacheKey, { viewKey, etag, revision, catalog });
       return { catalog, revision };
     } catch (error) {
       if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);

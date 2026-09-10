@@ -358,4 +358,26 @@ describe("CatalogApi", () => {
     expect(catalogRetryDelayMs(new CatalogReadError("CATALOG_SCHEMA_ERROR", 503))).toBe(30_000);
     expect(catalogRetryDelayMs(new Error("network unavailable"))).toBe(30_000);
   });
+
+  it("replaces the event-detail cache slot when the pairable event set changes", async () => {
+    const requests: Array<{ url: string; etag: string | null }> = [];
+    const api = new CatalogApi(async (input, init) => {
+      const url = String(input);
+      requests.push({ url, etag: new Headers(init?.headers).get("if-none-match") });
+      return new Response(JSON.stringify(response), {
+        headers: { etag: `"${url.includes("event-b") ? "b" : "a"}"`, "x-catalog-revision": "source" }
+      });
+    }, 10_000, 30_000, "counts");
+
+    await api.readEventsRevision("account-1", ["event-a"]);
+    await api.readEventsRevision("account-1", ["event-b"]);
+    await api.readEventsRevision("account-1", ["event-a"]);
+
+    expect(requests.map((request) => request.etag)).toEqual([null, null, null]);
+    expect(requests.map((request) => request.url)).toEqual([
+      "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-a",
+      "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-b",
+      "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-a"
+    ]);
+  });
 });
