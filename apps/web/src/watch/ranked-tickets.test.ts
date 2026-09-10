@@ -383,6 +383,11 @@ describe("rankTicketsForEvent", () => {
     const unrelatedUpdate = rankTicketsForEvent({ ...input,
       event: eventWithAp(staleApCell, "another-event") });
     const confirmed = rankTicketsForEvent({ ...input, event: eventWithAp(freshApCell) });
+    const replaced = eventWithAp(staleApCell);
+    const replacedCatalog = { ...replaced.catalogs[0]!,
+      quotes: freshApCell.quotes.map(quote => ({ ...quote, rawOdds: "1.50", sequence: 2 })) };
+    expect(rankTicketsForEvent({ ...input,
+      event: { ...replaced, catalogs: [replacedCatalog] } })[0]?.plan).toBeNull();
 
     expect(stale[0]).toMatchObject({ key: "ap-row", plan: null, state: "OBSERVATION" });
     expect(stale[0]?.row.cells.find((candidate) => candidate.provider === "APSPORT")?.quotes).toEqual([]);

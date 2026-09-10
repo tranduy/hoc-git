@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ComparisonWorkerEngine } from "../catalog/comparison-worker-engine.js";
 import type { ProviderId } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { buildComparisonEvents, type ComparisonEvent } from "../catalog/comparison.js";
@@ -31,6 +32,43 @@ function rank(event: ComparisonEvent, selectedProviders = new Set<ProviderId>(["
 }
 
 describe("exact rows waiting for prices", () => {
+  it("uses the native AP receipt deadline when the fixture projection corrects live to prematch", () => {
+    const original = catalog("APSPORT", ["2.12", "1.92"]);
+    const ap = { ...original, events: original.events.map(event => ({ ...event, isLive: true })),
+      quotes: original.quotes.map(quote => ({ ...quote, isLive: true })) };
+    const other = catalog("CMD", ["1.9", "2.1"]);
+    const engine = new ComparisonWorkerEngine();
+    const output = engine.apply({ type: "RESET", generation: 1, staleAccountIds: [], catalogs: [ap, other] });
+    const { accountIds: _accounts, ...projection } = output.freshEvents.find(event => event.rows.length > 0)!;
+    const event = { ...projection, catalogs: [ap, other] };
+    expect(event.rows[0]!.cells.find(cell => cell.provider === "APSPORT")!.quotes[0]!.isLive).toBe(false);
+    expect(topRankedTicketItems([rank(event)])[0]!.ticket.plan).not.toBeNull();
+    expect(topRankedTicketItems([rank(event, undefined, nowMs + 5_001)])[0]!.ticket.plan).toBeNull();
+  });
+
+  it("keeps an incomplete pair visible without pricing historical quotes, then restores current ROI", () => {
+    const current = catalog("CMD", ["2.3", "1.7"]);
+    const other = catalog("BTI", ["1.7", "2.3"]);
+    const engine = new ComparisonWorkerEngine();
+    engine.apply({ type: "RESET", generation: 1, staleAccountIds: [], catalogs: [current, other] });
+    const pending = { ...current, observedAtMs: nowMs + 200_000,
+      quotes: current.quotes.map((quote, index) => ({ ...quote, sequence: index + 2 })) };
+    const output = engine.apply({ type: "UPSERT", generation: 2, catalog: pending, stale: false });
+    const projection = output.displayEvents.find(event => event.rows.length > 0)!;
+    const { accountIds: _accounts, ...event } = projection;
+    const waiting = topRankedTicketItems([rank({ ...event, catalogs: [pending, other] })]);
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]!.ticket).toMatchObject({ plan: null, hasOpposingSources: true,
+      reason: "Waiting for a complete current quote" });
+    expect(waiting[0]!.ticket.row.cells.find(cell => cell.provider === "CMD")!.quotes).toEqual([]);
+
+    const refreshed = { ...current, observedAtMs: nowMs + 200_001,
+      quotes: current.quotes.map(quote => ({ ...quote, sequence: 4 })) };
+    const recovered = engine.apply({ type: "UPSERT", generation: 3, catalog: refreshed, stale: false });
+    const { accountIds: _currentAccounts, ...freshEvent } = recovered.displayEvents.find(event => event.rows.length > 0)!;
+    expect(topRankedTicketItems([rank({ ...freshEvent, catalogs: [refreshed, other] })])[0]!.ticket.plan).not.toBeNull();
+  });
+
   it("recomputes CMD/AP/BTI routes after the globally best SABA/SBO books are deselected", () => {
     const event = buildComparisonEvents(sources()).find(event => event.rows.length > 0)!;
     const all = topRankedTicketItems([rank(event, new Set(sources().map(source => source.provider)))]);

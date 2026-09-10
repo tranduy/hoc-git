@@ -24,6 +24,50 @@ function catalog(provider: "SABA" | "SBOBET", accountId: string, odds: readonly 
 }
 
 describe("ComparisonWorkerEngine", () => {
+  it.each(["participants", "kickoff"] as const)("does not borrow prices after fixture %s change", change => {
+    const engine = new ComparisonWorkerEngine();
+    const first = catalog("SABA", "saba", ["2.20", "1.80"]);
+    const second = catalog("SBOBET", "sbo", ["2.10", "1.90"]);
+    engine.apply({ type: "RESET", generation: 1, catalogs: [first, second], staleAccountIds: [] });
+    const replace = (event: ProviderEvent): ProviderEvent => change === "participants"
+      ? { ...event, participantA: "Rosenborg", participantB: "Brann" }
+      : { ...event, startAtUtcMs: 3_000_000 };
+    const output = engine.apply({ type: "BATCH_DELTA", generation: 2, changes: [
+      { type: "UPSERT", stale: false, catalog: { ...first, events: first.events.map(replace),
+        quotes: first.quotes.map((quote, index) => ({ ...quote, sequence: index + 2 })) } },
+      { type: "UPSERT", stale: false, catalog: { ...second, events: second.events.map(replace),
+        quotes: second.quotes.map(quote => ({ ...quote, sequence: 2 })) } }
+    ] });
+    expect(output.freshEvents.flatMap(event => event.rows)).toEqual([]);
+    expect(output.displayEvents.flatMap(event => event.rows)).toEqual([]);
+  });
+
+  it.each(["settlement", "selection"] as const)("does not borrow prices after native %s terms change", change => {
+    const engine = new ComparisonWorkerEngine();
+    const first = catalog("SABA", "saba", ["2.20", "1.80"]);
+    engine.apply({ type: "RESET", generation: 1, staleAccountIds: [],
+      catalogs: [first, catalog("SBOBET", "sbo", ["2.10", "1.90"])] });
+    const output = engine.apply({ type: "UPSERT", generation: 2, stale: false, catalog: { ...first,
+      markets: first.markets.map(market => ({ ...market, settlementProfile: change === "settlement"
+        ? "football-including-extra-time" : market.settlementProfile })),
+      quotes: first.quotes.map((quote, index) => ({ ...quote, sequence: index + 2,
+        providerSelectionId: change === "selection" ? `new-${quote.providerSelectionId}` : quote.providerSelectionId }))
+    } });
+    expect(output.displayEvents.flatMap(event => event.rows)).toEqual([]);
+  });
+
+  it.each(["SUSPENDED", "CLOSED"] as const)("does not resurrect explicitly %s quotes", status => {
+    const engine = new ComparisonWorkerEngine();
+    const first = catalog("SABA", "saba", ["2.20", "1.80"]);
+    const second = catalog("SBOBET", "sbo", ["2.10", "1.90"]);
+    engine.apply({ type: "RESET", generation: 1, catalogs: [first, second], staleAccountIds: [] });
+    const current = { ...first, observedAtMs: 2,
+      quotes: first.quotes.map(quote => ({ ...quote, status, sequence: 2, receivedMonotonicMs: 2 })) };
+    const output = engine.apply({ type: "UPSERT", generation: 2, catalog: current, stale: false });
+    expect(output.freshEvents.flatMap(event => event.rows)).toEqual([]);
+    expect(output.displayEvents.flatMap(event => event.rows)).toEqual([]);
+  });
+
   it("does not touch prior markets or quotes when every current offer is already usable", () => {
     const engine = new ComparisonWorkerEngine();
     const initial = catalog("SABA", "saba-account", ["2.20", "1.80"]);
@@ -205,7 +249,7 @@ describe("ComparisonWorkerEngine", () => {
     expect(output.freshEvents.flatMap((event) => event.rows)).toEqual([]);
   });
 
-  it("keeps the last complete display snapshot when an atomic-looking upsert has duplicate outcomes", () => {
+  it("does not restore prior terms when the same selection ID changes its outcome", () => {
     const engine = new ComparisonWorkerEngine();
     const saba = catalog("SABA", "saba-account", ["2.20", "1.80"]);
     const sbobet = catalog("SBOBET", "sbobet-account", ["2.10", "1.90"]);
@@ -215,8 +259,7 @@ describe("ComparisonWorkerEngine", () => {
 
     const output = engine.apply({ type: "UPSERT", generation: 2, catalog: duplicateOutcome, stale: false });
 
-    expect(output.displayEvents[0]?.rows[0]?.cells.find((cell) => cell.provider === "SABA")
-      ?.quotes.map((quote) => quote.rawOdds)).toEqual(["2.20", "1.80"]);
+    expect(output.displayEvents.flatMap(event => event.rows)).toEqual([]);
     expect(output.freshEvents[0]?.rows).toEqual([]);
   });
 });

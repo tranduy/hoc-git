@@ -11,6 +11,8 @@ export interface ComparisonCell {
   readonly provider: ProviderId;
   readonly market: ProviderMarket;
   readonly quotes: readonly ProviderQuote[];
+  /** Retained only to show an exact pair while its current receipt is incomplete. */
+  readonly historical?: true;
   /** Provider-native identity. Canonical market/quotes above are only for cross-book comparison. */
   readonly sourceEvent?: ProviderEvent;
   readonly sourceMarket?: ProviderMarket;

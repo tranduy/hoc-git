@@ -53,7 +53,11 @@ const APSPORT_PREMATCH_QUOTE_MAX_AGE_MS = 15_000;
 const apsportQuoteDeadlineCache = new WeakMap<ComparisonEvent["catalogs"][number], ReadonlyMap<string, number>>();
 
 function quoteIdentity(quote: ProviderQuote): string {
-  return `${quote.providerEventId}\u0000${quote.providerMarketId}\u0000${quote.providerSelectionId}`;
+  // A later price for this selection cannot renew a historical display quote.
+  // Selection/line may be oriented for comparison; keep native IDs and receipt terms.
+  return JSON.stringify([quote.providerEventId, quote.providerMarketId, quote.providerSelectionId,
+    quote.receivedMonotonicMs, quote.sequence, quote.sourceTimestampMs,
+    quote.rawOdds, quote.rawFormat, quote.status]);
 }
 
 function apsportQuoteDeadlines(catalog: ComparisonEvent["catalogs"][number]): ReadonlyMap<string, number> {
@@ -96,10 +100,15 @@ function isFreshApsportQuote(indexes: readonly ReadonlyMap<string, number>[], qu
 
 function freshnessFilteredRow(row: ComparisonRow,
   freshnessIndexes: readonly ReadonlyMap<string, number>[], nowMs: number): {
-  readonly row: ComparisonRow; readonly rejectedApsportQuote: boolean;
+  readonly row: ComparisonRow; readonly rejectedApsportQuote: boolean; readonly rejectedHistoricalQuote: boolean;
 } {
   let rejectedApsportQuote = false;
+  let rejectedHistoricalQuote = false;
   const cells = row.cells.map((cell) => {
+    if (cell.historical) {
+      rejectedHistoricalQuote = true;
+      return { ...cell, quotes: [], ...(cell.sourceQuotes === undefined ? {} : { sourceQuotes: [] }) };
+    }
     if (cell.provider !== "APSPORT") return cell;
     const quotes = cell.quotes.filter((quote) => {
       const fresh = isFreshApsportQuote(freshnessIndexes, quote, nowMs);
@@ -109,7 +118,7 @@ function freshnessFilteredRow(row: ComparisonRow,
     const sourceQuotes = cell.sourceQuotes?.filter((quote) => isFreshApsportQuote(freshnessIndexes, quote, nowMs));
     return { ...cell, quotes, ...(sourceQuotes === undefined ? {} : { sourceQuotes }) };
   });
-  return { row: { ...row, cells }, rejectedApsportQuote };
+  return { row: { ...row, cells }, rejectedApsportQuote, rejectedHistoricalQuote };
 }
 
 export function ticketEdgeSummary(ticket: RankedTicket): EventEdgeSummary | null {
@@ -246,7 +255,7 @@ export function rankTicketsForEvent(input: {
     const movementMagnitude = movementFor(input.event.key, row.key, input.movements);
     const gapsBySelection = priceGaps(safeRow, input.selectedProviders);
     if (row.opposition === undefined && verified !== undefined && verified.eventKey === input.event.key && verified.rowKey === row.key &&
-      verified.expiresAtMs > input.nowMs && !freshness.rejectedApsportQuote) {
+      verified.expiresAtMs > input.nowMs && !freshness.rejectedApsportQuote && !freshness.rejectedHistoricalQuote) {
       const profitable = new Decimal(verified.plan.worstCaseProfit).gte(20_000);
       return { key: row.key, eventKey: input.event.key, row: safeRow, plan: verified.plan,
         state: profitable ? "VERIFIED_PROFIT" : "VERIFIED_NO_PROFIT",
@@ -263,7 +272,7 @@ export function rankTicketsForEvent(input: {
     return { key: row.key, eventKey: input.event.key, row: safeRow, plan,
       ...(plan === null ? { hasOpposingSources: opposingProviderPairs.length > 0, opposingProviderPairs } : {}),
       ...(plan === null && opposingProviderPairs.length > 0 && row.opposition === undefined ? { auditRow: row } : {}),
-      state: "OBSERVATION", reason: freshness.rejectedApsportQuote
+      state: "OBSERVATION", reason: freshness.rejectedHistoricalQuote ? "Waiting for a complete current quote" : freshness.rejectedApsportQuote
         ? "APSPORT quote freshness not confirmed" : row.opposition !== undefined
           ? "Chỉ ước tính; kiểm tra vé ghép 1X2/cơ hội kép chưa hỗ trợ" : "Provider preflight required", movementMagnitude, gapsBySelection };
   });
