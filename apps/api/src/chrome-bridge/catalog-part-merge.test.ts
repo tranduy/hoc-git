@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
-import { mergeObservedCatalogParts, type CatalogEvent,
+import { mergeObservedCatalogParts, mergeIndependentCatalogParts, type CatalogEvent,
   type NormalizedCatalogPart } from "./catalog-part-merge.js";
 
 function event(providerEventId: string, overrides: Partial<ProviderEvent> = {}): ProviderEvent {
@@ -32,6 +32,41 @@ function part(events: ProviderEvent[], markets: ProviderMarket[], quotes: Provid
 }
 
 describe("mergeObservedCatalogParts", () => {
+  it("merges retained independent parts exactly like the full merge, including duplicate rows and phase correction", () => {
+    const first = part([event("1", { isLive: false })], [market("1", "m1"), market("1", "m1")],
+      [quote("1", "m1", "s1"), { ...quote("1", "m1", "s1"), rawOdds: "0.70" }]);
+    const second = part([event("2")], [market("2", "m2")], [quote("2", "m2", "s2")]);
+    const input = { accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD" as const,
+      observedAtMs: 1000, parts: [first, second] };
+    const before = mergeIndependentCatalogParts(input);
+    expect(before).toEqual(mergeObservedCatalogParts(input));
+    const changed = { ...input, observedAtMs: 2000, parts: [first,
+      part([event("2")], second.markets.slice(), [{ ...second.quotes[0]!, rawOdds: "0.60" }])] };
+    const after = mergeIndependentCatalogParts(changed);
+    expect(after).toEqual(mergeObservedCatalogParts(changed));
+    expect(after.quotes[0]).toBe(before.quotes[0]);
+    expect(after.quotes[0]!.isLive).toBe(false);
+    expect(mergeIndependentCatalogParts({ ...input, parts: [second] }))
+      .toEqual(mergeObservedCatalogParts({ ...input, parts: [second] }));
+  });
+
+  it("falls back to the ordered merge when parts overlap through market-only or event rows", () => {
+    const first = part([event("1", { isLive: false })], [market("1", "m1")], [quote("1", "m1", "s1")]);
+    for (const later of [part([], [market("1", "m2")], [quote("1", "m2", "s2")]),
+      part([event("1")], [market("1", "m1")], [{ ...quote("1", "m1", "s1"), rawOdds: "0.50" }])]) {
+      const input = { accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD" as const,
+        observedAtMs: 1000, parts: [first, later] };
+      expect(mergeIndependentCatalogParts(input)).toEqual(mergeObservedCatalogParts(input));
+    }
+  });
+
+  it("preserves legacy composite-key collisions for unusual provider event IDs", () => {
+    const input = { accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD" as const,
+      observedAtMs: 1000, parts: [part([event("a|b")], [market("a|b", "c")], [quote("a|b", "c", "s")]),
+        part([event("a")], [market("a", "b|c")], [quote("a", "b|c", "s")])] };
+    expect(mergeIndependentCatalogParts(input)).toEqual(mergeObservedCatalogParts(input));
+  });
+
   it("keeps distinct provider events untouched", () => {
     const catalog = mergeObservedCatalogParts({
       accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD", observedAtMs: 1_000,

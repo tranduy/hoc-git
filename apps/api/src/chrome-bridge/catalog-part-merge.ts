@@ -11,6 +11,52 @@ export interface NormalizedCatalogPart {
 
 export type CatalogEvent = ObservedProviderCatalog["events"][number];
 
+const independentParts = new WeakMap<NormalizedCatalogPart, {
+  readonly catalog: ObservedProviderCatalog;
+  readonly owners: ReadonlySet<string>;
+}>();
+
+/** Immutable per-event parts need deduplication and phase alignment only when
+ * they change. Prove disjoint ownership across every row type before joining
+ * them; overlapping parts retain the ordinary ordered merge semantics. */
+export function mergeIndependentCatalogParts(input: {
+  readonly accountId: string;
+  readonly provider: ProviderId;
+  readonly observedAtMs: number;
+  readonly parts: readonly NormalizedCatalogPart[];
+}): ObservedProviderCatalog {
+  const owners = new Set<string>();
+  const catalogs: ObservedProviderCatalog[] = [];
+  for (const part of input.parts) {
+    let cached = independentParts.get(part);
+    if (cached === undefined) {
+      const catalog = mergeObservedCatalogParts({ ...input, parts: [part] });
+      const partOwners = new Set<string>();
+      for (const rows of [catalog.events, catalog.markets, catalog.quotes, catalog.nativeMarketObservations ?? []]) {
+        for (const row of rows) partOwners.add(row.providerEventId);
+      }
+      cached = { catalog, owners: partOwners };
+      independentParts.set(part, cached);
+    }
+    for (const owner of cached.owners) {
+      // The ordinary merge uses pipe-separated composite keys. An owner
+      // containing that delimiter may collide with another owner's row.
+      if (owner.includes("|") || owners.has(owner)) return mergeObservedCatalogParts(input);
+      owners.add(owner);
+    }
+    catalogs.push(cached.catalog);
+  }
+  return {
+    dataMode: "LIVE", accountId: input.accountId, provider: input.provider, category: "FOOTBALL",
+    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: input.observedAtMs,
+    rejectedMarketCount: catalogs.reduce((total, catalog) => total + catalog.rejectedMarketCount, 0),
+    events: catalogs.flatMap(catalog => catalog.events),
+    markets: catalogs.flatMap(catalog => catalog.markets),
+    quotes: catalogs.flatMap(catalog => catalog.quotes),
+    nativeMarketObservations: catalogs.flatMap(catalog => catalog.nativeMarketObservations ?? [])
+  };
+}
+
 function fixtureIdentity(event: CatalogEvent, reconcileFeeds = false): string {
   const participant = (value: string): string => value.normalize("NFKD").replace(/\p{M}+/gu, "")
     .toLocaleLowerCase("en").replace(/[^\p{L}\p{N}]+/gu, " ").trim();

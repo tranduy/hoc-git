@@ -5,7 +5,7 @@ import { extractSbobetDirectCatalogRecords,
 import { SbobetStompReceiptDecoder,
   type SbobetStompProviderReceipt } from "../providers/sbobet/sbobet-stomp.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
-import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
+import { mergeObservedCatalogParts, mergeIndependentCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:SBOBET:FOOTBALL";
@@ -640,7 +640,7 @@ function catalogFromSource(source: SourceEpochState, observedAtMs: number): Retu
     normalizedEntries.set(mainEntry, { complete, more, part });
     parts.push(part);
   }
-  const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET", observedAtMs, parts });
+  const catalog = mergeIndependentCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET", observedAtMs, parts });
   const normalizedMarketIds = new Set(catalog.markets.map((market) =>
     `${market.providerEventId}\u0000${market.providerMarketId}`));
   // Native extraction may observe duplicate event containers that were not
