@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { NativeMarketObservation } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { DurableCatalogStore } from "./durable-catalog-store.js";
 
@@ -56,6 +57,28 @@ describe("DurableCatalogStore", () => {
     await expect(value.load("BTI|FOOTBALL|session")).resolves.toEqual(bti);
     await writeFile(value.pathFor("BTI|FOOTBALL|session"), JSON.stringify(malformed));
     await expect(value.load("BTI|FOOTBALL|session")).resolves.toBeNull();
+  });
+
+  it("compacts duplicated normalized BTI selections while restoring a legacy snapshot", async () => {
+    const { root, value } = await store();
+    const normalized: NativeMarketObservation = {
+      provider: "BTI", category: "FOOTBALL", providerEventId: "event", providerMarketId: "market",
+      nativeType: "QA1", nativeLabel: "Full-time total", nativeScope: "FULL_TIME",
+      outcomeLabels: ["Over", "Under"], nativeRow: "legacy raw row",
+      nativeSelections: [{ selectionId: "over", outcomeId: "OVER", line: "2.5", price: "1.95" }],
+      observedAtMs: 900, disposition: "NORMALIZED" as const, reason: "CANONICAL_MARKET_MAPPED"
+    };
+    const bti: ObservedProviderCatalog = { ...catalog("catalog-source:BTI:FOOTBALL"),
+      provider: "BTI", nativeMarketObservations: [normalized] };
+    await value.save("BTI|FOOTBALL|legacy", bti);
+
+    const restored = await new DurableCatalogStore(root).load("BTI|FOOTBALL|legacy");
+
+    expect(restored?.nativeMarketObservations).toEqual([expect.objectContaining({
+      providerMarketId: "market", disposition: "NORMALIZED", nativeLabel: null, outcomeLabels: []
+    })]);
+    expect(restored?.nativeMarketObservations?.[0]).not.toHaveProperty("nativeSelections");
+    expect(restored?.nativeMarketObservations?.[0]).not.toHaveProperty("nativeRow");
   });
 
   it("isolates source keys and never exposes the key in its file name", async () => {

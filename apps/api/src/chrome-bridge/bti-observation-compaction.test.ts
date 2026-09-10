@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { NativeMarketObservation } from "@tool-chenh/contracts";
-import { compactBtiNativeObservation } from "./bti-http-adapter.js";
+import { compactBtiNativeObservation } from "../catalog/bti-native-compaction.js";
 
 function observation(disposition: NativeMarketObservation["disposition"]): NativeMarketObservation {
   return {

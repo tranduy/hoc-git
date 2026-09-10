@@ -1,6 +1,7 @@
 import { isSupportedFootballTwoWayLine, normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import { footballBinaryMarketSpec, footballCategoricalMarketSpec, footballResultMarketSpec, isValidProviderPlayerIdentity,
-  type ChromeBridgeEnvelope, type MarketType, type NativeMarketObservation, type Scope } from "@tool-chenh/contracts";
+  type ChromeBridgeEnvelope, type MarketType, type Scope } from "@tool-chenh/contracts";
+import { compactBtiNativeObservation } from "../catalog/bti-native-compaction.js";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { extractBtiCatalogRecords,
   extractBtiNativeMarketIdentities,
@@ -312,20 +313,6 @@ function withClock(part: BtiPart, clock: { readonly requestedAtMs: number; reado
 function comparePartClock(left: Pick<BtiPart, "requestedAtMs" | "observedAtMs">,
   right: Pick<BtiPart, "requestedAtMs" | "observedAtMs">): number {
   return left.requestedAtMs - right.requestedAtMs || left.observedAtMs - right.observedAtMs;
-}
-
-/**
- * A normalized observation duplicates its selections in canonical markets and
- * quotes. BTI can expose hundreds of thousands of those rows, so retaining the
- * nested native copy consumed gigabytes while adding no matching information.
- * Unmapped/excluded observations remain complete because they are the evidence
- * used to extend normalization coverage.
- */
-export function compactBtiNativeObservation(observation: NativeMarketObservation): NativeMarketObservation {
-  if (observation.disposition !== "NORMALIZED") return observation;
-  const { nativeSelections: _nativeSelections, nativeRow: _nativeRow,
-    outcomeLabels: _outcomeLabels, ...identity } = observation;
-  return { ...identity, nativeLabel: null, outcomeLabels: [] };
 }
 
 function retainedDetailReplay(payload: unknown, envelope: ChromeBridgeEnvelope,

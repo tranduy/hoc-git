@@ -9,6 +9,7 @@ import {
 } from "@tool-chenh/contracts";
 import { z } from "zod";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
+import { compactBtiNativeObservation } from "./bti-native-compaction.js";
 import { readCatalogJson } from "./catalog-json-reader.js";
 
 const observedCatalogSchema = z.strictObject({
@@ -34,7 +35,10 @@ function validateCatalog(value: unknown): ObservedProviderCatalog | null {
     envelope.data.quotes.some((quote) => !ProviderQuoteSchema.safeParse(quote).success) ||
     envelope.data.nativeMarketObservations?.some((observation) =>
       !NativeMarketObservationSchema.safeParse(observation).success)) return null;
-  return envelope.data as ObservedProviderCatalog;
+  const catalog = envelope.data as ObservedProviderCatalog;
+  if (catalog.provider !== "BTI" || catalog.nativeMarketObservations === undefined) return catalog;
+  return { ...catalog,
+    nativeMarketObservations: catalog.nativeMarketObservations.map(compactBtiNativeObservation) };
 }
 
 function* serializedCatalog(catalog: ObservedProviderCatalog): Generator<string> {
