@@ -55,7 +55,8 @@ export class CatalogCoverageGuard {
     const current = this.#states.get(sourceKey);
     const removedIds = candidate.authoritativeRemovedEventIds;
     if (removedIds !== undefined) {
-      if ((sourceKey !== "catalog-source:APSPORT:FOOTBALL" && sourceKey !== "catalog-source:SBOBET:FOOTBALL") || current === undefined ||
+      if ((sourceKey !== "catalog-source:APSPORT:FOOTBALL" && sourceKey !== "catalog-source:SBOBET:FOOTBALL" &&
+        sourceKey !== "catalog-source:CMD:FOOTBALL") || current === undefined ||
         candidate.authoritativeBaseline || removedIds.length === 0 ||
         removedIds.length > current.acceptedEventIds.size) return false;
       const removed = new Set(removedIds);

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { CmdHttpCatalogAdapter } from "./cmd-http-adapter.js";
+import { ChromeCatalogDataPlane } from "./chrome-catalog-data-plane.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/cmd-early-native-20260908.json", import.meta.url), "utf8"));
 const main = (t = fixture.main.t) => ({ t, a: true, data: [], today: [fixture.main.row], f: [] });
@@ -20,6 +21,53 @@ function envelope(body: unknown, sequence: number, fc = 1, overrides = {}): Chro
 const catalog = (updates: ReturnType<CmdHttpCatalogAdapter["decode"]>) => updates.at(-1)?.value as ObservedProviderCatalog;
 
 describe("CMD authenticated Early partition", () => {
+  it.each(["main-first", "early-first"] as const)("retains the complete catalog until replacement partitions join (%s)", async order => {
+    const rows = Array.from({ length: 30 }, (_, index) => {
+      const row = [...fixture.main.row]; row[0] = 900000 + index;
+      row[38] = `Home ${index}`; row[39] = `Away ${index}`; return row;
+    });
+    const plane = new ChromeCatalogDataPlane({ now: () => fixture.early.observedAtMs + 100 });
+    const id = "catalog-source:CMD:FOOTBALL";
+    const oldMain = { ...main(), today: rows };
+    expect(plane.ingest(envelope(oldMain, 1), { connectionGeneration: 1 })).toBe(true);
+    const retained = await plane.read(id) as ObservedProviderCatalog;
+    expect(retained.events).toHaveLength(30);
+    const incoming = (body: unknown, sequence: number, fc = 1, overrides = {}) => ({
+      ...envelope(body, sequence, fc, overrides), sourceEpoch: "cmd-native:2"
+    });
+    const partial = { ...main(fixture.main.t + 1), today: [rows[0]] };
+    const future = early(rows.slice(1));
+    if (order === "main-first") {
+      expect(plane.ingest(incoming(partial, 2, 1, { cmdFullScope: undefined }), { connectionGeneration: 2 })).toBe(false);
+      expect(plane.ingest(incoming(partial, 3), { connectionGeneration: 2 })).toBe(false);
+      expect((await plane.read(id) as ObservedProviderCatalog).events).toHaveLength(30);
+      expect(plane.ingest(incoming(future, 4, 6), { connectionGeneration: 2 })).toBe(true);
+    } else {
+      expect(plane.ingest(incoming(future, 2, 6), { connectionGeneration: 2 })).toBe(false);
+      expect((await plane.read(id) as ObservedProviderCatalog).events).toHaveLength(30);
+      expect(plane.ingest(incoming(partial, 3), { connectionGeneration: 2 })).toBe(true);
+    }
+    const replaced = await plane.read(id) as ObservedProviderCatalog;
+    expect(replaced.events).toHaveLength(30);
+    expect(replaced.observedAtMs).toBeGreaterThan(retained.observedAtMs);
+  });
+
+  it("applies an authenticated Early removal through the data plane", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => fixture.early.observedAtMs + 100 });
+    expect(plane.ingest(envelope(main(), 1))).toBe(true);
+    expect(plane.ingest(envelope(early(), 2, 6))).toBe(true);
+    expect((await plane.read("catalog-source:CMD:FOOTBALL") as ObservedProviderCatalog).events).toHaveLength(2);
+    expect(plane.ingest(envelope(early([], fixture.early.t + 1), 3, 6))).toBe(true);
+    expect((await plane.read("catalog-source:CMD:FOOTBALL") as ObservedProviderCatalog).events)
+      .toHaveLength(1);
+  });
+
+  it("ignores filtered main baselines after acquiring proven full scope", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    adapter.decode(envelope(main(), 1));
+    expect(adapter.decode(envelope(main(fixture.main.t + 1), 2, 1, { cmdFullScope: undefined }))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("baseline-filtered-after-full-scope");
+  });
   it("keeps a newer matching Today row when an older Early request finishes later", () => {
     const adapter = new CmdHttpCatalogAdapter();
     adapter.decode(envelope(main(), 1));

@@ -312,7 +312,10 @@ export class ChromeCatalogDataPlane {
     if (!isObservedCatalog(update.value)) return this.#reject(envelope, `ADAPTER_VALUE_INVALID:${route.adapter.id}`);
     let nextCatalog = update.value;
     const provenance = update.provenance ?? catalogProvenance(envelope.transport);
-    const mode = update.evidenceMode ?? (update.authoritativeBaseline === true ? "BASELINE" : "DELTA");
+    const completeCmdRoster = envelope.lobby === "CMD" && route.adapter.id === "cmd-public-dom-v1" &&
+      provenance === "AUTHENTICATED_HTTP" && update.completeRosterEvidence === true;
+    const mode = admission.disposition === "CANDIDATE" && completeCmdRoster ? "BASELINE"
+      : update.evidenceMode ?? (update.authoritativeBaseline === true ? "BASELINE" : "DELTA");
     if (admission.disposition === "CANDIDATE" && provenance === "DOM_FALLBACK" && envelope.lobby !== "SABA") {
       return this.#reject(envelope, `CANDIDATE_DOM_FALLBACK:${route.adapter.id}`);
     }
@@ -367,7 +370,7 @@ export class ChromeCatalogDataPlane {
       return this.#reject(envelope, `PRE_BASELINE:${route.adapter.id}`);
     }
     if (admission.disposition === "CANDIDATE" &&
-      (mode !== "BASELINE" || update.authoritativeBaseline !== true ||
+      (mode !== "BASELINE" || (update.authoritativeBaseline !== true && !completeCmdRoster) ||
         (provenance === "DOM_FALLBACK" && envelope.lobby !== "SABA"))) {
       return this.#reject(envelope, `CANDIDATE_AUTHORITATIVE_BASELINE_REQUIRED:${route.adapter.id}`);
     }
@@ -382,6 +385,27 @@ export class ChromeCatalogDataPlane {
     const currentAuthority = admission.disposition === "CANDIDATE"
       ? this.#authorityCoordinator.snapshot(transportAccountId).active : null;
     const currentCatalog = this.#catalogs.get(nextCatalog.accountId);
+    if (envelope.lobby === "CMD" && admission.disposition === "CANDIDATE" &&
+      currentCatalog !== undefined && (currentCatalog.events.length >= 20 ||
+        currentCatalog.nativeMarketObservations?.some(row => row.nativeType.startsWith("MORE:"))) && !completeCmdRoster) {
+      // A new lane has no coverage history. Wait for both native roster
+      // partitions, including explicit empty Early, before replacing it.
+      // Retained data keeps its original freshness while the candidate fills.
+      return this.#reject(envelope, "CMD_REPLACEMENT_ROSTER_INCOMPLETE");
+    }
+    if (envelope.lobby === "CMD" && admission.disposition === "CANDIDATE" && currentCatalog !== undefined) {
+      const prematchIds = new Set(nextCatalog.events.filter(event => !event.isLive).map(event => event.providerEventId));
+      const eligibleIds = new Set(update.moreEligibleEventIds);
+      const receivedMoreIds = new Set(nextCatalog.nativeMarketObservations
+        ?.filter(row => row.nativeType.startsWith("MORE:")).map(row => row.providerEventId));
+      if (currentCatalog.nativeMarketObservations?.some(row => row.nativeType.startsWith("MORE:") &&
+        prematchIds.has(row.providerEventId) && eligibleIds.has(row.providerEventId) && !receivedMoreIds.has(row.providerEventId))) {
+        // Roster completion is not detail completion. A new native More receipt
+        // (including closed offers) must replace each surviving prematch owner.
+        // Never transplant old quotes or renew their clocks into the new lane.
+        return this.#reject(envelope, "CMD_REPLACEMENT_MORE_INCOMPLETE");
+      }
+    }
     let retainedAuthorityIsLive = false;
     if (admission.disposition === "CANDIDATE" && currentCatalog !== undefined) {
       try {

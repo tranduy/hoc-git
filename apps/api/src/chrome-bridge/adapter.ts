@@ -12,6 +12,10 @@ export type DecodedCatalogUpdate = {
   readonly provenance?: FeedProvenance;
   readonly providerTimestampMs?: number | null;
   readonly completeSweepEvidence?: boolean;
+  /** Proven unfiltered Running/Today and Early rosters from one CMD document. */
+  readonly completeRosterEvidence?: boolean;
+  /** CMD owners whose current native roster permits a More request. */
+  readonly moreEligibleEventIds?: readonly string[];
   /** Exact authenticated event responses, not a partial roster's missing IDs. */
   readonly authoritativeRemovedEventIds?: readonly string[];
   /** All retained fixtures have valid event-detail partitions with no canonical markets. */

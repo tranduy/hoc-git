@@ -28,6 +28,49 @@ const catalog = (updates: ReturnType<CmdHttpCatalogAdapter["decode"]>) => update
 const moreQuotes = (value: ObservedProviderCatalog) => value.quotes.filter(q => q.providerMarketId.includes(":more:") && q.marketType.endsWith("ODD_EVEN"));
 
 describe("CMD authenticated native More", () => {
+  it.each(["ineligible", "live", "removed"])("allows proven More owner retirement: %s", async kind => {
+    const plane = new ChromeCatalogDataPlane({ now: () => fixture.observedAtMs + 100 });
+    const accountId = "catalog-source:CMD:FOOTBALL";
+    expect(plane.ingest(envelope(main(), 1), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(envelope(fixture.body, 2, true), { connectionGeneration: 1 })).toBe(true);
+    const row = [...fixture.owner];
+    if (kind === "ineligible") row[51] = "N";
+    if (kind === "live") row[25] = 1;
+    if (kind === "removed") row[0] = 999999;
+    const next = { ...envelope(main(row, 2), 3), sourceEpoch: "cmd-native:2" };
+    expect(plane.ingest(next, { connectionGeneration: 2 })).toBe(false);
+    const early = { ...envelope({ t: 2, a: true, today: [], f: [] }, 4, false,
+      { providerFunctionCode: 6 }), sourceEpoch: "cmd-native:2" };
+    expect(plane.ingest(early, { connectionGeneration: 2 })).toBe(true);
+    expect(moreQuotes(await plane.read(accountId) as ObservedProviderCatalog)).toEqual([]);
+  });
+
+  it.each([false, true])("waits for replacement More receipts, including closed offers (%s)", async closed => {
+    const owner = [...fixture.owner]; owner[51] = "S";
+    const plane = new ChromeCatalogDataPlane({ now: () => fixture.observedAtMs + 100 });
+    const accountId = "catalog-source:CMD:FOOTBALL";
+    expect(plane.ingest(envelope(main(), 1), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(envelope(fixture.body, 2, true), { connectionGeneration: 1 })).toBe(true);
+    const before = await plane.read(accountId) as ObservedProviderCatalog;
+    expect(moreQuotes(before).length).toBeGreaterThan(0);
+    const incoming = (body: unknown, sequence: number, more = false, overrides = {}) => ({
+      ...envelope(body, sequence, more, overrides), sourceEpoch: "cmd-native:2"
+    });
+    expect(plane.ingest(incoming(main(owner, 2), 3), { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(incoming({ t: 2, a: true, today: [], f: [] }, 4, false,
+      { providerFunctionCode: 6 }), { connectionGeneration: 2 })).toBe(false);
+    const retained = await plane.read(accountId) as ObservedProviderCatalog;
+    expect(retained.observedAtMs).toBe(before.observedAtMs);
+    expect(moreQuotes(retained)).toEqual(moreQuotes(before));
+    const body = structuredClone(fixture.body);
+    if (closed) { body.d[2][0] = [-999, -999]; body.d[3][0] = [-999, -999]; }
+    expect(plane.ingest(incoming(body, 5, true), { connectionGeneration: 2 })).toBe(true);
+    const after = await plane.read(accountId) as ObservedProviderCatalog;
+    expect(after.observedAtMs).toBe(fixture.observedAtMs + 5);
+    expect(moreQuotes(after)).toHaveLength(closed ? 0 : moreQuotes(before).length);
+    expect(after.quotes.every(quote => quote.sequence !== null && quote.sequence >= 3)).toBe(true);
+  });
+
   it.each([["ET", "EXTRA_TIME"], ["PEN", "PENALTY_SHOOTOUT"]])(
     "retains HTTP main and More native offers for %s without regulation contracts", (suffix, eventScope) => {
       const owner = [...fixture.owner];

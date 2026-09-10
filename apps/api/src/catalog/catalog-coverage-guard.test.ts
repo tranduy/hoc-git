@@ -31,9 +31,9 @@ describe("CatalogCoverageGuard", () => {
       authoritativeRemovedEventIds: ["a"] })).toBe(false);
   });
 
-  it("accepts exact SBOBET Early removals without accepting an unrelated disappearance", () => {
+  it.each(["SBOBET", "CMD"])("accepts exact %s Early removals without accepting an unrelated disappearance", provider => {
     const guard = new CatalogCoverageGuard();
-    const source = "catalog-source:SBOBET:FOOTBALL";
+    const source = `catalog-source:${provider}:FOOTBALL`;
     guard.accept(source, candidate("ksport:1", true, ["today", "early-a", "early-b"]));
     expect(guard.accept(source, { ...candidate("ksport:1", false, ["today"]),
       authoritativeRemovedEventIds: ["early-a"] })).toBe(false);
@@ -42,7 +42,7 @@ describe("CatalogCoverageGuard", () => {
     expect(guard.accept(source, candidate("ksport:1", false, ["today"]))).toBe(true);
   });
 
-  it.each(["catalog-source:CMD:FOOTBALL", "catalog-source:BTI:FOOTBALL", "catalog-source:SABA:FOOTBALL"])(
+  it.each(["catalog-source:BTI:FOOTBALL", "catalog-source:SABA:FOOTBALL"])(
     "does not grant Early removal authority to %s", source => {
       const guard = new CatalogCoverageGuard();
       guard.accept(source, candidate("one", true, ["a", "b"]));

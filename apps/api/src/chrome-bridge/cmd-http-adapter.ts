@@ -56,6 +56,7 @@ interface BaselineObservation {
 }
 
 interface SourceState {
+  fullScope?: boolean;
   rows: Map<string, RetainedRow> | null;
   generation: string | null;
   providerVersion: number | null;
@@ -169,6 +170,10 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     const isDeltaFamily = providerFunctionCode === 3 || providerFunctionCode === 5 ||
       providerFunctionCode === 7;
     const isAtomicFull = providerFunctionCode === 1 && root.dataPresent && root.today !== undefined && root.f !== undefined;
+    // Filtered page responses cannot replace a proven all-scope collector roster.
+    if (isAtomicFull && root.a && state.fullScope === true && envelope.request.cmdFullScope !== true) {
+      return this.#ignore("baseline-filtered-after-full-scope");
+    }
     const observation = isAtomicFull ? boundBaselineObservation(envelope) : null;
     const sameProviderVersion = state.providerVersion !== null && root.t === state.providerVersion;
     // Incremental responses can advance the cursor beyond the last full. A new
@@ -248,6 +253,7 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
         }
       }
       state.rows = rows;
+      state.fullScope = envelope.request.cmdFullScope === true;
       state.sourceEpoch = envelope.sourceEpoch;
       if (renewsSameProviderVersion) {
         state.baselineObservation = { providerVersion: root.t,
@@ -320,6 +326,8 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
       value: catalog, ...(evidenceMode === "BASELINE" ? { authoritativeBaseline: true } : {}),
       evidenceMode, generation: state.generation!, provenance: "AUTHENTICATED_HTTP",
+      completeRosterEvidence: this.#completeRoster(envelope.sourceId, state),
+      moreEligibleEventIds: this.#moreEligibleEvents(envelope.sourceId, state),
       // `t` is CMD's ordering cursor/version, not a Unix timestamp.
       providerTimestampMs: null }];
   }
@@ -365,6 +373,8 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
       value: this.#materialize(envelope.sourceId, main, envelope.observedAtMs), evidenceMode: "DELTA",
       generation: main.generation, provenance: "AUTHENTICATED_HTTP", providerTimestampMs: null,
+      completeRosterEvidence: this.#completeRoster(envelope.sourceId, main),
+      moreEligibleEventIds: this.#moreEligibleEvents(envelope.sourceId, main),
       ...(removed.length === 0 ? {} : { authoritativeRemovedEventIds: removed }) }];
   }
 
@@ -431,7 +441,25 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     this.#morePublicationAtMs.set(envelope.sourceId, envelope.observedAtMs);
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
       value: this.#materialize(envelope.sourceId, main, envelope.observedAtMs), evidenceMode: "DELTA",
-      generation: main.generation, provenance: "AUTHENTICATED_HTTP", providerTimestampMs: null }];
+      generation: main.generation, provenance: "AUTHENTICATED_HTTP", providerTimestampMs: null,
+      completeRosterEvidence: this.#completeRoster(envelope.sourceId, main),
+      moreEligibleEventIds: this.#moreEligibleEvents(envelope.sourceId, main) }];
+  }
+
+  #moreEligibleEvents(sourceId: string, main: SourceState): readonly string[] {
+    const rows = this.#combinedRows(sourceId, main);
+    const liveGroups = new Set([...rows.values()].filter(({ row }) => row[25] === 1 || row[25] === true ||
+      typeof row[53] === "string" && /(?:^|\s)\dH(?:\s|\d|$)|LIVE/iu.test(row[53]))
+      .map(({ row }) => row[34]));
+    return [...rows].filter(([, { row }]) => row[51] === "S" && !liveGroups.has(row[34])).map(([id]) => id);
+  }
+
+  #completeRoster(sourceId: string, main: SourceState): boolean {
+    const early = this.#earlyStates.get(sourceId);
+    return main.fullScope === true && early !== undefined && early.sourceEpoch === main.sourceEpoch &&
+      early.observation.requestFrameKey === main.baselineObservation?.requestFrameKey &&
+      early.observation.requestDocumentKey === main.baselineObservation?.requestDocumentKey &&
+      early.observation.observerSessionId === main.baselineObservation?.observerSessionId;
   }
 
   #combinedRows(sourceId: string, main: SourceState): Map<string, RetainedRow> {
