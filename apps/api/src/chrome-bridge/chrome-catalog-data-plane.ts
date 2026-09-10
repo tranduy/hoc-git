@@ -393,7 +393,15 @@ export class ChromeCatalogDataPlane {
       // Retained data keeps its original freshness while the candidate fills.
       return this.#reject(envelope, "CMD_REPLACEMENT_ROSTER_INCOMPLETE");
     }
-    if (envelope.lobby === "CMD" && admission.disposition === "CANDIDATE" && currentCatalog !== undefined) {
+    let retainedAuthorityIsLive = false;
+    if (admission.disposition === "CANDIDATE" && currentCatalog !== undefined) {
+      try {
+        this.#feeds.read(transportAccountId);
+        retainedAuthorityIsLive = true;
+      } catch { /* stale retained authority must not block a complete replacement baseline */ }
+    }
+    if (envelope.lobby === "CMD" && admission.disposition === "CANDIDATE" &&
+      retainedAuthorityIsLive && currentCatalog !== undefined) {
       const prematchIds = new Set(nextCatalog.events.filter(event => !event.isLive).map(event => event.providerEventId));
       const eligibleIds = new Set(update.moreEligibleEventIds);
       const receivedMoreIds = new Set(nextCatalog.nativeMarketObservations
@@ -403,15 +411,9 @@ export class ChromeCatalogDataPlane {
         // Roster completion is not detail completion. A new native More receipt
         // (including closed offers) must replace each surviving prematch owner.
         // Never transplant old quotes or renew their clocks into the new lane.
+        // Expired retained detail cannot block a complete, fresh native roster.
         return this.#reject(envelope, "CMD_REPLACEMENT_MORE_INCOMPLETE");
       }
-    }
-    let retainedAuthorityIsLive = false;
-    if (admission.disposition === "CANDIDATE" && currentCatalog !== undefined) {
-      try {
-        this.#feeds.read(transportAccountId);
-        retainedAuthorityIsLive = true;
-      } catch { /* stale retained authority must not block a complete replacement baseline */ }
     }
     if (envelope.lobby === "BTI" && admission.disposition === "CANDIDATE" &&
       retainedAuthorityIsLive && currentAuthority?.sourceId === update.sourceId && currentCatalog !== undefined &&

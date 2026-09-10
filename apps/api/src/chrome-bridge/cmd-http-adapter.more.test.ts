@@ -28,6 +28,29 @@ const catalog = (updates: ReturnType<CmdHttpCatalogAdapter["decode"]>) => update
 const moreQuotes = (value: ObservedProviderCatalog) => value.quotes.filter(q => q.providerMarketId.includes(":more:") && q.marketType.endsWith("ODD_EVEN"));
 
 describe("CMD authenticated native More", () => {
+  it("recovers a fresh full roster when retained More has expired, then hydrates new More", async () => {
+    let now = fixture.observedAtMs + 1;
+    const feeds = new ProviderFeedRegistry({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: feeds });
+    const accountId = "catalog-source:CMD:FOOTBALL";
+    expect(plane.ingest(envelope(main(), 1), { connectionGeneration: 1 })).toBe(true);
+    now += 1;
+    expect(plane.ingest(envelope(fixture.body, 2, true), { connectionGeneration: 1 })).toBe(true);
+    now += providerFeedPolicies.get(accountId)!.maxBaselineAgeMs + 1;
+    await expect(plane.read(accountId)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    const owner = [...fixture.owner]; owner[51] = "S";
+    const next = (body: unknown, sequence: number, more = false, overrides = {}) => ({
+      ...envelope(body, sequence, more, overrides), sourceEpoch: "cmd-native:2", observedAtMs: now
+    });
+    expect(plane.ingest(next(main(owner, 2), 3), { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(next({ t: 2, a: true, today: [], f: [] }, 4, false,
+      { providerFunctionCode: 6 }), { connectionGeneration: 2 })).toBe(true);
+    expect(moreQuotes(await plane.read(accountId) as ObservedProviderCatalog)).toEqual([]);
+    now += 1;
+    expect(plane.ingest(next(fixture.body, 5, true), { connectionGeneration: 2 })).toBe(true);
+    expect(moreQuotes(await plane.read(accountId) as ObservedProviderCatalog).length).toBeGreaterThan(0);
+  });
+
   it.each(["ineligible", "live", "removed"])("allows proven More owner retirement: %s", async kind => {
     const plane = new ChromeCatalogDataPlane({ now: () => fixture.observedAtMs + 100 });
     const accountId = "catalog-source:CMD:FOOTBALL";
