@@ -245,9 +245,15 @@ export class CatalogApi implements CatalogApiLike {
       const queryParts = [this.#nativeDetail === "full" ? "" : `nativeDetail=${this.#nativeDetail}`, viewQuery]
         .filter((part) => part.length > 0);
       const query = queryParts.length === 0 ? "" : `?${queryParts.join("&")}`;
-      const response = await this.#fetch(`/api/catalog/accounts/${encodeURIComponent(accountId)}${query}`, {
-        method: "GET", cache: "no-store", signal: controller.signal,
-        ...(cached === undefined ? {} : { headers: { "if-none-match": cached.etag } })
+      // Large books can pair hundreds of long event IDs. Keep the request line
+      // below proxy/parser limits without dropping any fixtures from the view.
+      const path = `/api/catalog/accounts/${encodeURIComponent(accountId)}`;
+      const useBody = path.length + query.length > 4_096;
+      const response = await this.#fetch(`${path}${useBody ? "" : query}`, {
+        method: useBody ? "POST" : "GET", cache: "no-store", signal: controller.signal,
+        ...(useBody ? { headers: { "content-type": "application/json" },
+          body: JSON.stringify(Object.fromEntries(new URLSearchParams(query))) }
+          : cached === undefined ? {} : { headers: { "if-none-match": cached.etag } })
       });
       if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
       // A separate transfer budget is opt-in; existing callers keep one deadline.

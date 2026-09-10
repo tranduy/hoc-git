@@ -230,12 +230,14 @@ export function registerCatalogRoutes(
     collectorTimers.clear();
   });
 
-  app.get("/api/catalog/accounts/:accountId", async (request, reply) => {
+  app.route({ method: ["GET", "POST"], url: "/api/catalog/accounts/:accountId",
+    bodyLimit: 131_072, handler: async (request, reply) => {
     const parsed = paramsSchema.safeParse(request.params);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     const query = z.object({ nativeDetail: z.enum(["full", "summary", "counts"]).optional(),
       markets: z.enum(["none"]).optional(),
-      events: z.string().max(65_536).optional() }).safeParse(request.query);
+      events: z.string().max(65_536).optional() }).strict()
+      .safeParse(request.method === "POST" ? request.body : request.query);
     if (!query.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     const summary = query.data.nativeDetail === "summary";
     const counts = query.data.nativeDetail === "counts";
@@ -282,7 +284,7 @@ export function registerCatalogRoutes(
       const sendRevision = (entry: StoredCatalogRevision) => {
         const etag = `"${entry.revision}${etagSuffix}"`;
         reply.header("etag", etag).header("x-catalog-revision", entry.revision);
-        if (request.headers["if-none-match"] === etag) return reply.code(304).send();
+        if (request.method === "GET" && request.headers["if-none-match"] === etag) return reply.code(304).send();
         return sendView(forAccount(entry.catalog, accountId, entry.snapshotState, withoutMarkets, wantedEvents));
       };
       const sendCatalog = (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => {
@@ -291,7 +293,7 @@ export function registerCatalogRoutes(
         }));
         const etag = `"${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${snapshotState}${etagSuffix}"`;
         reply.header("etag", etag);
-        if (request.headers["if-none-match"] === etag) return reply.code(304).send();
+        if (request.method === "GET" && request.headers["if-none-match"] === etag) return reply.code(304).send();
         return sendView(forAccount(catalog, accountId, snapshotState, withoutMarkets, wantedEvents));
       };
       const deadlineMs = performance.now() + requestTimeoutMs;
@@ -351,5 +353,5 @@ export function registerCatalogRoutes(
       }
       return reply.code(503).send({ error: "CATALOG_UNAVAILABLE" });
     }
-  });
+  }});
 }

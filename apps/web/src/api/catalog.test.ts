@@ -99,6 +99,23 @@ describe("CatalogApi", () => {
     expect(roster.revision).toBe("catalog-100|roster");
     expect(selected.revision).toBe("catalog-100|events:event-a,event-b");
   });
+  it("loads large event selections in a bounded request without losing any IDs", async () => {
+    const ids = Array.from({ length: 900 }, (_, index) => String(884467107155537920n + BigInt(index)));
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const api = new CatalogApi(async (input, init) => {
+      calls.push({ url: String(input), init });
+      if (String(input).length > 16_384) return new Response(null, { status: 431 });
+      return new Response(JSON.stringify(response), { status: 200 });
+    }, 10_000, 30_000, "counts");
+    const result = await api.readEventsRevision("account-1", ids);
+    expect(result.catalog).toEqual(response);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("/api/catalog/accounts/account-1");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(new Headers(calls[0]!.init?.headers).get("content-type")).toBe("application/json");
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ nativeDetail: "counts", events: ids.join(",") });
+  });
+
   it("loads a live account catalog through a path parameter", async () => {
     const calls: string[] = [];
     const api = new CatalogApi(async (input) => {

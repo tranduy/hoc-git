@@ -26,6 +26,38 @@ const serve = async () => {
 };
 
 describe("catalog markets=none", () => {
+  it("accepts large event selections in a POST body with the same complete projection", async () => {
+    const app = await serve();
+    try {
+      const events = ["e1", ...Array.from({ length: 900 }, (_, i) => String(884467107155537920n + BigInt(i)))].join(",");
+      const response = await app.inject({ method: "POST",
+        url: "/api/catalog/accounts/catalog-source:BTI:FOOTBALL",
+        payload: { nativeDetail: "counts", events } });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().events).toHaveLength(1);
+      expect(response.json().markets).toHaveLength(1);
+      expect(response.json().quotes).toHaveLength(1);
+      const other = await app.inject({ method: "POST",
+        url: "/api/catalog/accounts/catalog-source:BTI:FOOTBALL",
+        payload: { nativeDetail: "counts", events: "e2" } });
+      expect(other.statusCode).toBe(200);
+      expect(other.json().markets).toEqual([]);
+      expect(other.headers.etag).not.toBe(response.headers.etag);
+    } finally { await app.close(); }
+  });
+
+  it("rejects invalid POST filters instead of returning an unfiltered book", async () => {
+    const app = await serve();
+    try {
+      for (const payload of [{ events: "" }, { events: "../etc" }, { events: ["e1"] },
+        { events: "x".repeat(65_537) }, { events: "e1", unexpected: true }]) {
+        const response = await app.inject({ method: "POST",
+          url: "/api/catalog/accounts/catalog-source:BTI:FOOTBALL", payload });
+        expect(response.statusCode).toBe(400);
+      }
+    } finally { await app.close(); }
+  });
+
   it("serves the fixtures without their prices, so pairing can be decided cheaply", async () => {
     const app = await serve();
     const full = await app.inject({ method: "GET", url: "/api/catalog/accounts/catalog-source:BTI:FOOTBALL" });
