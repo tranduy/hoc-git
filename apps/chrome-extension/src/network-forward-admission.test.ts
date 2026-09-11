@@ -3,6 +3,61 @@ import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { LocalBridge, type BridgeSocket } from "./local-bridge.js";
 import { NetworkObserver } from "./network-observer.js";
 
+it("does not transfer an in-flight IM refresh response into a replacement bridge epoch", async () => {
+  let complete!: (value: unknown) => void;
+  const response = new Promise<unknown>(resolve => { complete = resolve; });
+  let evaluating = false;
+  const forward = vi.fn(async (_message: ChromeBridgeEnvelope) => undefined);
+  const observer = new NetworkObserver({ forward, sendCommand: async (_tab, method) => {
+    if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+    if (method === "Runtime.evaluate") { evaluating = true; return response; }
+    return {};
+  } });
+  const source = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+  const refreshing = observer.refreshCatalog(source);
+  try {
+    for (let index = 0; index < 80; index++) await Promise.resolve();
+    expect(evaluating).toBe(true);
+    observer.beginBridgeSourceEpoch(source.sourceId);
+    complete({ result: { value: { status: "catalog-requested", responses: [
+      { market: 1, body: '{"StatusCode":100,"sel":[]}' }, { market: 2, body: '{"StatusCode":100,"sel":[]}' }
+    ] } } });
+    await refreshing;
+    expect(forward.mock.calls.some(([message]) => message.transport === "HTTP_RESPONSE")).toBe(false);
+  } finally { complete({}); await refreshing; observer.releaseTab(8); }
+});
+
+it("admits both IM refresh partitions before waiting for either final confirmation", async () => {
+  const finals: ChromeBridgeEnvelope[] = [];
+  let release!: () => void;
+  const acknowledgement = new Promise<void>(resolve => { release = resolve; });
+  const largeBody = JSON.stringify({ StatusCode: 100, sel: [], padding: "x".repeat(220_000) });
+  const observer = new NetworkObserver({
+    sendCommand: async (_tab, method) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "top" } } }
+      : method === "Runtime.evaluate" ? { result: { value: { status: "catalog-requested",
+        responses: [{ market: 1, body: largeBody }, { market: 2, body: largeBody }] } } } : {},
+    forward: async message => {
+      if (message.transport === "HTTP_RESPONSE") {
+        const chunk = JSON.parse(message.payload.body);
+        if (chunk.chunkIndex === chunk.chunkCount - 1) { finals.push(message); return { acknowledgement }; }
+      }
+    }
+  });
+  let done = false;
+  const refreshing = observer.refreshCatalog({ lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 })
+    .then(() => { done = true; });
+  try {
+    for (let index = 0; index < 300; index++) await Promise.resolve();
+    expect(finals).toHaveLength(2);
+    expect(new Set(finals.map(item => item.request.providerPartition)))
+      .toEqual(new Set(["IM_MARKET_1", "IM_MARKET_2"]));
+    expect(done).toBe(false);
+    release(); await refreshing;
+    expect(done).toBe(true);
+  } finally { release(); await refreshing; observer.releaseTab(8); }
+});
+
 it("drains an interleaved IM body while another producer waits for its final acknowledgement", async () => {
   const messages: ChromeBridgeEnvelope[] = [];
   const finals: ChromeBridgeEnvelope[] = [];

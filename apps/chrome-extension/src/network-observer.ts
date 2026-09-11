@@ -5716,6 +5716,7 @@ export class NetworkObserver {
     const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const evaluationIsCurrent = (): boolean =>
       this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration &&
       this.#captureTabGeneration(source.tabId) === tabGeneration;
     let generation: string | undefined;
     let reconcileCutoffSequence: number | undefined;
@@ -5750,16 +5751,21 @@ export class NetworkObserver {
       awaitPromise ? 20_000 : this.#frameCommandTimeoutMs).catch(() => null);
       const value = nestedValue(response, "result", "value");
       if (awaitPromise && evaluationTargetIsCurrent() && isRecord(value) && Array.isArray(value.responses)) {
-        for (const item of value.responses) {
-          if (!evaluationTargetIsCurrent()) break;
-          if (!isRecord(item) || (item.market !== 1 && item.market !== 2) || typeof item.body !== "string") continue;
+        // The collector owns exactly two partitions. Sending the second only
+        // after the first final ACK recreates head-of-line blocking above the
+        // transport FIFO. Admit both and keep the whole refresh completion barrier.
+        const partitions = value.responses.length <= 2 ? value.responses : [];
+        const forwardedPartitions = await Promise.allSettled(partitions.map(async item => {
+          if (!evaluationTargetIsCurrent()) return;
+          if (!isRecord(item) || (item.market !== 1 && item.market !== 2) || typeof item.body !== "string") return;
           await this.ingestHttpResponse(source, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
             item.body, { method: "POST", providerPartition: item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2",
               ...(generation === undefined ? {} : { streamId: generation }),
               ...(verifiedDocument === undefined ? {} : { verifiedDocument }),
               ...(verifiedDocument === undefined ? { currentDocumentConfirmed: true as const } : {}),
               reconcileCutoffSequence: reconcileCutoffSequence! });
-        }
+        }));
+        for (const result of forwardedPartitions) if (result.status === "rejected") throw result.reason;
         const readinessBinding = binding ?? (descriptor === undefined ? undefined : contexts?.get(descriptor.id));
         const readinessIsCurrent = (): boolean => evaluationIsCurrent() &&
           this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration && descriptor !== undefined &&
