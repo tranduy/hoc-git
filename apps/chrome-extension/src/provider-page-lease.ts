@@ -3,10 +3,17 @@ import type { TabDescriptor } from "./lobby-signatures.js";
 
 export type RenewableLobby = Exclude<ChromeLobbyId, "CMD" | "SBO">;
 
+export interface ProviderRecoveryGuard {
+  readonly isCurrent: () => boolean;
+  // Capture the identity claimed by this renewal after its own epoch change.
+  readonly captureIdentity: () => () => boolean;
+}
+
 export interface RenewableSource {
   readonly lobby: RenewableLobby;
   readonly sourceId: string;
   readonly tabId: number;
+  readonly recoveryGuard?: ProviderRecoveryGuard;
 }
 
 export interface ProviderLeaseSchedule {
@@ -114,6 +121,7 @@ export class ProviderPageLeaseCoordinator {
   }
 
   renewNow(source: RenewableSource): Promise<void> {
+    if (source.recoveryGuard?.isCurrent() === false) return Promise.resolve();
     const observedSerial = this.#renewSerial.get(source.sourceId) ?? 0;
     if (this.#inflight !== null) {
       if (this.#inflight.sourceId === source.sourceId) return this.#inflight.operation;
@@ -183,6 +191,7 @@ export class ProviderPageLeaseCoordinator {
 
   async #renewManually(source: RenewableSource): Promise<void> {
     await this.#load();
+    if (source.recoveryGuard?.isCurrent() === false) return;
     let state = this.#state;
     if (state === undefined) throw new Error("PROVIDER_PAGE_LEASE_STATE_UNAVAILABLE");
     if (state === null) {
@@ -203,6 +212,7 @@ export class ProviderPageLeaseCoordinator {
       await this.#remember(state);
       return;
     }
+    if (source.recoveryGuard?.isCurrent() === false) return;
     await this.#options.renew(source);
     this.#renewSerial.set(source.sourceId, (this.#renewSerial.get(source.sourceId) ?? 0) + 1);
     schedule.lastCompletedAtMs = nowMs;
@@ -261,6 +271,7 @@ export async function renewExactProviderTab(
   source: RenewableSource,
   options: ExactProviderRenewalOptions
 ): Promise<void> {
+  if (source.recoveryGuard?.isCurrent() === false) return;
   if (options.canRenew?.(source) === false) throw new Error("SOURCE_REQUEST_BACKOFF");
   if (!options.isAttached(source)) throw new Error("PROVIDER_SOURCE_NOT_ATTACHED");
   const candidate = await options.get(source.tabId);
@@ -274,7 +285,9 @@ export async function renewExactProviderTab(
     throw new Error("PROVIDER_SOURCE_REPLACED");
   }
   if (options.canRenew?.(source) === false) throw new Error("SOURCE_REQUEST_BACKOFF");
+  if (source.recoveryGuard?.isCurrent() === false) return;
   options.beginSourceEpoch(source.sourceId);
+  const replacementIsCurrent = source.recoveryGuard?.captureIdentity();
   // Navigation can create the provider's catalog socket and issue its one
   // complete roster request before tabs.onUpdated reports `complete`. Arm CDP
   // against the owned tab first, then confirm the redirected document again
@@ -295,6 +308,7 @@ export async function renewExactProviderTab(
       throw new Error("PROVIDER_SOURCE_REPLACED");
     }
   }
+  if (replacementIsCurrent?.() === false) return;
   if (options.canRenew?.(source) === false) throw new Error("SOURCE_REQUEST_BACKOFF");
   if (!options.isAttached(source)) throw new Error("PROVIDER_SOURCE_REPLACED");
   await options.update(source.tabId, renewalUrl);

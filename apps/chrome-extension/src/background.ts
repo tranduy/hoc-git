@@ -147,12 +147,12 @@ observer = new NetworkObserver({
       console.warn("APSPORT empty-page recovery failed", error);
     });
   },
-  onApsportOrphanSocket: async (source) => {
+  onApsportOrphanSocket: async (source, recoveryGuard) => {
     const attached = registry.list().find((entry) => entry.lobby === "TSPORT" &&
       entry.tabId === source.tabId && source.sourceId === `chrome:TSPORT:${entry.tabId}`);
     if (attached === undefined) return;
     await providerPageLeaseCoordinator.renewNow({ lobby: "TSPORT",
-      sourceId: source.sourceId, tabId: source.tabId });
+      sourceId: source.sourceId, tabId: source.tabId, recoveryGuard });
   },
   onSabaSocketUnavailable: async (source, reason) => {
     const attached = registry.list().find((entry) => entry.lobby === "SABA" &&

@@ -7,6 +7,119 @@ const DEFAULT_STREAM_ID = "tsport-stream-1";
 const DEFAULT_SOURCE_EPOCH = "observer-a:1";
 
 describe("AP own result schema", () => {
+  it("drops bound partial offers when a new roster reuses the event ID for another identity", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(120, "Home A");
+    adapter.decode(apiEnvelope([raw]));
+    adapter.decode(apiEnvelope([raw], 2, "DETAIL"));
+    const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+    adapter.decode(envelope({ ...partial, "50": [raw["50"][0]] }, 3));
+    const next = adapter.decode(apiEnvelope([{ ...raw, "5": "Home B", "50": [raw["50"][1]] }],
+      4, "ROSTER", true, "apsport:7:2"))[0] as AuthorityUpdate;
+    expect(next.value.quotes.some(q => q.providerMarketId === "tsport:3:120-total")).toBe(false);
+    const updated = adapter.decode(envelope({ ...partial, "50": [raw["50"][1]] }, 5))[0] as AuthorityUpdate;
+    expect(updated.value.events).toEqual([expect.objectContaining({ participantA: "Home B" })]);
+  });
+
+  it("reopens only reobserved offers after an event pause", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(120, "Home");
+    adapter.decode(apiEnvelope([raw]));
+    const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+    adapter.decode(envelope({ ...partial, "10": "Suspended", "50": [] }, 2));
+    const reopened = adapter.decode(envelope({ ...partial, "50": [raw["50"][0]] }, 3))[0] as AuthorityUpdate;
+    expect(reopened.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total").every(q => q.status === "OPEN")).toBe(true);
+    expect(reopened.value.quotes.filter(q => q.providerMarketId !== "tsport:3:120-total"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ status: "SUSPENDED", receivedMonotonicMs: 50 })]));
+    expect(reopened.value.quotes.filter(q => q.providerMarketId !== "tsport:3:120-total").every(q => q.status === "SUSPENDED")).toBe(true);
+  });
+
+  it.each(["event", "group", "group-flag", "missing-price"])("masks retained OPEN prices after partial %s evidence without refreshing omitted quotes", kind => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(120, "Home");
+    adapter.decode(apiEnvelope([raw]));
+    const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+    const first = adapter.decode(envelope({ ...partial, "50": [raw["50"][0]] }, 2))[0] as AuthorityUpdate;
+    const group = raw["50"][0]!;
+    const patch = kind === "event" ? { ...partial, "10": "Suspended", "50": [] }
+      : kind === "group" ? { ...partial, "50": [{ ...group, "10": "Suspended", "9": [] }] }
+      : kind === "group-flag" ? { ...partial, "50": [{ ...group, "6": true, "9": [] }] }
+      : { ...partial, "50": [{ ...group, "9": [{ ...group["9"][0], "8": null }] }] };
+    const next = adapter.decode(envelope(patch, 3))[0] as AuthorityUpdate;
+    const affected = next.value.quotes.filter(q => kind === "event" || q.providerMarketId === "tsport:3:120-total");
+    expect(affected.length).toBeGreaterThan(0);
+    expect(affected.every(q => q.status === "SUSPENDED")).toBe(true);
+    if (kind !== "missing-price") expect(affected.map(q => q.receivedMonotonicMs))
+      .toEqual(first.value.quotes.filter(q => kind === "event" || q.providerMarketId === "tsport:3:120-total")
+        .map(q => q.receivedMonotonicMs));
+  });
+
+  it("keeps an omitted offer suspended across shallow roster refreshes until that offer is reobserved", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(120, "Home");
+    adapter.decode(apiEnvelope([raw]));
+    const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+    adapter.decode(envelope({ ...partial, "50": [raw["50"][0]] }, 2));
+    adapter.decode(envelope({ ...partial, "50": [{ ...raw["50"][0], "6": true, "9": [] }] }, 3));
+    const shallow = adapter.decode(apiEnvelope([{ ...raw, "50": [raw["50"][1]] }], 4, "ROSTER", true, "apsport:7:2"))[0] as AuthorityUpdate;
+    expect(shallow.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total")).toHaveLength(2);
+    expect(shallow.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total").every(q => q.status === "SUSPENDED"))
+      .toBe(true);
+    const fresh = adapter.decode(envelope({ ...partial, "50": [raw["50"][0]] }, 5))[0] as AuthorityUpdate;
+    expect(fresh.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ status: "OPEN", receivedMonotonicMs: 90 })]));
+  });
+
+  it("retires omitted partial socket offers on authoritative event detail", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(120, "Home");
+    adapter.decode(apiEnvelope([raw]));
+    const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+    adapter.decode(envelope({ ...partial, "50": [raw["50"][0]] }, 2));
+    const next = adapter.decode(apiEnvelope([{ ...raw, "50": [raw["50"][1]] }], 3, "DETAIL"))[0] as AuthorityUpdate;
+    expect(next.value.quotes.every(q => q.providerMarketId === "tsport:4:120-fh-total")).toBe(true);
+  });
+
+  it("binds native price-only updates to the current roster without refreshing omitted prices", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = { ...event(120, "Home"), "1": 77 };
+    const baseline = adapter.decode(apiEnvelope([raw]))[0] as AuthorityUpdate;
+    const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+    const first = envelope({ ...partial, "50": [event(120, "Home", "0.71")["50"][0]] }, 2);
+    expect(adapter.fingerprint(first)).toBe(true);
+    const updated = adapter.decode(first)[0] as AuthorityUpdate;
+    expect(updated.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ rawOdds: "0.71", receivedMonotonicMs: 60 })]));
+    const second = envelope({ ...partial, "50": [event(120, "Home", "0.62")["50"][1]] }, 3);
+    const next = adapter.decode(second)[0] as AuthorityUpdate;
+    expect(next.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total"))
+      .toEqual(updated.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total"));
+    expect(next.value.quotes.filter(q => q.providerMarketId === "tsport:5:120-ah"))
+      .toEqual(baseline.value.quotes.filter(q => q.providerMarketId === "tsport:5:120-ah"));
+  });
+
+  it.each(["unknown", "epoch", "league", "group-event", "group-league", "teams", "phase", "string-phase", "kickoff", "no-markets", "status-wrapper"])(
+    "refuses unbound or conflicting native partial update: %s", kind => {
+      const adapter = new TsportWsCatalogAdapter();
+      const raw = { ...event(120, "Home"), "1": 77 };
+      adapter.decode(apiEnvelope([raw]));
+      const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+      const patch: Record<string, unknown> = { ...partial };
+      if (kind === "unknown") patch["2"] = 999;
+      if (kind === "league") patch["1"] = 78;
+      if (kind === "group-event") patch["50"] = [{ ...raw["50"][0], "2": 999 }];
+      if (kind === "group-league") patch["50"] = [{ ...raw["50"][0], "1": 78 }];
+      if (kind === "teams") patch["5"] = "Different team";
+      if (kind === "phase") patch["6"] = false;
+      if (kind === "string-phase") patch["6"] = "true";
+      if (kind === "kickoff") patch["11"] = "2026-08-17T02:00:00Z";
+      if (kind === "no-markets") delete patch["50"];
+      const input = envelope(kind === "status-wrapper" ? { "1": patch } : patch, 2,
+        DEFAULT_STREAM_ID, kind === "epoch" ? "observer-a:2" : DEFAULT_SOURCE_EPOCH);
+      expect(adapter.fingerprint(input)).toBe(false);
+      expect(adapter.decode(input)).toEqual([]);
+    });
+
   it("retains one explicitly identified double-chance outcome without borrowing another slot's price", () => {
     const input = { "2": 5648440, "5": "Home", "22": "Away", "53": "League", "6": false,
       "11": "2026-09-11T02:00:00Z", "50": [{ "3": 12, "10": "Active", "9": [{

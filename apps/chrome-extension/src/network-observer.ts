@@ -278,7 +278,8 @@ export interface NetworkObserverDependencies {
   readonly collectApsportEventDetail?: (options: CollectApsportEventDetailOptions) => Promise<Record<string, unknown> | null>;
   readonly onApsportPageHealth?: (health: ApsportPageHealth) => void;
   readonly readApsportTabHealth?: (tabId: number) => Promise<unknown>;
-  readonly onApsportOrphanSocket?: (source: ObservedSource) => void | Promise<void>;
+  readonly onApsportOrphanSocket?: (source: ObservedSource,
+    guard: import("./provider-page-lease.js").ProviderRecoveryGuard) => void | Promise<void>;
   readonly onSabaSocketUnavailable?: (source: ObservedSource,
     reason?: "UNSAFE_VIEW") => void | Promise<void>;
   readonly onBtiPageHealth?: (health: BtiPageHealth) => void;
@@ -1266,6 +1267,8 @@ export class NetworkObserver {
   readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sboOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #apsportOrphanFrameRecoveryAtMs = new Map<string, number>();
+  readonly #apsportSocketAbsence = new Map<string, { readonly identity: string; readonly sinceMs: number }>();
+  readonly #apsportSocketRecoveries = new Map<string, symbol>();
   readonly #apsportNavigationStartedAtMs = new Map<string, number>();
   readonly #apsportRosterOnlyRefreshes = new Map<string, Promise<void>>();
   readonly #sbobetEventRequests = new Map<string, SbobetEventRequestCapture>();
@@ -2286,6 +2289,8 @@ export class NetworkObserver {
       this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#sboOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#apsportOrphanFrameRecoveryAtMs.delete(sourceId);
+      this.#apsportSocketAbsence.delete(sourceId);
+      this.#apsportSocketRecoveries.delete(sourceId);
       this.#apsportNavigationStartedAtMs.delete(sourceId);
       this.#socketBaselineRecoveries.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
@@ -2324,6 +2329,46 @@ export class NetworkObserver {
     }
   }
 
+  #apsportRecoveryIdentity(source: ObservedSource): string {
+    return `${source.tabId}:${this.#captureTabGeneration(source.tabId)}:` +
+      `${this.#sourceGenerations.get(source.sourceId) ?? 0}:${this.#captureBridgeGeneration(source.sourceId)}`;
+  }
+
+  #hasApsportFootballSocket(source: ObservedSource): boolean {
+    return [...this.#webSockets.values()].some(socket => socket.source.sourceId === source.sourceId &&
+      socket.source.tabId === source.tabId && socket.closing !== true &&
+      this.#isSourceGenerationCurrent(source.sourceId, socket.sourceGeneration) &&
+      isTsportEventSocket(new URL(socket.url)));
+  }
+
+  #recoverApsportSocket(source: ObservedSource): void {
+    if (this.#onApsportOrphanSocket === undefined || this.#hasApsportFootballSocket(source) ||
+      this.#apsportSocketRecoveries.has(source.sourceId)) return;
+    const nowMs = this.#now();
+    const navigationAtMs = this.#apsportNavigationStartedAtMs.get(source.sourceId);
+    if (navigationAtMs !== undefined && nowMs - navigationAtMs < APSPORT_NAVIGATION_SETTLE_GRACE_MS) return;
+    const lastAttemptAtMs = this.#apsportOrphanFrameRecoveryAtMs.get(source.sourceId);
+    if (lastAttemptAtMs !== undefined && nowMs - lastAttemptAtMs < APSPORT_ORPHAN_FRAME_RETRY_MS) return;
+    const captureIdentity = () => {
+      const identity = this.#apsportRecoveryIdentity(source);
+      return () => this.#apsportRecoveryIdentity(source) === identity;
+    };
+    const identityIsCurrent = captureIdentity();
+    const token = Symbol();
+    this.#apsportSocketRecoveries.set(source.sourceId, token);
+    this.#apsportOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
+    const finish = () => {
+      if (this.#apsportSocketRecoveries.get(source.sourceId) === token) {
+        this.#apsportSocketRecoveries.delete(source.sourceId);
+      }
+    };
+    try {
+      void Promise.resolve(this.#onApsportOrphanSocket(source, {
+        isCurrent: () => identityIsCurrent() && !this.#hasApsportFootballSocket(source), captureIdentity
+      })).catch(() => undefined).finally(finish);
+    } catch { finish(); }
+  }
+
   async maintain(source: ObservedSource): Promise<void> {
     const pulsePage = async (): Promise<void> => {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
@@ -2335,7 +2380,22 @@ export class NetworkObserver {
     // lane for tens of seconds. Its keep-alive pulse must not queue behind that
     // work and inherit the poller's shorter maintenance timeout.
     if (source.lobby === "TSPORT") {
+      const identity = this.#apsportRecoveryIdentity(source);
       await pulsePage();
+      if (this.#apsportRecoveryIdentity(source) !== identity) return;
+      if (this.#hasApsportFootballSocket(source)) {
+        this.#apsportSocketAbsence.delete(source.sourceId);
+        return;
+      }
+      const nowMs = this.#now();
+      let absence = this.#apsportSocketAbsence.get(source.sourceId);
+      if (absence?.identity !== identity) {
+        absence = { identity, sinceMs: nowMs };
+        this.#apsportSocketAbsence.set(source.sourceId, absence);
+      }
+      // HTTP roster receipts do not prove that native live prices are captured.
+      // Do not let a long hidden-detail walk defer socket repair indefinitely.
+      if (nowMs - absence.sinceMs >= APSPORT_NAVIGATION_SETTLE_GRACE_MS) this.#recoverApsportSocket(source);
       return;
     }
     await this.#runPeriodicDomWork(source.sourceId, async () => {
@@ -7159,6 +7219,9 @@ export class NetworkObserver {
           ksportObservedFrameCount: 0 }),
         ...(source.lobby === "SABA" ? { sabaLifecycleAnnounced: false } : {}),
         ...(sessionId === undefined ? {} : { sessionId }) });
+      if (source.lobby === "TSPORT" && isTsportEventSocket(new URL(params.url))) {
+        this.#apsportSocketAbsence.delete(source.sourceId);
+      }
       if (source.lobby === "SBO") {
         try {
           if (/\/socket\.io\/?$/u.test(new URL(params.url).pathname)) {
@@ -7314,23 +7377,8 @@ export class NetworkObserver {
             await this.#scheduleFreshSocketBaseline(source,
               (url) => /\/socket\.io\/?$/u.test(url.pathname));
           }
-        } else if (source.lobby === "TSPORT" && this.#onApsportOrphanSocket !== undefined &&
-          ![...this.#webSockets.values()].some((candidate) => candidate.source.sourceId === source.sourceId &&
-            candidate.closing !== true &&
-            this.#isSourceGenerationCurrent(source.sourceId, candidate.sourceGeneration))) {
-          const nowMs = this.#now();
-          const navigationStartedAtMs = this.#apsportNavigationStartedAtMs.get(source.sourceId);
-          if ((navigationStartedAtMs !== undefined &&
-              nowMs - navigationStartedAtMs < APSPORT_NAVIGATION_SETTLE_GRACE_MS) ||
-            this.#apsportRefreshesInFlight.has(source.sourceId)) return;
-          const lastAttemptAtMs = this.#apsportOrphanFrameRecoveryAtMs.get(source.sourceId);
-          if (lastAttemptAtMs === undefined ||
-            nowMs - lastAttemptAtMs >= APSPORT_ORPHAN_FRAME_RETRY_MS) {
-            this.#apsportOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
-            try {
-              void Promise.resolve(this.#onApsportOrphanSocket(source)).catch(() => undefined);
-            } catch { /* A failed exact-tab renewal is retried after the bounded cooldown. */ }
-          }
+        } else if (source.lobby === "TSPORT") {
+          this.#recoverApsportSocket(source);
         } else if (source.lobby === "KSPORT") {
           const payload = isRecord(params.response) && typeof params.response.payloadData === "string"
             ? params.response.payloadData : "";

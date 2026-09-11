@@ -9867,14 +9867,14 @@ describe("NetworkObserver", () => {
     await orphan();
     now.value = 39_999;
     await orphan();
-    expect(renew).toHaveBeenCalledExactlyOnceWith(apsport);
+    expect(renew).toHaveBeenCalledExactlyOnceWith(apsport, expect.objectContaining({ isCurrent: expect.any(Function) }));
 
     now.value = 40_000;
     await orphan();
     expect(renew).toHaveBeenCalledTimes(2);
 
     await observer.handleEvent(apsport, "Network.webSocketCreated", {
-      requestId: "current-football-socket", url: "wss://spbui.agenate.com/ln/en/s/1/mg/1/tr/0"
+      requestId: "current-football-socket", url: "wss://spws.agenate.com/ln/en/s/1/mg/1/tr/0"
     });
     now.value = 70_000;
     await orphan();
@@ -9900,7 +9900,7 @@ describe("NetworkObserver", () => {
 
     now.value = 70_000;
     await orphan();
-    expect(renew).toHaveBeenCalledExactlyOnceWith(apsport);
+    expect(renew).toHaveBeenCalledExactlyOnceWith(apsport, expect.objectContaining({ isCurrent: expect.any(Function) }));
   });
 
   it("reconnects SABA's native Socket.IO transport when window.io is not global", async () => {
