@@ -7,6 +7,39 @@ const DEFAULT_STREAM_ID = "tsport-stream-1";
 const DEFAULT_SOURCE_EPOCH = "observer-a:1";
 
 describe("AP own result schema", () => {
+  it.each(["DETAIL", "ROSTER"] as const)("clears an older offer pause using its own receipt despite newer unrelated WS prices (%s)", phase => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(120, "Home");
+    adapter.decode(apiEnvelope([raw]));
+    const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+    adapter.decode({ ...envelope({ ...partial, "50": [{ ...raw["50"][0], "6": true, "9": [] }] }, 2), receivedMonotonicMs: 1050 });
+    adapter.decode({ ...envelope({ ...partial, "50": [raw["50"][1]] }, 3), receivedMonotonicMs: 3050 });
+    const fresh = adapter.decode({ ...apiEnvelope([raw], 4, phase, true, phase === "ROSTER" ? "apsport:7:2" : "apsport:7:1"),
+      receivedMonotonicMs: 2050 })[0] as AuthorityUpdate;
+    expect(fresh.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ status: "OPEN", receivedMonotonicMs: 2050 })]));
+    expect(fresh.value.quotes.filter(q => q.providerMarketId === "tsport:4:120-fh-total"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 3050 })]));
+  });
+
+  it.each(["price", "pause"])("keeps a newer WS %s receipt when an older HTTP body finishes assembling later", kind => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(120, "Home");
+    adapter.decode(apiEnvelope([raw]));
+    const { "5": _home, "22": _away, "53": _league, ...partial } = raw;
+    const ws = { ...envelope(kind === "pause" ? { ...partial, "10": "Suspended", "50": [] }
+      : { ...partial, "50": [event(120, "Home", "0.71")["50"][0]] }, 3),
+      receivedMonotonicMs: 2050, observedAtMs: Date.UTC(2026, 7, 16, 3) + 2000 };
+    const fresh = adapter.decode(ws)[0] as AuthorityUpdate;
+    const late = { ...apiEnvelope([raw], 4, "DETAIL"), receivedMonotonicMs: 1050,
+      observedAtMs: Date.UTC(2026, 7, 16, 3) + 1000 };
+    const published = adapter.decode(late)[0] as AuthorityUpdate;
+    if (kind === "price") expect(published.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total"))
+      .toEqual(fresh.value.quotes.filter(q => q.providerMarketId === "tsport:3:120-total"));
+    else expect(published.value.quotes.every(q => q.status === "SUSPENDED")).toBe(true);
+    expect(published.value).toMatchObject({ observedAtMs: ws.observedAtMs, observedMonotonicMs: ws.receivedMonotonicMs });
+  });
+
   it("drops bound partial offers when a new roster reuses the event ID for another identity", () => {
     const adapter = new TsportWsCatalogAdapter();
     const raw = event(120, "Home A");

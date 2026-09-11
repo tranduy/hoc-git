@@ -3,7 +3,7 @@ import { footballBinaryMarketSpec, footballResultMarketSpec, footballCategorical
   type ChromeBridgeEnvelope, type MarketType, type NativeMarketObservation, type OddsFormat } from "@tool-chenh/contracts";
 import { z } from "zod";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
-import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
+import { mergeIndependentCatalogParts, mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 import { decodeTsportCategoricalTerms, tsportCategoricalGroups } from "./tsport-categorical-terms.js";
@@ -29,6 +29,7 @@ interface RetainedRecord {
   readonly identity?: Readonly<Record<string, unknown>>;
   readonly partialReceipts?: ReadonlyMap<string, RetainedRecord>;
   readonly blockedMarketIds?: ReadonlySet<string>;
+  readonly blockedAtMonotonicMs?: ReadonlyMap<string, number>;
   readonly eventSuspended?: boolean;
 }
 
@@ -97,6 +98,31 @@ interface TsportMarketSemantics {
 // re-observation always creates fresh quote clocks, even at an unchanged price.
 const normalizedReceipts = new WeakMap<RetainedRecord, NormalizedCatalogPart>();
 const trimmedRosters = new WeakMap<RetainedRecord, WeakMap<RetainedRecord, RetainedRecord>>();
+const mergedEventReceipts = new WeakMap<RetainedRecord, {
+  readonly entries: readonly RetainedRecord[]; readonly part: NormalizedCatalogPart;
+}>();
+
+function mergeReceiptEvents(entries: readonly RetainedRecord[]): readonly NormalizedCatalogPart[] {
+  const byEvent = new Map<string, RetainedRecord[]>();
+  for (const entry of entries) {
+    const group = byEvent.get(entry.record.eventId) ?? [];
+    group.push(entry);
+    byEvent.set(entry.record.eventId, group);
+  }
+  return [...byEvent.values()].map(group => {
+    const newest = group.at(-1)!;
+    const cached = mergedEventReceipts.get(newest);
+    if (cached?.entries.length === group.length && cached.entries.every((entry, index) => entry === group[index])) {
+      return cached.part;
+    }
+    const parts = group.map(normalizeReceipt);
+    const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
+      observedAtMs: newest.seenAtMs, parts });
+    const part = { ...catalog, diagnostics: parts.flatMap(entry => entry.diagnostics) };
+    mergedEventReceipts.set(newest, { entries: group, part });
+    return part;
+  });
+}
 
 function normalizeReceipt(entry: RetainedRecord): NormalizedCatalogPart {
   let normalized = normalizedReceipts.get(entry);
@@ -786,10 +812,20 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     const retainedEntries = [...rosterEntries, ...state.detailRecords.values(),
       ...[...state.socketRecords.values()].flatMap(entry => entry.partialReceipts === undefined
         ? [entry] : [...new Set(entry.partialReceipts.values())])];
-    retainedEntries.sort((left, right) => left.sequence - right.sequence ||
-      left.receivedMonotonicMs - right.receivedMonotonicMs || left.seenAtMs - right.seenAtMs);
-    const merged = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
-      observedAtMs: envelope.observedAtMs, parts: retainedEntries.map(normalizeReceipt) });
+    // Multipart HTTP finishes after interleaved WS frames. Its higher final
+    // bridge sequence is not proof that its source receipt was newer.
+    retainedEntries.sort((left, right) => left.receivedMonotonicMs - right.receivedMonotonicMs ||
+      left.sequence - right.sequence || left.seenAtMs - right.seenAtMs);
+    let newest = retainedEntries.at(-1);
+    // A pause is a genuine newer observation even when it carries no prices.
+    for (const socket of state.socketRecords.values()) {
+      if (newest === undefined || socket.receivedMonotonicMs > newest.receivedMonotonicMs) newest = socket;
+    }
+    const publication = newest !== undefined && newest.receivedMonotonicMs > envelope.receivedMonotonicMs
+      ? { observedAtMs: newest.seenAtMs, observedMonotonicMs: newest.receivedMonotonicMs }
+      : { observedAtMs: envelope.observedAtMs, observedMonotonicMs: envelope.receivedMonotonicMs };
+    const merged = mergeIndependentCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
+      observedAtMs: envelope.observedAtMs, parts: mergeReceiptEvents(retainedEntries) });
     const isBlocked = (row: { providerEventId: string; providerMarketId: string }) => {
       const socket = state.socketRecords.get(row.providerEventId);
       return socket?.eventSuspended === true || socket?.blockedMarketIds?.has(row.providerMarketId) === true;
@@ -802,12 +838,12 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         const detail = state.detailRecords.get(event.providerEventId);
         return detail !== undefined && detail.record.markets.length === 0;
       });
-    state.lastCatalogPublicationMonotonicMs = envelope.receivedMonotonicMs;
+    state.lastCatalogPublicationMonotonicMs = publication.observedMonotonicMs;
     return {
       sourceId: envelope.sourceId,
       sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs,
-      value: { ...catalog, observedMonotonicMs: envelope.receivedMonotonicMs },
+      value: { ...catalog, ...publication },
       evidenceMode,
       provenance,
       generation: state.generation,
@@ -863,8 +899,12 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
             previousMarkets.filter(old => old.marketId === market.marketId).every(old =>
               old.selections.every(selection => market.selections.some(next => next.selectionId === selection.selectionId))))
             .map(market => market.marketId));
-          return [[eventId, { ...entry, eventSuspended: false,
-            blockedMarketIds: new Set([...entry.blockedMarketIds ?? []].filter(id => !observedMarkets.has(id))) }] as const];
+          const blocked = new Set([...entry.blockedMarketIds ?? []].filter(id => !observedMarkets.has(id) ||
+            (entry.blockedAtMonotonicMs?.get(id) ?? entry.receivedMonotonicMs) > roster.receivedMonotonicMs));
+          return [[eventId, { ...entry,
+            eventSuspended: entry.eventSuspended === true && entry.receivedMonotonicMs > roster.receivedMonotonicMs,
+            blockedMarketIds: blocked,
+            blockedAtMonotonicMs: new Map([...entry.blockedAtMonotonicMs ?? []].filter(([id]) => blocked.has(id))) }] as const];
         })) : new Map(),
         exactEventIds: new Set(),
         openStreams: sameEpoch ? new Set(current!.openStreams) : new Set(),
@@ -887,6 +927,9 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     for (const rawEvent of batch.data.records) {
       const eventId = apsportRawEventId(rawEvent);
       if (eventId === null) continue;
+      const newerReceipt = Math.max(current.detailRecords.get(eventId)?.receivedMonotonicMs ?? -1,
+        current.socketRecords.get(eventId)?.receivedMonotonicMs ?? -1);
+      if (isExactEventChange && newerReceipt > envelope.receivedMonotonicMs) continue;
       const wasKnown = current.rosterEventIds.has(eventId);
       if (!isExactEventChange && (!wasKnown || current.exactEventIds.has(eventId))) continue;
       // A malformed active response is not evidence that the fixture vanished.
@@ -906,6 +949,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       }
       if (!eligibleApsportApiEvent(rawEvent, envelope.observedAtMs, batch.data.prematchWindowHours)) continue;
       const previous = current.detailRecords.get(eventId);
+      if (previous !== undefined && previous.receivedMonotonicMs > envelope.receivedMonotonicMs) continue;
       if (isExactEventChange) {
         current.rosterEventIds.add(eventId);
         current.exactEventIds.add(eventId);
@@ -918,7 +962,21 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       current.detailRecords.set(eventId, retained);
       // A complete authenticated detail owns offer membership and retires
       // earlier partial socket offers, including native IDs no longer listed.
-      if (current.socketRecords.get(eventId)?.partialReceipts !== undefined) current.socketRecords.delete(eventId);
+      const socket = current.socketRecords.get(eventId);
+      if (socket?.partialReceipts !== undefined) {
+        const newerParts = new Map([...socket.partialReceipts].filter(([, part]) =>
+          part.receivedMonotonicMs > envelope.receivedMonotonicMs));
+        if (socket.receivedMonotonicMs <= envelope.receivedMonotonicMs && newerParts.size === 0) {
+          current.socketRecords.delete(eventId);
+        } else {
+          const blocked = new Set([...socket.blockedMarketIds ?? []].filter(id =>
+            (socket.blockedAtMonotonicMs?.get(id) ?? socket.receivedMonotonicMs) > envelope.receivedMonotonicMs));
+          current.socketRecords.set(eventId, { ...socket, partialReceipts: newerParts,
+            eventSuspended: socket.eventSuspended === true && socket.receivedMonotonicMs > envelope.receivedMonotonicMs,
+            blockedMarketIds: blocked,
+            blockedAtMonotonicMs: new Map([...socket.blockedAtMonotonicMs ?? []].filter(([id]) => blocked.has(id))) });
+        }
+      }
     }
     // Real repeated records renew only their own quote evidence. Coalesce their
     // catalog publication, while empty/heartbeat traffic cannot flush a pending
@@ -992,14 +1050,16 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
             nativeMarketObservations: previous.nativeMarketObservations.filter(item => item.providerMarketId === market.marketId) });
       }
       const blocked = new Set(previous?.blockedMarketIds);
+      const blockedAt = new Map(previous?.blockedAtMonotonicMs);
+      const block = (marketId: string) => { blocked.add(marketId); blockedAt.set(marketId, envelope.receivedMonotonicMs); };
       const knownMarkets = [...(state.rosterRecords.get(incoming.eventId)?.record.markets ?? []),
         ...(state.detailRecords.get(incoming.eventId)?.record.markets ?? []),
         ...[...parts.values()].flatMap(part => part.record.markets)];
       for (const market of incoming.markets) {
         const known = knownMarkets.filter(candidate => candidate.marketId === market.marketId);
         if (known.some(candidate => candidate.selections.some(old => !market.selections.some(next => next.selectionId === old.selectionId)))) {
-          blocked.add(market.marketId);
-        } else blocked.delete(market.marketId);
+          block(market.marketId);
+        } else { blocked.delete(market.marketId); blockedAt.delete(market.marketId); }
         parts.set(market.marketId, { ...retained, record: { ...incoming, markets: [market] },
           nativeMarketObservations: retained.nativeMarketObservations.filter(item => item.providerMarketId === market.marketId) });
       }
@@ -1008,17 +1068,17 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       for (const rawGroup of event!["50"] as JsonRecord[]) {
         const prefix = `tsport:${scalar(rawGroup["3"])}:`;
         if (rawGroup["6"] === true || (rawGroup["10"] !== undefined && rawGroup["10"] !== "Active")) {
-          for (const market of knownMarkets) if (market.marketId.startsWith(prefix)) blocked.add(market.marketId);
+          for (const market of knownMarkets) if (market.marketId.startsWith(prefix)) block(market.marketId);
         }
         for (const rawOdd of rawGroup["9"] as JsonRecord[]) {
           const marketId = prefix + scalar(rawOdd["6"]);
-          if (!incoming.markets.some(market => market.marketId === marketId && market.selections.length > 0)) blocked.add(marketId);
+          if (!incoming.markets.some(market => market.marketId === marketId && market.selections.length > 0)) block(marketId);
         }
       }
       const eventSuspended = !activeApsportApiEvent(event!) || event!["9"] === true;
-      if (eventSuspended) for (const market of knownMarkets) blocked.add(market.marketId);
+      if (eventSuspended) for (const market of knownMarkets) block(market.marketId);
       if (parts.size > 2048 || blocked.size > 2048) return this.#ignore("socket-partial-offer-budget");
-      retained = { ...retained, partialReceipts: parts, blockedMarketIds: blocked,
+      retained = { ...retained, partialReceipts: parts, blockedMarketIds: blocked, blockedAtMonotonicMs: blockedAt,
         eventSuspended };
       if (incoming.markets.length === 0 && !retained.eventSuspended && blocked.size === 0) {
         return this.#ignore("socket-partial-no-price");
