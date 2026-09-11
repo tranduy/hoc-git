@@ -1129,12 +1129,16 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       unmapped: observations.filter((observation) => observation.disposition === "UNMAPPED").length
     } satisfies NativeCoverageCount] as const];
   })), [countCatalogs, category]);
-  // Stale catalogs remain cached for recovery, but stale comparisons are not
-  // shown. A cross-book ticket is useful only while every contributing source
-  // is fresh.
+  // Retire only the stale legs immediately. A six-book fixture must not vanish
+  // while the worker recomputes its still-valid pairs among the remaining books.
   const events = useMemo(() => comparisonEvents.filter((item) =>
-    item.event.category === category && !(item.event.category === "FOOTBALL" && item.event.isVirtual !== false) &&
-    item.catalogs.every((catalog) => !staleAccountIds.has(catalog.accountId))),
+    item.event.category === category && !(item.event.category === "FOOTBALL" && item.event.isVirtual !== false))
+    .map(item => {
+      const staleProviders = new Set(item.catalogs.filter(catalog => staleAccountIds.has(catalog.accountId))
+        .map(catalog => catalog.provider));
+      return staleProviders.size === 0 ? item : selectComparisonProviders(item,
+        new Set(item.providers.filter(provider => !staleProviders.has(provider))));
+    }).filter(item => item.providers.length > 0),
   [comparisonEvents, category, staleAccountIds]);
   const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
     selectedIds.has(source.id)).map((source) => source.provider)),

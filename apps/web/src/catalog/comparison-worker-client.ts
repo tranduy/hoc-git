@@ -4,6 +4,7 @@ import { binaryOpposingCellPairs, comparisonOutcomeDomain, observedTicketAsCompa
 import type { ComparisonProjection, ComparisonWorkerCommand, ComparisonWorkerDelta,
   ComparisonWorkerOutput } from "./comparison-worker-protocol.js";
 import { ComparisonWorkerEngine } from "./comparison-worker-engine.js";
+import { selectComparisonProviders } from "./comparison-counts.js";
 
 export interface WorkerLike {
   onmessage: ((event: MessageEvent) => void) | null;
@@ -134,7 +135,8 @@ function nativeOffers(catalog: LiveCatalogResponse, needed: NeededOffers): Map<s
  * current native offer's receipt fields after all existing guards pass. */
 function intermediateValidator(previous: ReadonlyMap<string, LiveCatalogResponse>,
   current: ReadonlyMap<string, LiveCatalogResponse>, stale: ReadonlySet<string>,
-  needed: NeededOffers): ((cell: ComparisonCell) => ComparisonCell | null) | null {
+  needed: NeededOffers): { readonly bind: (cell: ComparisonCell) => ComparisonCell | null;
+    readonly catalogs: ReadonlyMap<string, LiveCatalogResponse> } | null {
   if (previous.size !== current.size) return null;
   const clock = (catalogs: ReadonlyMap<string, LiveCatalogResponse>, freshOnly: boolean): number =>
     [...catalogs.values()].reduce((latest, catalog) => freshOnly && stale.has(catalog.accountId)
@@ -144,16 +146,26 @@ function intermediateValidator(previous: ReadonlyMap<string, LiveCatalogResponse
     current: ReadonlyMap<string, NativeQuote> } | null>();
   const candidates = new Map<string, { before: { market: NativeMarket; quotes: NativeQuote[] };
     after: { market: NativeMarket; quotes: NativeQuote[] } } | null>();
+  const quarantined = new Set<LiveCatalogResponse["provider"]>();
   for (const [accountId, before] of previous) {
     const after = current.get(accountId);
     if (after === undefined || (after.snapshotState === "STALE" && before.snapshotState !== "STALE") ||
         after.observedAtMs < before.observedAtMs ||
-        (before !== after && matchingRoster(before) !== matchingRoster(after))) return null;
+        (before !== after && matchingRoster(before) !== matchingRoster(after))) quarantined.add(before.provider);
     // withScheduledPhase uses this five-minute boundary in both display and
     // fresh-only projections. A clock-only update can invalidate that evidence.
     if (before.events.some(event => event.category === "FOOTBALL" && !event.isLive && clocks.some(([oldClock, newClock]) =>
       (event.startAtUtcMs > oldClock + 300_000) !== (event.startAtUtcMs > newClock + 300_000)))) return null;
-    // The full roster guards above remain global. Price validation only needs
+  }
+  // Roster churn at one book cannot starve pairs formed by other books. Keep
+  // its entire provider out of this intermediate result, including metadata;
+  // the next worker run will reconcile its changed fixture/ambiguity evidence.
+  const catalogs = new Map([...current].filter(([, catalog]) => !quarantined.has(catalog.provider)));
+  if (new Set([...catalogs.values()].map(catalog => catalog.provider)).size < 2) return null;
+  for (const [accountId, before] of previous) {
+    const after = catalogs.get(accountId);
+    if (after === undefined) continue;
+    // The full roster guards above remain per provider. Price validation only needs
     // offers the worker actually projected, not hundreds of thousands of
     // unmatched native markets. Identical snapshots can share their index.
     const oldOffers = nativeOffers(before, needed), newOffers = before === after ? oldOffers : nativeOffers(after, needed);
@@ -163,7 +175,7 @@ function intermediateValidator(previous: ReadonlyMap<string, LiveCatalogResponse
         : { before: oldOffer, after: newOffer });
     }
   }
-  return cell => {
+  const bind = (cell: ComparisonCell): ComparisonCell | null => {
     const market = cell.sourceMarket ?? cell.market;
     const key = marketIdentity(market);
     if (!unchanged.has(key)) {
@@ -209,6 +221,7 @@ function intermediateValidator(previous: ReadonlyMap<string, LiveCatalogResponse
     return { ...cell, quotes: cell.quotes.map(bindReceipt),
       ...(cell.sourceQuotes === undefined ? {} : { sourceQuotes: cell.sourceQuotes.map(bindReceipt) }) };
   };
+  return { bind, catalogs };
 }
 
 function validatedProjection(event: ComparisonEvent, bind: (cell: ComparisonCell) => ComparisonCell | null): ComparisonEvent {
@@ -395,8 +408,10 @@ export class ComparisonWorkerClient {
           freshOnly ? withoutStale(this.#catalogs) : this.#catalogs, this.#stale, projectedNativeOffers(projected));
       if (isLatest || validate !== null) {
         const project = (item: ComparisonProjection): ComparisonEvent => {
-          const hydrated = hydrate(item, validate === null ? snapshots : this.#catalogs);
-          return validate === null ? hydrated : validatedProjection(hydrated, validate);
+          const hydrated = hydrate(item, validate === null ? snapshots : validate.catalogs);
+          if (validate === null) return hydrated;
+          const providers = new Set(hydrated.catalogs.map(catalog => catalog.provider));
+          return validatedProjection(selectComparisonProviders(hydrated, providers), validate.bind);
         };
         const displayEvents = projected.displayEvents.map(project);
         this.#onResult({ generation: event.data.generation, isLatest, displayEvents,

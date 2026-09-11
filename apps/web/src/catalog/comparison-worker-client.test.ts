@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ProviderEvent, ProviderId } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { ComparisonWorkerEngine } from "./comparison-worker-engine.js";
+import type { HydratedComparisonWorkerOutput } from "./comparison-worker-client.js";
 import { ComparisonWorkerClient, type WorkerLike } from "./comparison-worker-client.js";
 
 function catalog(accountId: string): LiveCatalogResponse {
@@ -44,6 +45,60 @@ function sharedCatalog(provider: ProviderId, revision = 1): LiveCatalogResponse 
 }
 
 describe("ComparisonWorkerClient", () => {
+  it("quarantines a newly ambiguous fixture without suppressing other providers' exact pair", () => {
+    const worker = new FakeWorker(), engine = new ComparisonWorkerEngine();
+    const received: HydratedComparisonWorkerOutput[] = [];
+    const saba = sharedCatalog("SABA");
+    const client = new ComparisonWorkerClient({ createWorker: () => worker,
+      competitionLinkStorage: null, onResult: output => received.push(output) });
+    client.reset([saba, sharedCatalog("BTI"), sharedCatalog("SBOBET")], []);
+    const earlier = engine.apply(worker.posted[0] as never);
+    const duplicateId = "ambiguous-saba-event";
+    client.upsert({ ...saba, observedAtMs: 2,
+      events: [...saba.events, { ...saba.events[0]!, providerEventId: duplicateId }],
+      markets: [...saba.markets, ...saba.markets.map(market => ({ ...market, providerEventId: duplicateId }))],
+      quotes: [...saba.quotes, ...saba.quotes.map(quote => ({ ...quote, providerEventId: duplicateId }))] }, false);
+    worker.emit(earlier);
+    expect(received).toHaveLength(1);
+    expect(received[0]!.freshEvents.some(event => event.rows.length > 0)).toBe(true);
+    expect(received[0]!.freshEvents.every(event => !event.providers.includes("SABA") &&
+      !event.catalogs.some(catalog => catalog.provider === "SABA") && !event.providerEventIds.SABA &&
+      event.rows.every(row => row.cells.every(cell => cell.provider !== "SABA")))).toBe(true);
+    worker.emit(engine.apply(worker.posted[1] as never));
+    expect(received.at(-1)!.freshEvents.flatMap(event => event.rows.flatMap(row => row.cells))
+      .every(cell => cell.provider !== "SABA")).toBe(true);
+    client.stop();
+  });
+
+  it("keeps independent fresh pairs publishing when unrelated roster churn accompanies stale books", () => {
+    const worker = new FakeWorker(), engine = new ComparisonWorkerEngine();
+    const received: HydratedComparisonWorkerOutput[] = [];
+    const client = new ComparisonWorkerClient({ createWorker: () => worker,
+      competitionLinkStorage: null, onResult: output => received.push(output) });
+    client.reset((["SABA", "SBOBET", "CMD", "APSPORT", "IM", "BTI"] as ProviderId[])
+      .map(provider => sharedCatalog(provider)), []);
+    worker.emit(engine.apply(worker.posted[0] as never));
+    client.setStale("IM", true); client.setStale("BTI", true);
+    for (let index = 1; index <= 5; index++) {
+      const done = engine.apply(worker.posted[index] as never);
+      expect(done.freshEvents.some(event => event.rows.length > 0)).toBe(true);
+      const catalog = sharedCatalog("SABA", index + 1);
+      client.upsert({ ...catalog, events: [...catalog.events, { ...catalog.events[0]!,
+        providerEventId: `unmatched-${index}`, participantA: `Unrelated club ${index}`,
+        participantB: "Nobody", startAtUtcMs: 5_000_000 }] }, false);
+      worker.emit(done);
+    }
+    expect(received.length).toBeGreaterThan(1);
+    const latest = received.at(-1)!;
+    expect(latest.freshEvents.some(event => event.rows.length > 0)).toBe(true);
+    expect(latest.freshEvents.flatMap(event => event.catalogs.map(catalog => catalog.provider)))
+      .not.toEqual(expect.arrayContaining(["SABA"]));
+    expect(latest.freshEvents.every(event => !event.providerEventIds.SABA && !event.providerEventIds.IM && !event.providerEventIds.BTI)).toBe(true);
+    expect(latest.freshEvents.every(event => !event.providers.includes("SABA") && !event.providers.includes("IM") && !event.providers.includes("BTI"))).toBe(true);
+    expect(latest.freshEvents.flatMap(event => event.rows.flatMap(row => row.cells.map(cell => cell.provider))))
+      .not.toEqual(expect.arrayContaining(["SABA"]));
+    client.stop();
+  });
   it.each(["fixture", "phase"])("preserves the fresh %s barrier with a continuously stale third source", kind => {
     const worker = new FakeWorker(), engine = new ComparisonWorkerEngine(), received = vi.fn();
     const fresh = sharedCatalog("BTI");
