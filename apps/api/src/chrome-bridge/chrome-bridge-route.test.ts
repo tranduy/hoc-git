@@ -713,3 +713,48 @@ describe("bridge keepalive", () => {
     await expect(app.close()).resolves.toBeUndefined();
   });
 });
+
+
+it("guards collection control and queues manual refresh only with a validated plan", async () => {
+  const plane = new ChromeBridgeControlPlane();
+  const socket = { send: vi.fn(), readyState: 1 };
+  plane.attach("chrome:TSPORT:7", socket);
+  const { app } = await appWithRoute(true, { controlPlane: plane });
+  const post = (url: string, payload: Record<string, unknown>, origin?: string) => app.inject({ method: "POST", url, payload,
+    ...(origin === undefined ? {} : { headers: { origin } }) });
+  try {
+    expect((await post("/api/chrome-bridge/refresh-data", { provider: "APSPORT" })).json()).toEqual({ error: "PLAN_NOT_READY" });
+    const payload = { provider: "APSPORT", plan: { revision: 1, events: [] } };
+    expect((await post("/api/chrome-bridge/collection-plan", payload, "https://evil.example")).statusCode).toBe(403);
+    expect((await post("/api/chrome-bridge/collection-plan", payload)).statusCode).toBe(202);
+    const refresh = await post("/api/chrome-bridge/refresh-data", { provider: "APSPORT" });
+    expect(refresh.statusCode).toBe(202);
+    expect(refresh.json()).toMatchObject({ provider: "APSPORT", requested: 1, status: "QUEUED" });
+    expect(socket.send.mock.calls.map(([raw]) => JSON.parse(raw).kind)).toEqual(["SET_COLLECTION_PLAN", "SET_COLLECTION_PLAN"]);
+    expect((await post("/api/chrome-bridge/collection-plan", payload)).json()).toEqual({ error: "STALE_COLLECTION_PLAN" });
+  } finally { await app.close(); }
+});
+
+
+it("accepts a schema-bounded collection plan above the production 32 KiB request default", async () => {
+  const app = Fastify({ bodyLimit: 32 * 1024 });
+  await app.register(websocket);
+  const registry = new ChromeBridgeRegistry();
+  const plane = new ChromeBridgeControlPlane();
+  const socket = { readyState: 1, send: vi.fn() };
+  plane.attach("chrome:SABA:7", socket);
+  registerChromeBridgeRoute(app, registry, { installationKey: "key", dashboardOrigins: new Set(), controlPlane: plane });
+  const event = (id: number) => ({ eventId: `event-${id}-` + "x".repeat(100), startAtUtcMs: 1000, isLive: false, urgent: false });
+  const events = Array.from({ length: 10000 }, (_, index) => event(index));
+  const payload = { provider: "SABA", plan: { revision: 1, events } };
+  expect(Buffer.byteLength(JSON.stringify(payload))).toBeGreaterThan(1024 * 1024);
+  try {
+    const accepted = await app.inject({ method: "POST", url: "/api/chrome-bridge/collection-plan", payload });
+    expect(accepted.statusCode).toBe(202);
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    const rejected = await app.inject({ method: "POST", url: "/api/chrome-bridge/collection-plan",
+      payload: { ...payload, plan: { revision: 2, events: [...events, event(10000)] } } });
+    expect(rejected.statusCode).toBe(400);
+    expect(socket.send).toHaveBeenCalledTimes(1);
+  } finally { await app.close(); }
+});

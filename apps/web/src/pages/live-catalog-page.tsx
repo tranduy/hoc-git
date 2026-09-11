@@ -39,7 +39,9 @@ import type { TicketReportApiLike } from "../api/ticket-report.js";
 import { CatalogRevisionCoordinator } from "../catalog/catalog-revision-coordinator.js";
 import { CatalogRevisionCache } from "../catalog/catalog-revision-cache.js";
 import { ComparisonWorkerClient, type HydratedComparisonWorkerOutput } from "../catalog/comparison-worker-client.js";
-import { hydratePairableCatalogs } from "../catalog/pairable-event-plan.js";
+import { footballCollectionPlans, hydratePairableCatalogs, pairableEventIds } from "../catalog/pairable-event-plan.js";
+import { FootballCollectionPlanPublisher } from "../api/football-collection-plan.js";
+import {FootballHydrationSchedule} from "../catalog/football-hydration.js";
 import { ProviderSourceRecoveryApi, type ProviderSourceRecoveryApiLike } from "../api/provider-source-recovery.js";
 import { ProviderSourceRecoveryCoordinator, type ProviderAutomaticRecoveryTiming, type ProviderRecoverySnapshot,
   type RecoverableProvider } from "../watch/provider-source-recovery.js";
@@ -345,7 +347,8 @@ function ProviderSelector({ accounts, eventCounts, marketCounts, nativeCoverageC
     const recovery = recoveryByProvider?.get(recoverableProvider);
     const reloading = recovery?.phase === "RECOVERING" || recovery?.phase === "WAITING";
     const cooldown = recovery?.manualRetryAfterSeconds ?? 0;
-    const recoveryStatus = recovery?.phase === "COUNTDOWN" && recovery.countdownKind === "INITIAL"
+    const recoveryStatus = recovery?.dataRefreshPending === true ? "Đang cập nhật dữ liệu theo hàng đợi"
+      : recovery?.phase === "COUNTDOWN" && recovery.countdownKind === "INITIAL"
       ? `T\u1ef1 reload sau ${formatRecoveryDuration(recovery.countdownSeconds)}`
       : recovery?.phase === "COUNTDOWN" && recovery.countdownKind === "RETRY"
         ? `Th\u1eed l\u1ea1i sau ${formatRecoveryDuration(recovery.countdownSeconds)}`
@@ -561,6 +564,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   // between. Kept apart from the one above, which ticks every second so the
   // countdowns move and would otherwise drag every fixture's ranking with it.
   const [rankingNowMs, setRankingNowMs] = useState(Date.now());
+  const collectionPublisher = useRef<FootballCollectionPlanPublisher | null>(null);
+  const hydrationSchedule=useRef(new FootballHydrationSchedule());
+  if (collectionPublisher.current === null) collectionPublisher.current = new FootballCollectionPlanPublisher(
+    (...args) => window.fetch(...args));
   const acceptVerifiedTickets = useCallback((verified: ReadonlyMap<string, VerifiedTicketEvidence>): void => {
     const previous = verifiedTicketsRef.current;
     if (previous.size === verified.size && [...verified].every(([key, evidence]) => previous.get(key) === evidence)) return;
@@ -715,6 +722,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     if (catalogSourceApi !== undefined && catalogApi.readRosterRevision !== undefined &&
       catalogApi.readEventsRevision !== undefined) {
       const [result] = await hydratePairableCatalogs({
+        // Realtime revisions do not identify changed fixtures. Read every paired
+        // fixture so an incoming suspension cannot wait behind a distant tier.
+        hydrationSchedule:hydrationSchedule.current,retainedCatalogs:catalogsRef.current,force:true,
         accountIds: [accountId], existingCatalogs: [...new Map([...catalogsRef.current,
           ...rosterViewsRef.current.values()].map(catalog => [catalog.accountId, catalog])).values()],
         readRoster: id => catalogApi.readRosterRevision!(id),
@@ -848,6 +858,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       if (catalogSourceApi !== undefined && catalogApi.readRosterRevision !== undefined &&
         catalogApi.readEventsRevision !== undefined) {
         results = await hydratePairableCatalogs({
+          hydrationSchedule:hydrationSchedule.current,
           accountIds: requestedIds,
           onRoster: rememberRoster,
           existingCatalogs: catalogsRef.current.filter((catalog) => catalog.category === expectedCategory),
@@ -1078,6 +1089,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   const freshCatalogs = useMemo(() => catalogs.filter((catalog) => !staleAccountIds.has(catalog.accountId)),
     [catalogs, staleAccountIds]);
+  useEffect(() => {
+    for (const catalog of freshCatalogs) {
+      if (catalog.category === "FOOTBALL" && catalog.provider !== "FABET") {
+        sourceRecoveryCoordinatorRef.current?.confirmData(catalog.provider, catalog.observedAtMs);
+      }
+    }
+  }, [freshCatalogs]);
   // A successful roster remains visible even when market hydration times out.
   // It supplies counts only and never supplies executable/comparison prices.
   const countCatalogs = useMemo(() => {
@@ -1089,6 +1107,38 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     }
     return [...latest.values()];
   }, [catalogs, rosters]);
+  // Broad production roster matching precedes provider and phase filters.
+  const collectionPlans = useMemo(() => footballCollectionPlans(countCatalogs,rankingNowMs,Date.now()),
+    [countCatalogs,rankingNowMs]);
+  const pairableIds=useMemo(() => pairableEventIds(countCatalogs),[countCatalogs]);
+  const hydrationInputs=useRef({catalogs:countCatalogs,plans:collectionPlans,pairableIds});
+  hydrationInputs.current={catalogs:countCatalogs,plans:collectionPlans,pairableIds};
+  useEffect(() => {
+    if (catalogSourceApi === undefined || catalogApi.readRosterRevision === undefined ||
+      catalogApi.readEventsRevision === undefined) return;
+    const timer=window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      const now=Date.now();
+      const active=new Set(sourcesRef.current.filter(source => source.category === category && source.sessionState === "ACTIVE")
+        .map(source => source.id));
+      const ids=hydrationInputs.current.catalogs.filter(catalog => {
+        if (!active.has(catalog.accountId)) return false;
+        const urgent=new Set(hydrationInputs.current.plans.get(catalog.provider)?.events
+          .filter(event => event.urgent).map(event => event.eventId));
+        const paired=hydrationInputs.current.pairableIds.get(catalog.accountId);
+        return catalog.events.some(event => paired?.has(event.providerEventId) === true &&
+          hydrationSchedule.current.isDue(catalog.accountId,event,urgent.has(event.providerEventId),now));
+      }).map(catalog => catalog.accountId);
+      if (ids.length > 0) void loadIds(ids,false,category);
+    },5000);
+    return () => window.clearInterval(timer);
+  },[catalogSourceApi,catalogApi,category,loadIds]);
+  useEffect(() => {
+    const publish = () => { void collectionPublisher.current?.publish(collectionPlans,Date.now()); };
+    publish();
+    const timer = window.setInterval(() => setRankingNowMs(Date.now()),30000);
+    return () => window.clearInterval(timer);
+  },[collectionPlans]);
   const eventCounts = useMemo(() => new Map(countCatalogs.map((catalog) => [catalog.accountId,
     new Set(catalog.events.filter((candidate) => candidate.category === category &&
       (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
@@ -1143,27 +1193,30 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
     selectedIds.has(source.id)).map((source) => source.provider)),
   [categorySources, selectedIds]);
+  const urgentEventKeys = useMemo(() => new Set(events.filter(item => item.providers.some(provider =>
+    collectionPlans.get(provider)?.events.some(event => event.urgent &&
+      event.eventId === item.providerEventIds[provider]))).map(item => item.key)),[events,collectionPlans]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, rankingNowMs) &&
     matchesEventPhase(item.event, eventPhases)).map(item => selectComparisonProviders(item, selectedProviderIds)),
   [events, eventPhases, rankingNowMs, selectedProviderIds]);
   const comparisonCounts = useMemo(() => summarizeComparisonCounts(visibleEvents), [visibleEvents]);
   useEffect(() => {
-    const deadlineMs = nextRankingDeadlineMs({ events: visibleEvents, verified: verifiedTickets,
-      nowMs: rankingNowMs });
+    const deadlineMs = nextRankingDeadlineMs({ events, verified: verifiedTickets,
+      nowMs: rankingNowMs, urgentEventKeys });
     if (deadlineMs === null) return;
     const timer = window.setTimeout(() => setRankingNowMs(Date.now()),
       Math.max(16, deadlineMs + 1 - Date.now()));
     return () => window.clearTimeout(timer);
-  }, [rankingNowMs, verifiedTickets, visibleEvents]);
+  }, [rankingNowMs, verifiedTickets, events, urgentEventKeys]);
   const rankedEvents = useMemo(() => {
     const sorted = sortRankedEvents(visibleEvents.filter((item) => item.rows.length > 0)
       .map((item) => rankedEvent({ event: item, verified: verifiedTickets, movements,
         selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake),
-        nowMs: rankingNowMs, limit: item.rows.length }))
+        nowMs: rankingNowMs, urgent:urgentEventKeys.has(item.key), limit: item.rows.length }))
       .filter((item) => item.tickets.some(ticket => ticket.plan !== null || ticket.hasOpposingSources === true)));
     const seen = new Set<string>();
     return sorted.filter((item) => seen.has(item.event.key) ? false : (seen.add(item.event.key), true));
-  }, [baseStake, movements, rankingNowMs, selectedProviderIds, verifiedTickets, visibleEvents]);
+  }, [baseStake, movements, rankingNowMs, selectedProviderIds, verifiedTickets, visibleEvents, urgentEventKeys]);
   const rankedByEvent = new Map(rankedEvents.map((item) => [item.event.key, item]));
   // This workspace is an exact cross-book comparison list. Never pad it with
   // one-book observations: those rows cannot be balanced across two providers.
@@ -1264,7 +1317,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       baseStake={baseStake} books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent} externallyRefreshed
       highlightTicketKey={highlightTicketKey} rankedTickets={rankedByEvent.get(selectedEvent.key)?.tickets ?? []}
       onOpenProviderTicket={openProviderTicketEnabled ? openProviderTicket : undefined}
-      ticketReportApi={ticketReportApi}
+      ticketReportApi={ticketReportApi} urgent={urgentEventKeys.has(selectedEvent.key)}
       lagSignals={signals.filter((signal) => signal.event.key === selectedEvent.key)}
       onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); setPinnedEvent(null); setPinnedEventIdentity(null); setHighlightTicketKey(null); }}
       providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
@@ -1276,7 +1329,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <ProviderSelector accounts={categorySources} eventCounts={eventCounts} marketCounts={marketCounts}
         nativeCoverageCounts={nativeCoverageCounts}
         loaded={accountsLoaded}
-        manualRecover={(provider) => { void sourceRecoveryCoordinatorRef.current?.manual(provider); }}
+        manualRecover={(provider) => { hydrationSchedule.current.requestManual(provider);
+          void sourceRecoveryCoordinatorRef.current?.manual(provider); }}
         recoveryByProvider={recoveryByProvider} selected={selectedIds} toggle={toggle} />
       <fieldset className="event-phase-filter" aria-label="Thời điểm trận">
         <legend>Matches</legend>
@@ -1329,9 +1383,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <div className="catalog-event-list">
       {displayTicketItems.map(({ event: ranked, ticket }) => {
       const item = ranked.event;
-      const edge = ticketEdgeSummary(ticket);
+      const historical = ticket.plan === null && ticket.historicalPlan != null;
+      const edge = ticketEdgeSummary(historical ? {...ticket,plan:ticket.historicalPlan!} : ticket);
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
-      const displayOnly = item.catalogs.some((catalog) => staleAccountIds.has(catalog.accountId));
+      const displayOnly = historical || item.catalogs.some((catalog) => staleAccountIds.has(catalog.accountId));
       const selected = isPinnedEvent(item) && highlightTicketKey === ticket.key;
       const edgeTone = edge === null ? null : roiTone(edge.roiPercent, edge.worstCaseProfit);
       const roiClass = displayOnly || selected || edgeTone === null ? "" : ` catalog-event--roi-${edgeTone}`;
@@ -1352,7 +1407,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           <span>{ticket.row.marketType} · {ticket.row.line === null ? "Không line" : `Line ${ticket.row.line}`}</span>
         </div> : <div className={`event-edge-summary event-edge-summary--roi-${edgeTone}`}>
           <RoiBadge className="event-edge-summary__roi" roiPercent={edge.roiPercent} worstCaseProfit={edge.worstCaseProfit} size="lg" />
-          <span>Estimated balanced profit {money(edge.worstCaseProfit)}</span>
+          <span>{historical ? "Historical observation" : "Estimated balanced profit"} {money(edge.worstCaseProfit)}</span>
+          {historical && <small>Price age: {ticket.observationAgeMs === undefined ? "unknown" :
+            `${Math.floor(ticket.observationAgeMs/1000)}s`} · awaiting fresh receipt</small>}
           {ticket.plan !== null && <ConditionalRoiNote row={ticket.row} plan={ticket.plan} />}
           <span>{edge.marketType} · {edge.line === null ? "No line" : `Line ${edge.line}`}</span>
           <span>{edge.odds.map(formatSummaryOdds).join(" / ")}</span>

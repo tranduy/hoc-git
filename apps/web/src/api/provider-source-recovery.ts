@@ -12,7 +12,7 @@ export class ProviderSourceRecoveryApi implements ProviderSourceRecoveryApiLike 
   }
 
   async recover(provider: RecoverableProvider, mode: ProviderRecoveryMode): Promise<void> {
-    if (mode === "MANUAL") return this.#hardRefresh(provider);
+    if (mode === "MANUAL") return this.#refreshData(provider);
     // The backend owns escalation. A delayed failure in any open dashboard
     // is not authority to restore a provider that may already have recovered.
     await this.#requestFreshSnapshot(provider);
@@ -40,14 +40,16 @@ export class ProviderSourceRecoveryApi implements ProviderSourceRecoveryApiLike 
     }
   }
 
-  async #hardRefresh(provider: RecoverableProvider): Promise<void> {
-    const response = await this.#fetch(`/api/maintenance/refresh-provider/${provider}`, {
-      method: "POST", cache: "no-store"
+  async #refreshData(provider: RecoverableProvider): Promise<void> {
+    const response = await this.#fetch("/api/chrome-bridge/refresh-data", {
+      method: "POST", cache: "no-store", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider })
     });
     if (!response.ok) throw await responseError(response, "SOURCE_RECOVERY_FAILED");
     const value = await response.json() as unknown;
-    if (!isObject(value) || value.provider !== provider || typeof value.requested !== "number" ||
-      value.requested < 1) throw new Error("FRESH_BASELINE_NOT_CONFIRMED");
+    if (!isObject(value) || value.provider !== provider || value.requested !== 1 || value.status !== "QUEUED" ||
+      typeof value.requestId !== "string" || value.requestId.length === 0 ||
+      typeof value.requestedAtMs !== "number" || !Number.isFinite(value.requestedAtMs)) throw new Error("FRESH_BASELINE_NOT_CONFIRMED");
   }
 }
 

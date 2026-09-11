@@ -829,7 +829,7 @@ class SabaHiddenMarketPageAdapter implements SabaCollectorPageAdapter {
           addedGroupShapes: addedGroupShapes(baselinePhase.ownerGroups, capturedPhase.ownerGroups) };
         throw new Error("SABA_COLLECTOR_OWNER_STRUCTURE_UNCAPTURED");
       }
-      result = { binding: { ...this.#binding }, period, ownerMatchId: owner.ownerMatchId,
+      result = { binding: { ...this.#binding }, period, ownerMatchId: owner.ownerMatchId, observedAtMs: capturedAtMs,
         controlOpened: true, terminalControlState: "RESTORED_CLOSED", restored: true,
         safeControlOutcome: structuralChange ? "OWNER_GROUPS_EXPANDED" : "NO_STRUCTURAL_CHANGE",
         ...(structuralChange ? { capture: { record: capturedRecord, kickoffDate: owner.kickoffDate,

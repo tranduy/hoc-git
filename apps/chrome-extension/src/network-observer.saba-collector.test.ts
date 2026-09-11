@@ -128,6 +128,54 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
         viewRestored: true }) });
   });
 
+  it("activates scheduled visits when a plan arrives after the legacy sweep finished", async () => {
+    const h = harness();
+    await h.observer.start(source);
+    await h.start();
+    for (let index = 0; index < 8; index++) await h.poll();
+    const page = vi.mocked(createSabaHiddenMarketPageAdapter).mock.results[0]!.value;
+    const before = page.captureOwner.mock.calls.length;
+    expect(h.collectorChunks().some(envelope => JSON.parse(envelope.payload.body).records
+      .some((item: any) => item.kind === "TERMINAL"))).toBe(true);
+    const base = 1_788_800_000_000;
+    await h.observer.setCollectionPlan(source, { revision: 1,
+      events: ["TODAY-0", "TODAY-1", "EARLY-0", "EARLY-1"].map(eventId => ({ eventId,
+        startAtUtcMs: base + (eventId === "TODAY-1" ? 2 : 100) * 3_600_000, isLive: false, urgent: false })) });
+    await h.poll(); await h.poll();
+    expect(page.captureOwner.mock.calls.length).toBe(before + 1);
+    expect(page.captureOwner.mock.calls.at(-1)?.[1].ownerMatchId).toBe("TODAY-1");
+    h.observer.beginSourceEpoch(source.sourceId);
+  });
+
+  it("publishes bounded scheduled owner proofs and leaves idle far owners untouched", async () => {
+    const h = harness();
+    await h.observer.start(source);
+    const base = 1_788_800_000_000;
+    const events = ["TODAY-0", "TODAY-1", "EARLY-0", "EARLY-1"].map(eventId => ({ eventId,
+      startAtUtcMs: base + (eventId === "TODAY-1" ? 2 : 100) * 3_600_000,
+      isLive: false, urgent: false }));
+    await h.observer.setCollectionPlan(source, { revision: 1, events });
+    await h.start();
+    const page = vi.mocked(createSabaHiddenMarketPageAdapter).mock.results[0]!.value;
+    await h.poll();
+    expect(page.captureOwner.mock.calls.map((call: Parameters<SabaCollectorPageAdapter["captureOwner"]>) =>
+      call[1].ownerMatchId)).toEqual(["TODAY-1"]);
+    const partial = h.collectorChunks().map(envelope => JSON.parse(envelope.payload.body))
+      .find(chunk => chunk.records.some((item: any) => item.kind === "SCHEDULED_OWNER_TERMINAL"));
+    expect(partial.records.at(-1)).toMatchObject({ kind: "SCHEDULED_OWNER_TERMINAL",
+      owners: [{ period: "TODAY", ownerMatchId: "TODAY-1" }], hiddenMarketsComplete: false });
+    const originalClock = partial.records.find((item: any) => item.captureKind === "OWNER_GROUPS_EXPANDED").capturedAtMs;
+    page.restoreToday.mockClear();
+    await h.poll();
+    expect(page.captureOwner).toHaveBeenCalledOnce();
+    expect(page.restoreToday).not.toHaveBeenCalled();
+    await h.observer.setCollectionPlan(source, { revision: 2, events, manualRequestId: "manual-1" });
+    await h.poll();
+    expect(page.captureOwner).toHaveBeenCalledTimes(2);
+    expect(partial.records.find((item: any) => item.captureKind === "OWNER_GROUPS_EXPANDED").capturedAtMs).toBe(originalClock);
+    h.observer.beginSourceEpoch(source.sourceId);
+  });
+
   it("exposes safe in-memory collector admission flags without another page command", async () => {
     const h = harness();
     await h.start();

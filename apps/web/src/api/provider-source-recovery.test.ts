@@ -78,13 +78,13 @@ describe("ProviderSourceRecoveryApi", () => {
     }));
   });
 
-  it.each(["IM", "BTI", "CMD", "SABA", "SBOBET", "APSPORT"] as const)("preserves explicit %s manual maintenance refresh", async provider => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(json({ provider, requested: 1 }, 202));
+  it.each(["IM", "BTI", "CMD", "SABA", "SBOBET", "APSPORT"] as const)("queues explicit %s manual DATA refresh", async provider => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(json({ provider, requested: 1, status: "QUEUED", requestId: "manual:1", requestedAtMs: 100 }, 202));
 
     await expect(new ProviderSourceRecoveryApi(fetcher).recover(provider, "MANUAL"))
       .resolves.toBeUndefined();
 
-    expect(fetcher).toHaveBeenCalledExactlyOnceWith(`/api/maintenance/refresh-provider/${provider}`,
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/chrome-bridge/refresh-data",
       expect.objectContaining({ method: "POST" }));
   });
 

@@ -14,7 +14,7 @@ export function resultCatalog(provider: ProviderId, dc: boolean, selections?: re
     providerSelectionId: `${providerMarketId}-${selection}`, rawOdds: "2", rawFormat: "DECIMAL",
     isLive: false, sourceTimestampMs: null, receivedMonotonicMs: 1, sequence: 1 }));
   return { dataMode: "LIVE", accountId: `catalog-source:${provider}:FOOTBALL`, provider, category: "FOOTBALL",
-    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 1, rejectedMarketCount: 0,
+    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 1, observedMonotonicMs: 1, rejectedMarketCount: 0,
     events: [{ provider, category: "FOOTBALL", providerEventId, competition: "Shared League", seasonStage: null,
       startAtUtcMs: 2000000, participantA: "Home Club", participantB: "Away Club", eventScope: "REGULATION",
       bestOf: null, isLive: false, rematchCandidate: false, fixtureDiscriminator: null, isVirtual: false,

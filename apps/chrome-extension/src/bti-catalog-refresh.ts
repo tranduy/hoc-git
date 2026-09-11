@@ -21,7 +21,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     lastRequestFailureAtMs: previousState.lastRequestFailureAtMs || 0,
     authBlocked: previousState.authBlocked === true
   } : {};
-  if (previousState && (previousState.collectorVersion !== 13 || !previousState.sameSession?.(authValue, contextValue))) {
+  if (previousState && (previousState.collectorVersion !== 14 || !previousState.sameSession?.(authValue, contextValue))) {
     const retainedBodies = previousState.sameSession?.(authValue, contextValue) &&
       Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
     for (const controller of previousState.listControllers || []) controller.abort();
@@ -47,7 +47,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     for (const controller of legacyWorker.controllers?.values?.() || []) controller.abort();
     delete root.__fieldlineBtiDetailWorkerV9;
   }
-  const detailState = root[detailStateKey] || { collectorVersion: 13, desired: new Set(), failures: new Map(), evicted: new Set(),
+  const detailState = root[detailStateKey] || { collectorVersion: 14, desired: new Set(), failures: new Map(), evicted: new Set(),
     starts: new Map(), listControllers: new Set(), committed: null, rosterRetryAtMs: 0, rosterRefreshFailed: false,
     requestRetryAtMs: 0, requestStatus: 0, requestFailures: 0, lastRequestFailureAtMs: 0, authBlocked: false,
     ...retainedBackpressure,
@@ -84,6 +84,10 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   };
   const deadline = (eventId, cached) => {
     const start = detailState.starts.get(eventId);
+    const scheduler = root.__fieldlineCollectionSchedulerV1;
+    if (scheduler) return Math.max(
+      scheduler.due(eventId, cached?.observedAtMs ?? null, Number.isFinite(start) ? start : undefined, false)
+        ? 0 : Infinity, detailState.failures.get(eventId)?.retryAtMs || 0);
     const ttl = Number.isFinite(start) && start - Date.now() > nearWindowMs ? distantTtlMs : nearTtlMs;
     return Math.max(cached ? cached.observedAtMs + ttl : 0, detailState.failures.get(eventId)?.retryAtMs || 0);
   };
@@ -514,8 +518,9 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     if (!ownsSession() || requestsPaused() || detailState.committed !== rosterWorker) return;
     trimCache();
     const cachedById = new Map(root[detailBodiesKey].map((item) => [item.eventId, item]));
-    const dueIds = selected.filter((eventId) => deadline(eventId, cachedById.get(eventId)) <= Date.now())
+    let dueIds = selected.filter((eventId) => deadline(eventId, cachedById.get(eventId)) <= Date.now())
       .sort((left, right) => (cachedById.get(left)?.observedAtMs || 0) - (cachedById.get(right)?.observedAtMs || 0));
+    if (root.__fieldlineCollectionSchedulerV1) dueIds = root.__fieldlineCollectionSchedulerV1.sort(dueIds);
     const nextJob = { generation, headers: { ...listHeaders }, eventIds: selected, dueIds, publishCoverage };
     const currentWorker = root[detailWorkerKey];
     if (currentWorker && typeof currentWorker.update === 'function') {
@@ -540,8 +545,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
           for (const [eventId, controller] of this.controllers) {
             if (!desired.has(eventId)) controller.abort();
           }
-          const due = new Set(job.dueIds);
-          this.queue = this.queue.filter((eventId) => desired.has(eventId) && due.has(eventId));
+          this.queue = [];
           const queued = new Set(this.queue);
           for (const eventId of job.dueIds) {
             if (this.queue.length >= queueCap) break;
@@ -568,6 +572,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         while (ownsSession() && !requestsPaused() && root[detailWorkerKey] === detailWorker && detailWorker.queue.length > 0) {
           const eventId = detailWorker.queue.shift();
           if (!eventId || !detailWorker.desired.has(eventId)) continue;
+          const latest = root[detailBodiesKey]?.find(item => item.eventId === eventId);
+          if (deadline(eventId, latest) > Date.now()) continue;
           detailWorker.activeEventIds.add(eventId);
           const headers = { ...detailWorker.headers };
           const requestedAtMs = Date.now();
@@ -745,6 +751,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
               if (existingIndex >= 0) cached.splice(existingIndex, 1);
               cached.push({ path, body: compactBody, ...metadata, empty: JSON.parse(compactBody).data.length === 0 });
               successful = true;
+              root.__fieldlineCollectionSchedulerV1?.completed(eventId, observedAtMs);
               detailState.failures.delete(eventId);
               detailState.evicted.delete(eventId);
               detailWorker.markVisited(eventId);
@@ -805,6 +812,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     detailState.deliveryOrder = deliveryOrder;
     const deliveredClocks = detailState.deliveredClocks || new Map();
     detailState.deliveredClocks = deliveredClocks;
+    const deliveredAt = detailState.deliveredAt || (detailState.deliveredAt = new Map());
+    for (const eventId of deliveredAt.keys()) if (!cachedById.has(eventId)) deliveredAt.delete(eventId);
     for (const eventId of deliveredClocks.keys()) if (!cachedById.has(eventId)) deliveredClocks.delete(eventId);
     // New receipts must not wait a full 1500-owner replay cycle. Spend at most
     // four MiB on newest receipts, leaving room in the eight-batch limit for
@@ -836,6 +845,13 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     };
     for (const eventId of scheduledOrder) {
       const item = cachedById.get(eventId);
+      const scheduler = root.__fieldlineCollectionSchedulerV1;
+      if (scheduler && item.observedAtMs <= (deliveredClocks.get(eventId) || 0)) {
+        const start = detailState.starts.get(eventId);
+        const interval = Math.max(60_000, scheduler.policy(eventId,
+          Number.isFinite(start) ? start : undefined, false).refreshMs ?? 3_600_000);
+        if (Date.now() - (deliveredAt.get(eventId) || 0) < interval) continue;
+      }
       // The collector admits at most two MiB per event. Eight bounded batches
       // leave the three authoritative list responses available on every tick.
       if (batchMetadata.length > 0 && batchBytes + item.body.length > 1536 * 1024) flushBatch();
@@ -851,6 +867,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         batchMetadata.push(...payload.fieldlineBtiDetails);
         batchBytes += item.body.length;
         deliveredClocks.set(eventId, item.observedAtMs);
+        deliveredAt.set(eventId, Date.now());
       } catch { /* Ignore a stale malformed page-cache entry. */ }
     }
     flushBatch();

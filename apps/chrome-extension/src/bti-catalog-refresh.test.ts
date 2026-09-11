@@ -63,6 +63,44 @@ const detailBodies = (result: any) => result.responses.filter((row: any) => row.
 describe("BTI All Early roster", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+  it("does not replay unchanged far bodies on every maintenance tick", async () => {
+    const h = harness();
+    h.root.__fieldlineCollectionSchedulerV1 = {
+      policy: () => ({ refreshMs: 3_600_000 }),
+      due: (_id: string, receipt: number) => !receipt,
+      sort: (ids: string[]) => ids, completed: vi.fn()
+    };
+    await h.refresh(); await h.settle();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await h.refresh();
+    await vi.advanceTimersByTimeAsync(2_000);
+    const second = await h.refresh();
+    expect(detailBodies(second)).toEqual([]);
+    expect(second.responses.some((r: any) => r.url.includes("/leagues/"))).toBe(true);
+    expect(h.cache()).toHaveLength(1);
+    expect(h.requests).toHaveLength(1);
+  });
+
+  it("defers far details without removing their roster and honors tier promotion", async () => {
+    const h = harness(["far", "near"]);
+    let promoted = false;
+    const completed = vi.fn();
+    h.root.__fieldlineCollectionSchedulerV1 = {
+      policy: (id: string) => ({ refreshMs: id === "far" && !promoted ? null : 30_000 }),
+      due: (id: string, receipt: number) => (id !== "far" || promoted) && (!receipt || Date.now() - receipt >= 30_000),
+      sort: (ids: string[]) => [...ids].reverse(), completed
+    };
+    await h.refresh(); await h.settle();
+    expect(h.requests.map(r => r.eventId)).toEqual(["near"]);
+    expect(JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!).detailRosterEvents).toBe(2);
+    const receipt = h.cache()[0].observedAtMs;
+    promoted = true;
+    await h.nextRoster(); await h.settle();
+    expect(h.requests.map(r => r.eventId)).toEqual(["near", "far"]);
+    expect(h.cache().find(c => c.eventId === "near").observedAtMs).toBe(receipt);
+    expect(completed).toHaveBeenCalledWith("near", receipt);
+  });
+
   it("discovers leagues beyond the initial ten and hydrates by master ID before publishing", async () => {
     const root: PageRoot = { dataset: {} };
     const requests: string[] = [];

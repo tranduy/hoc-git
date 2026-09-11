@@ -153,13 +153,13 @@ describe("nextRankingDeadlineMs", () => {
   it("keeps cross-event receipt offsets when scheduling mixed live and prematch deadlines", () => {
     const oldLive = cell("APSPORT", "-0.5", { isLive: true, receivedMonotonicMs: 1_000 });
     const latestPrematch = cell("APSPORT", "-1.5", { receivedMonotonicMs: 21_000 }).quotes
-      .map(quote => ({ ...quote, providerEventId: "another-event" }));
-    const current = { ...apCatalog(21_000, true), quotes: [...oldLive.quotes, ...latestPrematch] };
+      .map(quote => ({ ...quote, providerEventId: "another-event",sourceTimestampMs:21000 }));
+    const current = { ...apCatalog(21_000, true), observedMonotonicMs: 21000, quotes: [...oldLive.quotes, ...latestPrematch] };
     const event = { ...comparisonEvent(), event: { ...providerEvent, isLive: true }, catalogs: [current] };
     // The untouched live event expired at 6,000; only the other event's 36,000 deadline remains.
     expect(nextRankingDeadlineMs({ events: [event], verified: new Map(), nowMs: 22_000 })).toBe(36_000);
     const recent = { ...current, quotes: [...oldLive.quotes.map(quote => ({ ...quote,
-      receivedMonotonicMs: 18_000 })), ...latestPrematch] };
+      receivedMonotonicMs: 18_000,sourceTimestampMs:18000 })), ...latestPrematch] };
     expect(nextRankingDeadlineMs({ events: [{ ...event, catalogs: [recent] }], verified: new Map(),
       nowMs: 22_000 })).toBe(23_000);
   });
@@ -181,6 +181,67 @@ describe("nextRankingDeadlineMs", () => {
 });
 
 describe("rankTicketsForEvent", () => {
+  it("applies the live limit when native fixture metadata promotes an old prematch quote", () => {
+    const event=comparisonEvent(),sourceCell=event.rows[0]!.cells[0]!;
+    const sourceEvent={...providerEvent,providerEventId:sourceCell.market.providerEventId,isLive:true};
+    const source={dataMode:"LIVE" as const,accountId:"SABA",provider:"SABA" as const,category:"FOOTBALL" as const,
+      comparisonState:"AWAITING_SECOND_PROVIDER" as const,observedAtMs:10000,observedMonotonicMs:1,
+      rejectedMarketCount:0,events:[sourceEvent],markets:[],quotes:sourceCell.quotes};
+    const ticket=rankTicketsForEvent({event:{...event,catalogs:[source]},verified:new Map(),movements:[],
+      selectedProviders:new Set(["SABA","SBOBET"]),observationPolicy:policy,nowMs:16000,urgent:false})
+      .find(ticket => ticket.key === event.rows[0]!.key)!;
+    expect(ticket.plan).toBeNull();
+  });
+  it.each(["SABA","SBOBET","APSPORT","BTI","CMD","IM"] as const)("keeps %s publication heartbeats from renewing old receipts", provider => {
+    const time=100000;
+    const native=cell("SABA","-0.5").quotes.map(quote => ({...quote,provider,
+      sourceTimestampMs:null,receivedMonotonicMs:1000}));
+    const peer=cell(provider === "SABA" ? "SBOBET" : "SABA","-0.5");
+    const sourceCell={...cell("SABA","-0.5"),provider,market:{...cell("SABA","-0.5").market,provider},quotes:native};
+    const event={...comparisonEvent(),event:{...providerEvent,startAtUtcMs:time+3600000},
+      rows:[{...row(1),line:"-0.5",cells:[sourceCell,peer]}],catalogs:[{dataMode:"LIVE" as const,accountId:provider,provider,
+        category:"FOOTBALL" as const,comparisonState:"AWAITING_SECOND_PROVIDER" as const,
+        observedAtMs:time,observedMonotonicMs:91000,rejectedMarketCount:0,events:[],markets:[],quotes:native}]};
+    const ticket=rankTicketsForEvent({event,verified:new Map(),movements:[],
+      selectedProviders:new Set([provider,peer.provider]),observationPolicy:policy,nowMs:time,urgent:true})[0]!;
+    expect(ticket.plan).toBeNull();
+    expect(ticket.observationAgeMs).toBe(90000);
+    expect(ticket.auditRow?.cells[0]!.quotes[0]!.receivedMonotonicMs).toBe(1000);
+  });
+  it("uses the older source clock even when the paired publication anchor is current", () => {
+    const event=comparisonEvent();
+    const first=event.rows[0]!.cells[0]!;
+    const anchored={...event,catalogs:[{dataMode:"LIVE" as const,accountId:"SABA",provider:"SABA" as const,
+      category:"FOOTBALL" as const,comparisonState:"AWAITING_SECOND_PROVIDER" as const,
+      observedAtMs:100000,observedMonotonicMs:1,rejectedMarketCount:0,events:[],markets:[],quotes:first.quotes}]};
+    expect(rankTicketsForEvent({event:anchored,verified:new Map(),movements:[],
+      selectedProviders:new Set(["SABA","SBOBET"]),observationPolicy:policy,nowMs:100000})[0]!.plan).toBeNull();
+  });
+  it("retains the age of stale-source evidence without restoring eligibility", () => {
+    const event=comparisonEvent();
+    const oldCell={...event.rows[0]!.cells[0]!,quotes:event.rows[0]!.cells[0]!.quotes.map(q => ({...q,sourceTimestampMs:1000}))};
+    const source={dataMode:"LIVE" as const,accountId:"SABA",provider:"SABA" as const,category:"FOOTBALL" as const,
+      comparisonState:"AWAITING_SECOND_PROVIDER" as const,snapshotState:"STALE" as const,
+      observedAtMs:10000,observedMonotonicMs:1,rejectedMarketCount:0,events:[],markets:[],quotes:oldCell.quotes};
+    const ticket=rankTicketsForEvent({event:{...event,rows:[{...event.rows[0]!,cells:[oldCell,event.rows[0]!.cells[1]!]}],catalogs:[source]},
+      verified:new Map(),movements:[],selectedProviders:new Set(["SABA","SBOBET"]),observationPolicy:policy,nowMs:10000})[0]!;
+    expect(ticket.plan).toBeNull();
+    expect(ticket.observationAgeMs).toBe(9000);
+  });
+  it("expires every football source on its real receipt and retains separate historical ROI", () => {
+    const event = comparisonEvent();
+    const time = 100000;
+    const input = {event:{...event,event:{...event.event,startAtUtcMs:time+7*3600000}},
+      verified:new Map(),movements:[],selectedProviders:new Set(["SABA","SBOBET"] as const),
+      observationPolicy:policy,nowMs:time,urgent:false};
+    expect(rankTicketsForEvent(input)[0]!.plan).not.toBeNull();
+    const promoted = rankTicketsForEvent({...input,urgent:true,
+      event:{...input.event,event:{...input.event.event,startAtUtcMs:time+3600000}}})[0]!;
+    expect(promoted.plan).toBeNull();
+    expect(promoted.historicalPlan).not.toBeNull();
+    expect(promoted.state).toBe("OBSERVATION");
+    expect(promoted.observationAgeMs).toBe(90000);
+  });
   it("reads each global sort value once and preserves exact decimal order", () => {
     const event = comparisonEvent(); let roiReads = 0; let profitReads = 0; let movementReads = 0;
     const tickets = Array.from({ length: 48 }, (_, index) => {
@@ -370,7 +431,7 @@ describe("rankTicketsForEvent", () => {
         cells: [sabaCell, apCell], bestBySelection: { HOME: "SABA", AWAY: "APSPORT" },
         margin: 0.25, crossBook: true }],
       catalogs: [{ dataMode: "LIVE", accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT",
-        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: nowMs,
+        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: nowMs, observedMonotonicMs: 6002,
         snapshotState: "FRESH", rejectedMarketCount: 0, events: [], markets: [],
         quotes: [...apCell.quotes, { ...freshApCell.quotes[0]!, providerEventId: heartbeatEventId,
           providerMarketId: "another-market", providerSelectionId: "another-selection" }] }]
@@ -401,27 +462,27 @@ describe("rankTicketsForEvent", () => {
     const expiredAfterWarm = rankTicketsForEvent({ ...input, nowMs: nowMs + 5_001,
       event: eventWithAp(freshApCell) });
     expect(expiredAfterWarm[0]?.plan).toBeNull();
-    expect(expiredAfterWarm[0]?.reason).toBe("APSPORT quote freshness not confirmed");
+    expect(expiredAfterWarm[0]?.reason).toBe("Football quote freshness not confirmed");
   });
 
   it.each([true, false])("does not revive an untouched APSPORT event when another event renews (live=%s)", isLive => {
     const own = cell("APSPORT", "-0.5", { isLive, receivedMonotonicMs: 1_000 });
     const otherQuotes = cell("APSPORT", "-1.5", { isLive, receivedMonotonicMs: 21_000 }).quotes
-      .map(quote => ({ ...quote, providerEventId: "another-event" }));
+      .map(quote => ({ ...quote, providerEventId: "another-event",sourceTimestampMs:21000 }));
     const withReceipt = (apCell: ComparisonCell): ComparisonEvent => ({ ...comparisonEvent(),
       providers: ["SABA", "APSPORT"],
       rows: [{ key: "ap-row", marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5",
-        cells: [cell("SABA", "-0.5", { isLive }), apCell],
+        cells: [{...cell("SABA", "-0.5", { isLive }),quotes:cell("SABA", "-0.5", { isLive }).quotes.map(q => ({...q,sourceTimestampMs:21000,isLive:false}))}, apCell],
         bestBySelection: { HOME: "SABA", AWAY: "APSPORT" }, margin: 0.25, crossBook: true }],
       catalogs: [{ dataMode: "LIVE", accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT",
-        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 21_000,
+        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 21_000, observedMonotonicMs: 21000,
         snapshotState: "FRESH", rejectedMarketCount: 0, events: [], markets: [],
         quotes: [...apCell.quotes, ...otherQuotes] }] });
     const input = { verified: new Map<string, VerifiedTicketEvidence>(), movements: [],
       selectedProviders: new Set(["SABA", "APSPORT"] as const), observationPolicy: policy, nowMs: 22_000 };
     expect(rankTicketsForEvent({ ...input, event: withReceipt(own) })[0]).toMatchObject({
-      plan: null, reason: "APSPORT quote freshness not confirmed" });
-    const confirmed = withReceipt(cell("APSPORT", "-0.5", { isLive, receivedMonotonicMs: 21_000 }));
+      plan: null, reason: "Football quote freshness not confirmed" });
+    const confirmed = withReceipt({...cell("APSPORT", "-0.5", { isLive, receivedMonotonicMs: 21_000 }),quotes:cell("APSPORT", "-0.5", { isLive, receivedMonotonicMs: 21_000 }).quotes.map(q => ({...q,sourceTimestampMs:21000}))});
     expect(rankTicketsForEvent({ ...input, event: confirmed })[0]?.plan).not.toBeNull();
     const deadline = 21_000 + (isLive ? 5_000 : 15_000);
     expect(rankTicketsForEvent({ ...input, event: confirmed, nowMs: deadline })[0]?.plan).not.toBeNull();
@@ -441,7 +502,7 @@ describe("rankTicketsForEvent", () => {
         events: [], markets: [], quotes: own.quotes }] };
     const input = { event, verified: new Map<string, VerifiedTicketEvidence>(), movements: [],
       selectedProviders: new Set(["SABA", "APSPORT"] as const), observationPolicy: policy, nowMs: 22_000 };
-    expect(rankTicketsForEvent(input)[0]).toMatchObject({ plan: null, reason: "APSPORT quote freshness not confirmed" });
+    expect(rankTicketsForEvent(input)[0]).toMatchObject({ plan: null, reason: "Football quote freshness not confirmed" });
     expect(nextRankingDeadlineMs({ events: [event], verified: input.verified, nowMs: input.nowMs })).toBeNull();
   });
 
@@ -471,7 +532,7 @@ describe("rankTicketsForEvent", () => {
         bestBySelection: { HOME: "SABA", AWAY: "APSPORT" },
         margin: 0.25, crossBook: true }],
       catalogs: [{ dataMode: "LIVE", accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT",
-        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: nowMs,
+        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: nowMs, observedMonotonicMs: 6002,
         snapshotState: "FRESH", rejectedMarketCount: 0, events: [], markets: [], quotes: catalogQuotes }]
     };
 

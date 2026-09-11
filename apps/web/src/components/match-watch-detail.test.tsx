@@ -28,14 +28,14 @@ const quote = (selection: string, rawOdds: string, status: "OPEN" | "SUSPENDED" 
 function catalog(observedAtMs: number, home = "2.1", status: "OPEN" | "SUSPENDED" = "OPEN"): LiveCatalogResponse {
   return {
     dataMode: "LIVE", accountId: "private-account", provider: "CMD", category: "FOOTBALL",
-    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs, rejectedMarketCount: 0, events: [event],
+    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs, observedMonotonicMs: 100, rejectedMarketCount: 0, events: [event],
     markets: [{ ...market, status }],
     quotes: [quote("HOME", home, status), quote("DRAW", "3.2", status), quote("AWAY", "3.4", status)]
   };
 }
 
 function totalCatalog(provider: "SABA" | "SBOBET" | "CMD" | "APSPORT", accountId: string, over: string, under: string,
-  status: "OPEN" | "SUSPENDED" = "OPEN", observedAtMs = 1_000): LiveCatalogResponse {
+  status: "OPEN" | "SUSPENDED" = "OPEN", observedAtMs = 10_000): LiveCatalogResponse {
   const providerEventId = `${provider}-total-event`;
   const providerMarketId = `${provider}-total-market`;
   const totalMarket: ProviderMarket = { ...market, provider, providerEventId, providerMarketId,
@@ -46,7 +46,7 @@ function totalCatalog(provider: "SABA" | "SBOBET" | "CMD" | "APSPORT", accountId
     providerSelectionId: `${provider}-${selection}`, marketType: "FT_AH", line: "-0.5"
   });
   return { dataMode: "LIVE", accountId, provider, category: "FOOTBALL",
-    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs, rejectedMarketCount: 0,
+    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs, observedMonotonicMs: 100, rejectedMarketCount: 0,
     events: [totalEvent], markets: [totalMarket], quotes: [makeQuote("HOME", over), makeQuote("AWAY", under)] };
 }
 
@@ -72,10 +72,22 @@ afterEach(() => {
 });
 
 describe("MatchWatchDetail", () => {
+  it("uses the global nonurgent tier in detail even when this is the only opened match", async () => {
+    const near = (source:LiveCatalogResponse) => ({...source,events:source.events.map(event => ({...event,
+      isLive:false,liveState:null,startAtUtcMs:10000+3600000})),quotes:source.quotes.map(quote => ({...quote,isLive:false}))});
+    const cmd=near(totalCatalog("CMD","cmd-account","2.20","1.70"));
+    const ap=near(totalCatalog("APSPORT","ap-account","1.75","2.20"));
+    const comparison=buildComparisonEvents([cmd,ap])[0]!;
+    const {container}=render(<MatchWatchDetail accountId="cmd-account" catalogApi={{read:vi.fn()}}
+      initialCatalog={cmd} comparisonCatalogs={[cmd,ap]} comparisonEvent={comparison}
+      onBack={() => undefined} providerEventId="CMD-total-event" externallyRefreshed urgent={false} />);
+    await act(async () => {await vi.advanceTimersByTimeAsync(16000);});
+    expect(container.querySelector(".watch-prices")!.textContent).toContain("ROI 10.00%");
+  });
   it.each([[true, 5_001], [false, 15_001]] as const)("keeps a waiting exact pair after AP %s prices expire without a second read", async (isLive, elapsed) => {
     const asPhase = (source: LiveCatalogResponse): LiveCatalogResponse => ({ ...source,
       snapshotState: "FRESH", events: source.events.map(item => item.category === "FOOTBALL" ? { ...item, isLive,
-        liveState: isLive ? item.liveState : null } : item), quotes: source.quotes.map(item => ({ ...item, isLive })) });
+        startAtUtcMs:10000+3600000, liveState: isLive ? item.liveState : null } : item), quotes: source.quotes.map(item => ({ ...item, isLive })) });
     const cmd = asPhase(totalCatalog("CMD", "cmd-account", "2.20", "1.70", "OPEN", 10_000));
     const ap = asPhase(totalCatalog("APSPORT", "ap-account", "1.75", "2.20", "OPEN", 10_000));
     const comparison = buildComparisonEvents([cmd, ap])[0]!;
@@ -91,7 +103,7 @@ describe("MatchWatchDetail", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
 
     expect(prices().querySelectorAll(".watch-odds-ticket")).toHaveLength(1);
-    expect(prices().textContent).toContain("APSPORT: chờ xác nhận giá mới");
+    expect(prices().textContent).toContain("Waiting for fresh source prices");
     expect(prices().textContent).not.toContain("ROI");
     expect(prices().textContent).not.toContain("Worst");
     expect(prices().querySelectorAll(".watch-odds-ticket--profitable")).toHaveLength(0);

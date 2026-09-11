@@ -10,6 +10,7 @@ export interface ProviderAutomaticRecoveryTiming {
 }
 
 export interface ProviderRecoverySnapshot {
+  readonly dataRefreshPending?: boolean;
   readonly phase: "IDLE" | "COUNTDOWN" | "RECOVERING" | "WAITING" | "MANUAL" | "BLOCKED";
   readonly countdownKind: ProviderRecoveryCountdownKind | null;
   readonly countdownSeconds: number | null;
@@ -39,6 +40,7 @@ interface ProviderRecoveryState {
   countdownKind: ProviderRecoveryCountdownKind | null;
   countdownDeadlineMs: number | null;
   manualReadyAtMs: number;
+  manualRequestedAtMs: number | null;
   lastError: string | null;
   outageGeneration: number;
   off: boolean;
@@ -67,7 +69,7 @@ export class ProviderSourceRecoveryCoordinator {
     for (const source of sources) {
       const provider = source.provider as RecoverableProvider;
       const state = this.#state(provider);
-      if (state.phase === "RECOVERING" && state.recoveryMode === "MANUAL") {
+      if ((state.phase === "RECOVERING" || state.phase === "WAITING") && state.recoveryMode === "MANUAL") {
         state.off = source.sessionState !== "ACTIVE";
         continue;
       }
@@ -102,6 +104,15 @@ export class ProviderSourceRecoveryCoordinator {
     }
   }
 
+  confirmData(provider: RecoverableProvider, observedAtMs: number): void {
+    if (this.#disposed) return;
+    const state = this.#states.get(provider);
+    if (state === undefined || state.recoveryMode !== "MANUAL" || state.phase !== "WAITING" ||
+      state.manualRequestedAtMs === null || !Number.isFinite(observedAtMs) ||
+      observedAtMs <= state.manualRequestedAtMs) return;
+    this.#markActive(provider, state);
+  }
+
   snapshot(provider: RecoverableProvider): ProviderRecoverySnapshot {
     const state = this.#state(provider);
     const nowMs = this.#now();
@@ -109,6 +120,8 @@ export class ProviderSourceRecoveryCoordinator {
       this.#loadManualRetryAtMs(provider, state.manualReadyAtMs));
     return {
       phase: state.phase,
+      ...(state.recoveryMode === "MANUAL" && (state.phase === "RECOVERING" || state.phase === "WAITING")
+        ? { dataRefreshPending: true } : {}),
       countdownKind: state.countdownKind,
       countdownSeconds: state.countdownDeadlineMs === null ? null
         : Math.max(0, Math.ceil((state.countdownDeadlineMs - nowMs) / 1_000)),
@@ -132,6 +145,7 @@ export class ProviderSourceRecoveryCoordinator {
       state.automaticTiming = this.#newAutomaticTiming(nowMs);
       this.#saveAutomaticTiming(provider, state.automaticTiming);
     }
+    state.manualRequestedAtMs = nowMs;
     state.manualReadyAtMs = nowMs + MANUAL_RECOVERY_COOLDOWN_MS;
     this.#saveManualRetryAtMs(provider, state.manualReadyAtMs);
     state.phase = "RECOVERING";
@@ -156,7 +170,7 @@ export class ProviderSourceRecoveryCoordinator {
     const existing = this.#states.get(provider);
     if (existing !== undefined) return existing;
     const state: ProviderRecoveryState = {
-      phase: "IDLE", recoveryMode: null,
+      phase: "IDLE", recoveryMode: null, manualRequestedAtMs: null,
       automaticAttemptsRemaining: this.#loadAutomaticAttemptsRemaining(provider, 1),
       automaticTiming: this.#loadAutomaticTiming(provider),
       countdownKind: null, countdownDeadlineMs: null,
@@ -249,6 +263,17 @@ export class ProviderSourceRecoveryCoordinator {
     const state = this.#state(provider);
     if (state.outageGeneration !== outageGeneration) return;
     this.#clearCountdown(state);
+    if (mode === "MANUAL" && error === null) {
+      // A bounded DATA queue may legitimately take longer than baseline recovery.
+      // Keep waiting for observed data; queued admission has no escalation timer.
+      state.phase = "WAITING";
+      state.countdownKind = null;
+      state.countdownDeadlineMs = null;
+      state.recoveryMode = "MANUAL";
+      state.lastError = null;
+      this.#emit();
+      return;
+    }
     state.recoveryMode = null;
     state.lastError = error === null ? null : recoveryError(error);
     if (!state.off) {

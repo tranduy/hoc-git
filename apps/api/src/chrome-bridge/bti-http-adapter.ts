@@ -106,7 +106,8 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
     };
     const unresolvedRows = isDetail && Array.isArray(root?.data) ? root.data.filter((row): row is unknown[] =>
       Array.isArray(row) && !resolvedEventIds.has(nativeEventId(row[0])) && !closedEventIds.has(nativeEventId(row[0]))) : [];
-    let part: BtiPart = { ...emptyCatalog(envelope.observedAtMs), requestedAtMs: envelope.observedAtMs,
+    let part: BtiPart = { ...emptyCatalog(envelope.observedAtMs), observedMonotonicMs: envelope.receivedMonotonicMs,
+      requestedAtMs: envelope.observedAtMs,
       nativeMarketIds: extractBtiNativeMarketIdentities(payload), nativeMarketObservations, closedEventIds, isDetail,
       ...(unresolvedRows.length === 0 ? {} : { unresolvedDetail: { rows: unresolvedRows,
         receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence } }) };
@@ -260,8 +261,10 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
       if (existing !== undefined && placeholderParticipants(event) && !placeholderParticipants(existing)) continue;
       mergedEvents.set(event.providerEventId, event);
     }
+    const newestReceipt = all.reduce((latest, part) => part.observedAtMs > latest.observedAtMs ? part : latest);
     const catalog: ObservedProviderCatalog = {
-      ...emptyCatalog(Math.max(...all.map((value) => value.observedAtMs))),
+      ...emptyCatalog(newestReceipt.observedAtMs),
+      ...(newestReceipt.observedMonotonicMs === undefined ? {} : { observedMonotonicMs: newestReceipt.observedMonotonicMs }),
       rejectedMarketCount: all.reduce((sum, value) => sum + value.rejectedMarketCount, 0),
       // The public roster normally owns identity, but its hidden rows can expose
       // only generic Home/Away labels. In that case retain the hydrated names
@@ -301,7 +304,8 @@ function withClock(part: BtiPart, clock: { readonly requestedAtMs: number; reado
   // These are collector receipt times, not provider-origin timestamps. Preserve
   // null sourceTimestampMs and translate cache age onto the receiver's clock.
   const receivedMonotonicMs = envelope.receivedMonotonicMs - (envelope.observedAtMs - clock.observedAtMs);
-  return { ...part, ...clock,
+  const { observedMonotonicMs: _oldAnchor, ...retained } = part;
+  return { ...retained, ...clock, ...(receivedMonotonicMs >= 0 ? { observedMonotonicMs: receivedMonotonicMs } : {}),
     quotes: part.quotes.map((quote) => ({ ...quote, receivedMonotonicMs })),
     ...(part.unresolvedDetail === undefined ? {} : { unresolvedDetail: { ...part.unresolvedDetail, receivedMonotonicMs } }),
     ...(part.nativeMarketObservations === undefined ? {} : {

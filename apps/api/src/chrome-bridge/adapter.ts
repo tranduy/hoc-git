@@ -11,6 +11,8 @@ export type DecodedCatalogUpdate = {
   readonly generation?: string;
   readonly provenance?: FeedProvenance;
   readonly providerTimestampMs?: number | null;
+  /** Scoped SABA update includes its entire retained same-epoch view; omissions already reconciled. */
+  readonly completeRetainedView?: true;
   readonly completeSweepEvidence?: boolean;
   /** Proven unfiltered Running/Today and Early rosters from one CMD document. */
   readonly completeRosterEvidence?: boolean;

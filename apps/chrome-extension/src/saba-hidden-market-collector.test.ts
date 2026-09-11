@@ -55,6 +55,80 @@ function refreshed(value: SabaCollectorRosterOwner, clock: number,
 }
 
 describe("SabaHiddenMarketCollector", () => {
+  it("reconciles new main owners on a bounded cadence before scheduled visits", async () => {
+    let now = 100_000, mono = 0, ids = ["one"];
+    const page = adapter([], [], {
+      readRoster: async period => ({ binding: BINDING, period, selectedPrematch: true,
+        owners: period === "TODAY" ? ids.map(id => ({ ...owner(id, "ELIGIBLE_MORE", ++mono),
+          record: { ...record(id), providerTimezoneOffsetMinutes: 420 } })) : [] }),
+      restoreToday: async () => ({ binding: BINDING, selectedPrematch: true, rosterMatchIds: ids })
+    });
+    const reads = vi.spyOn(page, "readRoster");
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, shouldCaptureOwner: () => false, nowMs: () => now });
+    const first = await collector.advance(1);
+    const firstGeneration = first.mainRosterItems?.at(-1)?.collectorGeneration;
+    expect(first.mainRosterChanged).toBe(true);
+    ids = ["one", "two"];
+    now += 29_999;
+    expect((await collector.advance(1)).scheduledVisits).toEqual([]);
+    expect(reads).toHaveBeenCalledTimes(4);
+    now += 1;
+    const second = await collector.advance(1);
+    expect(second.mainRosterChanged).toBe(true);
+    expect(second.mainRosterItems?.at(-1)?.collectorGeneration).not.toBe(firstGeneration);
+    expect(second.mainRosterItems?.filter(item => item.kind === "CAPTURE").map(item => item.ownerMatchId))
+      .toEqual(["one", "two"]);
+    expect(collector.hiddenMarketsComplete).toBe(false);
+  });
+
+  it("defers far hidden visits, revisits due owners, and preserves actual capture clocks", async () => {
+    const today = ["far", "near"].map((id, index) => ({ ...owner(id, "ELIGIBLE_MORE", index + 1),
+      record: { ...record(id), providerTimezoneOffsetMinutes: 420 } }));
+    let now = 1_788_800_001_000, promoted = false, manual = false;
+    let mono = 100;
+    const page = adapter(today, [], { captureOwner: async (period, value) => ({
+      binding: BINDING, period, ownerMatchId: value.ownerMatchId,
+      controlOpened: true, terminalControlState: "RESTORED_CLOSED", restored: true,
+      safeControlOutcome: "OWNER_GROUPS_EXPANDED", observedAtMs: now,
+      capture: { record: record(value.ownerMatchId), kickoffDate: value.kickoffDate,
+        capturedAtMs: now, capturedMonotonicMs: mono++ }
+    }) });
+    const capture = vi.spyOn(page, "captureOwner");
+    const completed = vi.fn(() => { manual = false; });
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true,
+      shouldCaptureOwner: (_period, value, last) => (value.ownerMatchId === "near" || promoted) &&
+        (manual || last === null || now - last >= 10_000),
+      onCaptured: completed, sortOwners: ids => [...ids].reverse() });
+    const main = await collector.advance(1);
+    expect(collector.mainRosterComplete).toBe(true);
+    expect(capture).not.toHaveBeenCalled();
+    const first = await collector.advance(1);
+    expect(capture.mock.calls.map(([, value]) => value.ownerMatchId)).toEqual(["near"]);
+    expect(first.scheduledCaptureItems?.[0]?.capturedAtMs).toBe(now);
+    expect(first.scheduledItems?.at(-1)).toMatchObject({ kind: "SCHEDULED_OWNER_TERMINAL",
+      collectorGeneration: `${GENERATION}:scheduled:1`, mainRosterGeneration: `${GENERATION}:main`,
+      owners: [{ period: "TODAY", ownerMatchId: "near" }], hiddenMarketsComplete: false });
+    expect(first.scheduledItems?.filter(item => item.kind === "CAPTURE")
+      .map(item => item.capturedAtMs)).toEqual([today[1]!.capturedAtMs, now]);
+    expect(first.mainRosterItems).toEqual(main.mainRosterItems);
+    expect(collector.hiddenMarketsComplete).toBe(false);
+    expect(terminals(first.candidateItems)).toEqual([]);
+    now += 9_999;
+    expect((await collector.advance(1)).scheduledCaptureItems).toEqual([]);
+    expect(completed).toHaveBeenCalledTimes(1);
+    now += 1;
+    expect((await collector.advance(1)).scheduledCaptureItems?.[0]?.capturedAtMs).toBe(now);
+    manual = true;
+    await collector.advance(1);
+    expect(capture).toHaveBeenCalledTimes(3);
+    promoted = true;
+    await collector.advance(1);
+    expect(capture.mock.calls.at(-1)?.[1].ownerMatchId).toBe("far");
+    expect(first.scheduledCaptureItems?.[0]?.capturedAtMs).toBe(1_788_800_001_000);
+  });
+
   it("publishes both reconciled main rosters before any More action and keeps that proof after More fails", async () => {
     const today = [{ ...owner("today-main", "ELIGIBLE_MORE", 1),
       record: { ...record("today-main"), providerTimezoneOffsetMinutes: 420 } }];

@@ -63,6 +63,20 @@ describe("IM native detail acquisition", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
   afterEach(() => { vi.useRealTimers(); });
 
+  it("keeps both native bulk markets healthy when the plan defers all known far details", async () => {
+    const h = harness();
+    h.globals.document.documentElement.__fieldlineCollectionSchedulerV1 = {
+      due: () => false, policy: () => ({ refreshMs: null }), sort: (ids: string[]) => ids,
+      completed: vi.fn()
+    };
+    const run = h.tick("source:far:document:1", { allowDetails: false });
+    await h.commit([event(1)]);
+    expect((await run).responses).toHaveLength(2);
+    expect(h.mains().map(r => r.body.Market)).toEqual([1, 2]);
+    expect(h.mains().every(r => typeof r.body.DateFrom === "string" && !("DateTo" in r.body))).toBe(true);
+    expect(h.details()).toHaveLength(0);
+  });
+
   it.each([true, false, undefined, null, "false", 0])(
     "preserves native IM market lock evidence through compact publication: %j", async il => {
       const h = harness();

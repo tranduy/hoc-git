@@ -61,7 +61,7 @@ describe("SabaQuoteClockMapper", () => {
       receivedMonotonicMs: envelopeSourceClock
     };
 
-    mapper.observe([original], envelope);
+    expect(mapper.observe([original], envelope)).toEqual({ observedAtMs: 49_950, observedMonotonicMs: 1_950 });
 
     expect(mapper.localize(original)).toEqual({ ...original, receivedMonotonicMs: 1_930 });
     expect(original.receivedMonotonicMs).toBe(quoteSourceClock);

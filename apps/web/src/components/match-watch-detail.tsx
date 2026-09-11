@@ -45,27 +45,29 @@ export interface ComparisonBook {
   readonly hasExactEvent: boolean;
 }
 
-function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stakePolicy, clock }: {
+function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stakePolicy, clock, urgent }: {
   readonly comparison: ComparisonEvent;
   readonly selectedProviders: ReadonlySet<ProviderId>;
   readonly lagSignals: readonly LagSignal[];
   readonly stakePolicy: FixedBaseStakePolicy;
   readonly clock: () => number;
+  readonly urgent: boolean | undefined;
 }) {
   const [, updateClock] = useState(0);
   const nowMs = clock();
   useEffect(() => {
-    const deadlineMs = nextRankingDeadlineMs({ events: [comparison], verified: new Map(), nowMs });
+    const deadlineMs = nextRankingDeadlineMs({ events: [comparison], verified: new Map(), nowMs,
+      ...(urgent === undefined ? {} : {urgentEventKeys:new Set(urgent ? [comparison.key] : [])}) });
     if (deadlineMs === null) return;
     // AP prices remain valid at the deadline itself; wake just after it.
     const timer = window.setTimeout(() => updateClock(value => value + 1), Math.max(16, deadlineMs + 1 - clock()));
     return () => window.clearTimeout(timer);
-  }, [clock, comparison, nowMs]);
+  }, [clock, comparison, nowMs, urgent]);
   const money = (value: string): string => `${formatProfitAmount(value)} VND`;
   const event = { ...comparison, rows: comparison.observedRows.map(observedRow =>
     comparison.rows.find(candidate => candidate.key === observedRow.key) ?? observedTicketAsComparisonRow(observedRow)) };
   const tickets = rankTicketsForEvent({ event, selectedProviders, observationPolicy: stakePolicy,
-    verified: new Map(), movements: [], nowMs, limit: event.rows.length });
+    verified: new Map(), movements: [], nowMs, ...(urgent === undefined ? {} : {urgent}), limit: event.rows.length });
   const pairedTickets = topRankedTicketItems([{ event, tickets, bestVerifiedProfit: null }], event.rows.length);
   if (pairedTickets.length === 0) return null;
   return <><h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
@@ -75,8 +77,8 @@ function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stak
     if (plan === null) return <article className="watch-odds-ticket" key={ticket.key}>
       <header className="watch-odds-ticket__header"><div><strong>{ticketMarketLabel(displayRow.marketType)}</strong>
         <small>{displayRow.line === null ? "Không line" : `Kèo ${displayRow.line}`}</small></div></header>
-      <p role="status">{ticket.reason === "APSPORT quote freshness not confirmed"
-        ? "APSPORT: chờ xác nhận giá mới" : "Đã ghép kèo; chờ đủ giá đối ứng để tính tiền"}</p>
+      <p role="status">{ticket.reason === "Football quote freshness not confirmed"
+        ? "Waiting for fresh source prices" : "Đã ghép kèo; chờ đủ giá đối ứng để tính tiền"}</p>
       <div className="watch-odds-grid">{[...new Set(displayRow.cells.map(cell => cell.provider))]
         .filter(provider => selectedProviders.has(provider)).map(provider => <ProviderBrand compact key={provider} provider={provider} />)}</div>
     </article>;
@@ -157,6 +159,7 @@ export function MatchWatchDetail({
   ticketRealtimeCheckApi = defaultTicketRealtimeCheckApi,
   ticketReportApi,
   externallyRefreshed = false,
+  urgent,
   storage = window.localStorage,
   clock = systemClock
 }: {
@@ -178,6 +181,7 @@ export function MatchWatchDetail({
   readonly ticketRealtimeCheckApi?: TicketRealtimeCheckApiLike;
   readonly ticketReportApi?: TicketReportApiLike | undefined;
   readonly externallyRefreshed?: boolean;
+  readonly urgent?: boolean;
   readonly storage?: Storage;
   readonly clock?: () => number;
 }) {
@@ -389,7 +393,7 @@ export function MatchWatchDetail({
       <div className="match-watch__layout">
         <section className="watch-prices watch-prices--compact-grid" aria-labelledby="current-prices-heading">
           {currentComparison !== undefined && effectiveBooks.some((book) => book.connected && selectedProviders.has(book.provider))
-            ? <CompactComparisonGrid comparison={currentComparison} lagSignals={lagSignals}
+            ? <CompactComparisonGrid comparison={currentComparison} lagSignals={lagSignals} urgent={urgent}
               selectedProviders={selectedProviders} stakePolicy={stakePolicy} clock={clock} /> : <><h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
             <div className="provider-columns">
             <article className="provider-column">

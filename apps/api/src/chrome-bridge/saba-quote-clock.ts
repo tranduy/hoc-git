@@ -28,7 +28,9 @@ export class SabaQuoteClockMapper {
     }));
   }
 
-  observe(quotes: readonly ProviderQuote[], envelope: EnvelopeClock): void {
+  observe(quotes: readonly ProviderQuote[], envelope: EnvelopeClock): {
+    readonly observedAtMs: number; readonly observedMonotonicMs?: number
+  } {
     const now = this.#now();
     if (
       !validNonnegativeClock(now.monotonicNowMs) ||
@@ -54,6 +56,9 @@ export class SabaQuoteClockMapper {
       }
     }
     for (const [original, localized] of pending) this.#localized.set(original, localized);
+    const receiptMonotonicMs = now.monotonicNowMs - Math.max(0, now.wallClockNowMs - envelope.observedAtMs);
+    return { observedAtMs: envelope.observedAtMs,
+      ...(receiptMonotonicMs >= 0 ? { observedMonotonicMs: receiptMonotonicMs } : {}) };
   }
 
   localize<T extends ProviderQuote>(quote: T): T {

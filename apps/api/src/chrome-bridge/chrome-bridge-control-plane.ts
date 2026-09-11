@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { FootballCollectionPlanSchema, type FootballCollectionPlan } from "@tool-chenh/contracts";
 import type { ChromeBridgeControlMessage, ChromeBridgeEnvelope, ChromeLobbyId } from "@tool-chenh/contracts";
 import { chromeBridgeProviderAccountIdForLobby, chromeBridgeSourceIdentity, type ChromeBridgeAccountKey,
   type ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
@@ -32,7 +34,53 @@ interface AttachedAuthoritySlot {
   candidate: AttachedAuthoritySource | null;
 }
 
+export interface DataRefreshReceipt {
+  readonly requested: 1;
+  readonly status: "QUEUED";
+  readonly requestId: string;
+  readonly requestedAtMs: number;
+}
+
 export class ChromeBridgeControlPlane {
+  readonly #collectionPlans = new Map<string, { sourceId: string; plan: FootballCollectionPlan; socket: BridgeControlSocket }>();
+  readonly #manualRefreshes = new Map<string, DataRefreshReceipt>();
+
+  collectionSourceId(lobby: ChromeLobbyId): string | null {
+    return this.#attachedSources().find(source => source.lobby === lobby && source.socket.readyState === 1)?.sourceId ?? null;
+  }
+
+  setCollectionPlan(sourceId: string, plan: FootballCollectionPlan): number {
+    const validated = FootballCollectionPlanSchema.parse(plan);
+    if (validated.manualRequestId !== undefined) throw new Error("MANUAL_REQUEST_RESERVED");
+    const socket = this.#exactSocket(sourceId);
+    const identity = chromeBridgeSourceIdentity(sourceId);
+    if (socket?.readyState !== 1 || identity === null) return 0;
+    const previous = this.#collectionPlans.get(identity.accountId);
+    if (previous?.sourceId === sourceId && validated.revision <= previous.plan.revision) {
+      throw new Error("STALE_COLLECTION_PLAN");
+    }
+    try { socket.send(JSON.stringify({ version: 1, kind: "SET_COLLECTION_PLAN", sourceId, plan: validated })); }
+    catch { return 0; }
+    this.#collectionPlans.set(identity.accountId, { sourceId, plan: validated, socket });
+    return 1;
+  }
+
+  refreshSourceData(sourceId: string, nowMs: number): DataRefreshReceipt {
+    const socket = this.#exactSocket(sourceId);
+    const identity = chromeBridgeSourceIdentity(sourceId);
+    if (socket?.readyState !== 1 || identity === null) throw new Error("SOURCE_NOT_ATTACHED");
+    const current = this.#collectionPlans.get(identity.accountId);
+    if (current?.sourceId !== sourceId) throw new Error("PLAN_NOT_READY");
+    const previous = this.#manualRefreshes.get(identity.accountId);
+    if (previous !== undefined && nowMs - previous.requestedAtMs < 60_000) return previous;
+    const receipt: DataRefreshReceipt = { requested: 1, status: "QUEUED", requestId: randomUUID(), requestedAtMs: nowMs };
+    try { socket.send(JSON.stringify({ version: 1, kind: "SET_COLLECTION_PLAN", sourceId,
+      plan: { ...current.plan, manualRequestId: receipt.requestId } })); }
+    catch { throw new Error("SOURCE_NOT_ATTACHED"); }
+    this.#manualRefreshes.set(identity.accountId, receipt);
+    return receipt;
+  }
+
   readonly #sourcesByAccount = new Map<ChromeBridgeAccountKey, AttachedSource>();
   readonly #authoritySourcesByAccount = new Map<ChromeBridgeProviderAccountId, AttachedAuthoritySlot>();
   #installationSocket: BridgeControlSocket | null = null;
@@ -63,6 +111,7 @@ export class ChromeBridgeControlPlane {
     const identity = chromeBridgeSourceIdentity(sourceId);
     if (identity === null) return;
     this.#sourcesByAccount.set(identity.accountKey, { sourceId, lobby: identity.lobby, socket });
+    this.#replayCollectionPlan({ sourceId, lobby: identity.lobby, socket });
   }
 
   attachAuthority(identity: AuthorityIdentity, observation: AuthorityObservation,
@@ -361,6 +410,17 @@ export class ChromeBridgeControlPlane {
     return true;
   }
 
+  #replayCollectionPlan(source: AttachedSource): void {
+    const identity = chromeBridgeSourceIdentity(source.sourceId);
+    if (identity === null || source.socket.readyState !== 1) return;
+    const current = this.#collectionPlans.get(identity.accountId);
+    if (current === undefined || (current.sourceId === source.sourceId && current.socket === source.socket)) return;
+    try { source.socket.send(JSON.stringify({ version: 1, kind: "SET_COLLECTION_PLAN",
+      sourceId: source.sourceId, plan: current.plan })); }
+    catch { return; }
+    this.#collectionPlans.set(identity.accountId, { sourceId: source.sourceId, plan: current.plan, socket: source.socket });
+  }
+
   #attachedSources(): readonly AttachedSource[] {
     this.#pruneInactiveSources();
     if (this.#authorityCoordinator !== null) {
@@ -414,6 +474,7 @@ export class ChromeBridgeControlPlane {
       sameAuthorityIdentity(value.identity, authority.candidate) &&
       value.candidateToken === authority.candidateToken) ?? null;
     slot.active = active;
+    if (active !== null) this.#replayCollectionPlan(active);
     slot.candidate = candidate;
     if (active === null && candidate === null) this.#authoritySourcesByAccount.delete(accountId);
   }

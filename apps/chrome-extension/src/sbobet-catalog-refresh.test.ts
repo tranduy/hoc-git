@@ -3,6 +3,8 @@ import { SbobetCatalogRefresh, type SbobetDetailBatch, type SbobetDetailRequest,
   type SbobetDetailResponse, type SbobetRefreshOptions, type SbobetMoreRefreshOptions,
   type SbobetMoreRefreshResponse } from "./sbobet-catalog-refresh.js";
 import type { SbobetMoreBatch, SbobetMoreRequest } from "./sbobet-more-protocol.js";
+import { footballRefreshPolicy } from "@tool-chenh/contracts";
+import { createFootballCollectionScheduler } from "./football-collection-scheduler.js";
 
 const event = (eventId = "101", startAtUtcMs = 20_000) => ({ eventId, startAtUtcMs, phase: "PREMATCH" as const });
 const response = (eventId: string, markets: unknown = { "3": ["2.5 0.91*101h -0.97*101a 123456"] }): SbobetDetailResponse =>
@@ -45,6 +47,43 @@ function setupMore(overrides: Partial<SbobetMoreRefreshOptions> = {}) {
 describe("SbobetCatalogRefresh complementary More mode", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10_000); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it.each([429, 503])("preserves long HTTP %s Retry-After across every owner", async status => {
+    const requests: string[] = [];
+    const { collector } = setupMore({ maxConcurrent: 1, maxRetryAfterMs: 300_000,
+      request: async input => { requests.push(input.eventId); return requests.length === 1
+        ? { status, retryAfterMs: 3_600_000 } : moreResponse(input.eventId); } });
+    collector.setRoster({ generation: "retry", events: [event("101"), event("102")] });
+    await collector.tick();
+    expect(requests).toEqual(["101"]);
+    vi.setSystemTime(10_000 + 3_600_000 - 1);
+    await collector.tick();
+    expect(requests).toEqual(["101"]);
+    vi.setSystemTime(10_000 + 3_600_000);
+    await collector.tick();
+    expect(requests.length).toBeGreaterThan(1);
+    collector.dispose();
+  });
+
+  it("applies time tiers without losing far roster membership and coalesces manual refresh", async () => {
+    const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, Date.now);
+    const events = [event("101", Date.now() + 30 * 3_600_000), event("102", Date.now() + 80 * 3_600_000)];
+    const plan = { revision: Date.now(), events: events.map(e => ({ eventId: e.eventId,
+      startAtUtcMs: e.startAtUtcMs, isLive: false, urgent: false })) };
+    scheduler.setPlan(plan);
+    const { collector, requests } = setupMore({ collectionScheduler: () => scheduler });
+    collector.setRoster({ generation: "tiers", events });
+    await collector.tick();
+    expect(requests.map(r => r.eventId)).toEqual(["101"]);
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    await collector.tick();
+    expect(requests).toHaveLength(1);
+    scheduler.setPlan({ ...plan, revision: Date.now(), manualRequestId: "manual" });
+    await collector.tick();
+    await collector.tick();
+    expect(requests.map(r => r.eventId)).toEqual(["101", "101"]);
+    collector.dispose();
+  });
 
   it("uses all four bounded request starts in one caller tick despite sub-250ms responses", async () => {
     const starts: Array<[string, number]> = [];

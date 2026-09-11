@@ -409,3 +409,18 @@ describe("SabaCollectorDomAssembler", () => {
       capturedMonotonicMs: 71_001 });
   });
 });
+
+
+it("validates a scheduled owner subset without asserting a complete roster", () => {
+  const assembler = activeAssembler();
+  const items = [capture("TODAY", "today-1", 1), owner("TODAY", "today-1"), {
+    kind: "SCHEDULED_OWNER_TERMINAL", collectorGeneration: GENERATION,
+    mainRosterGeneration: "saba:collector:main-0001", hiddenMarketsComplete: false,
+    owners: [{ period: "TODAY", ownerMatchId: "today-1" }]
+  }];
+  const result = ingest(assembler, chunk("saba:collector:scheduled-0001", 0, 1, items));
+  expect(result).toMatchObject({ coverage: "SCHEDULED_OWNERS", hiddenMarketsComplete: false });
+  expect(result?.captures).toHaveLength(1);
+  expect(ingest(activeAssembler(), chunk("saba:collector:scheduled-0002", 0, 1,
+    items.filter(item => item.kind !== "OWNER_COMPLETE")))).toBeNull();
+});

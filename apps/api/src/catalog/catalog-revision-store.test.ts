@@ -389,3 +389,16 @@ describe("CatalogRevisionStore", () => {
     expect(seen).toHaveLength(1);
   });
 });
+
+
+it("retains semantic revision when a non-AP paired receipt anchor advances", () => {
+  const store = new CatalogRevisionStore({ now: () => 120 }); stores.push(store);
+  const before = { ...pricedCatalog(100, 10, 1), observedMonotonicMs: 10 };
+  const first = store.publish(before.accountId, before, { snapshotState: "FRESH", freshnessMs: 100 });
+  const confirmed = { ...before, observedAtMs: 110, observedMonotonicMs: 20 };
+  const next = store.publish(before.accountId, confirmed, { snapshotState: "FRESH", freshnessMs: 100 });
+  expect(next.revision).toBe(first.revision);
+  expect(next.sequence).toBe(first.sequence);
+  expect(next.catalog.observedMonotonicMs).toBe(20);
+  expect(next.catalog.quotes).toBe(before.quotes);
+});

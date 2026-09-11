@@ -957,3 +957,88 @@ describe("SabaWsCatalogAdapter collector boundary", () => {
     ]));
   });
 });
+
+
+it("merges scheduled owner evidence only over an exact bound main roster and retains omitted owners", () => {
+  const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+  const mainGeneration = "saba:collector:scheduled-main";
+  const generation = "saba:collector:scheduled-subset";
+  const original = mainItems(mainGeneration).find(item => item.kind === "CAPTURE" && item.ownerMatchId === "today-1")!;
+  const expandedRecord = { ...record("today-1", "extra-market", "0.95"), providerTimezoneOffsetMinutes: 480 };
+  const items = [{ ...original, collectorGeneration: generation }, capture(generation, "TODAY", "today-1", 2, 500,
+    "OWNER_GROUPS_EXPANDED", { kind: "EXPLICIT", isoDate: "2026-09-08" },
+    expandedRecord),
+    { kind: "OWNER_COMPLETE", collectorGeneration: generation, period: "TODAY", ownerMatchId: "today-1",
+      safeControlOutcome: "OWNER_GROUPS_EXPANDED", restored: true },
+    { kind: "SCHEDULED_OWNER_TERMINAL", collectorGeneration: generation, mainRosterGeneration: mainGeneration,
+      hiddenMarketsComplete: false, owners: [{ period: "TODAY", ownerMatchId: "today-1" }] }];
+  expect(adapter.decode(collectorEnvelope(generation, items, 1))).toEqual([]);
+  const initial = value(adapter.decode(collectorEnvelope(mainGeneration, mainItems(mainGeneration), 2)));
+  const updates = adapter.decode(collectorEnvelope(generation, items, 3));
+  expect(updates).toEqual([expect.objectContaining({ evidenceMode: "DELTA" })]);
+  expect(updates[0]).not.toMatchObject({ authoritativeBaseline: true });
+  const result = value(updates);
+  expect(result.events.map(event => event.providerEventId).sort()).toEqual(["early-1", "today-1"]);
+  expect(result.quotes.filter(quote => quote.providerEventId === "early-1"))
+    .toEqual(initial.quotes.filter(quote => quote.providerEventId === "early-1"));
+  expect(result.quotes).toContainEqual(expect.objectContaining({ providerMarketId: "extra-market", rawOdds: "0.95", receivedMonotonicMs: 500 }));
+  expect(adapter.collectorCoverage(SOURCE, EPOCH)).toMatchObject({ hiddenMarketsComplete: false, collectorGeneration: mainGeneration });
+  const refreshedMainGeneration = "saba:collector:scheduled-main-next";
+  const refreshed = value(adapter.decode(collectorEnvelope(refreshedMainGeneration, mainItems(refreshedMainGeneration), 4)));
+  expect(refreshed.quotes).toContainEqual(expect.objectContaining({ providerMarketId: "extra-market", receivedMonotonicMs: 500 }));
+  const stale = items.map(item => ({ ...item, collectorGeneration: generation + "-stale" }));
+  expect(adapter.decode(collectorEnvelope(generation + "-stale", stale, 5))).toEqual([]);
+  const rebound = items.map(item => ({ ...item, collectorGeneration: generation + "-timezone",
+    ...(item.kind === "SCHEDULED_OWNER_TERMINAL" ? { mainRosterGeneration: refreshedMainGeneration } : {}),
+    ...(item.kind === "CAPTURE" && "captureKind" in item && item.captureKind === "OWNER_GROUPS_EXPANDED"
+      ? { record: { ...item.record, providerTimezoneOffsetMinutes: 420 } } : {}) }));
+  expect(adapter.decode(collectorEnvelope(generation + "-timezone", rebound, 6))).toEqual([]);
+  const closed = items.map(item => ({ ...item, collectorGeneration: generation + "-closed",
+    ...(item.kind === "SCHEDULED_OWNER_TERMINAL" ? { mainRosterGeneration: refreshedMainGeneration } : {}),
+    ...(item.kind === "CAPTURE" && "captureKind" in item && item.captureKind === "OWNER_GROUPS_EXPANDED"
+      ? { capturedAtMs: WALL + 3, capturedMonotonicMs: 600,
+        record: { ...item.record, groups: [group("extra-market", ["1"], "0")] } } : {}) }));
+  const closedUpdates = adapter.decode(collectorEnvelope(generation + "-closed", closed, 7));
+  expect(closedUpdates).toHaveLength(1);
+  const closedResult = value(closedUpdates);
+  expect(closedResult.quotes.filter(quote => quote.providerMarketId === "extra-market" && quote.rawOdds === "0.95")).toEqual([]);
+  const reopened = items.map(item => ({ ...item, collectorGeneration: generation + "-reopen",
+    ...(item.kind === "SCHEDULED_OWNER_TERMINAL" ? { mainRosterGeneration: refreshedMainGeneration } : {}),
+    ...(item.kind === "CAPTURE" && "captureKind" in item && item.captureKind === "OWNER_GROUPS_EXPANDED"
+      ? { capturedAtMs: WALL + 4, capturedMonotonicMs: 700 } : {}) }));
+  expect(adapter.decode(collectorEnvelope(generation + "-reopen", reopened, 8))).toHaveLength(1);
+  const fullGeneration = "saba:collector:full-after-scheduled";
+  const full = value(adapter.decode(collectorEnvelope(fullGeneration, completeItems(fullGeneration), 9)));
+  expect(full.quotes.some(quote => quote.providerMarketId === "extra-market")).toBe(false);
+  const wrongDocument = collectorEnvelope(generation + "-wrong", items.map(item => ({ ...item, collectorGeneration: generation + "-wrong" })), 4);
+  const body = JSON.parse(wrongDocument.payload.body); body.sweepDocumentKey = "wrong-document";
+  expect(adapter.decode({ ...wrongDocument, payload: { encoding: "UTF8", body: JSON.stringify(body) } })).toEqual([]);
+});
+
+
+it("keeps a newer same-market WS quote when an older scheduled capture closes its DOM market", () => {
+  const adapter = new SabaWsCatalogAdapter({ requireSocketBaseline: true });
+  const mainGeneration = "saba:collector:newer-ws-main";
+  const main = completeItems(mainGeneration, "9", "8").map(item => item.kind === "CAPTURE" ?
+    { ...item, record: { ...item.record, providerTimezoneOffsetMinutes: 480 } } : item);
+  adapter.decode(collectorEnvelope(mainGeneration, main, 1));
+  const ws = wsEnvelope([["f", 0, WS_FIELDS], [0, "reset"],
+    encodedWsRow({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+    encodedWsRow({ type: "m", matchid: 9, leagueid: 1, hteamnameen: "9 home", ateamnameen: "9 away",
+      kickofftime: WALL / 1000, marketid: "L", sporttype: 1 }),
+    encodedWsRow({ type: "o", oddsid: 90, matchid: 9, bettype: 1, parenttypeid: 1,
+      oddsstatus: "running", enable: 1, odds1a: 0.98, odds2a: -0.99, hdp1: 0.5, hdp2: 0 }),
+    [0, "done"]], "newer-ws-1", 3, 900);
+  expect(value(adapter.decode(ws)).quotes).toContainEqual(expect.objectContaining({ providerMarketId: "90", rawOdds: "0.98" }));
+  const generation = "saba:collector:older-scheduled";
+  const original = main.find(item => item.kind === "CAPTURE" && item.ownerMatchId === "9")!;
+  const expandedRecord = { ...record("9", "90", "0"), providerTimezoneOffsetMinutes: 480 };
+  const items = [{ ...original, collectorGeneration: generation },
+    capture(generation, "TODAY", "9", 3, 800, "OWNER_GROUPS_EXPANDED", { kind: "EXPLICIT", isoDate: "2026-09-08" }, expandedRecord),
+    { kind: "OWNER_COMPLETE", collectorGeneration: generation, period: "TODAY", ownerMatchId: "9",
+      safeControlOutcome: "OWNER_GROUPS_EXPANDED", restored: true },
+    { kind: "SCHEDULED_OWNER_TERMINAL", collectorGeneration: generation, mainRosterGeneration: mainGeneration,
+      hiddenMarketsComplete: false, owners: [{ period: "TODAY", ownerMatchId: "9" }] }];
+  const result = value(adapter.decode(collectorEnvelope(generation, items, 4)));
+  expect(result.quotes).toContainEqual(expect.objectContaining({ providerMarketId: "90", rawOdds: "0.98", receivedMonotonicMs: 900 }));
+});

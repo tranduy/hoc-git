@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { onBudgetedBridgeMessage } from "./bridge-message-budget.js";
-import { CHROME_BRIDGE_MAX_ENVELOPE_BYTES, ChromeBridgeEnvelopeSchema,
+import { CHROME_BRIDGE_MAX_ENVELOPE_BYTES, ChromeBridgeEnvelopeSchema, FootballCollectionPlanSchema,
   type ChromeBridgeControlMessage } from "@tool-chenh/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { RawData } from "ws";
@@ -32,6 +32,10 @@ export interface ChromeBridgeRouteOptions {
   readonly keepAliveIntervalMs?: number;
 }
 
+const CollectionProviderSchema = z.enum(["SABA", "IM", "CMD", "SBOBET", "APSPORT", "BTI"]);
+const CollectionProviderBodySchema = z.strictObject({ provider: CollectionProviderSchema });
+const CollectionPlanBodySchema = z.strictObject({ provider: CollectionProviderSchema, plan: z.unknown() });
+
 const FocusSelectionBodySchema = z.strictObject({
   sourceId: z.string().trim().min(1).max(128),
   providerEventId: z.string().trim().min(1).max(512),
@@ -61,6 +65,34 @@ export function registerChromeBridgeRoute(
   const now = options.now ?? Date.now;
   app.get("/api/chrome-bridge/sources", async () => ({ sources: registry.listSources() }));
   app.get("/api/chrome-bridge/features", async () => ({ openProviderTicket }));
+  for (const operation of ["collection-plan", "refresh-data"] as const) {
+    // 10,000 bounded event IDs can exceed the app's 32 KiB default; allow
+    // their maximum escaped JSON representation while preserving a wire cap.
+    app.post(`/api/chrome-bridge/${operation}`,
+      operation === "collection-plan" ? { bodyLimit: 10 * 1024 * 1024 } : {}, async (request, reply) => {
+      if (!isLoopback(request.ip) || !isTrustedFocusOrigin(request.headers.origin, options.dashboardOrigins)) {
+        return reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
+      }
+      const parsed = (operation === "collection-plan" ? CollectionPlanBodySchema : CollectionProviderBodySchema).safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: "INVALID_COLLECTION_REQUEST" });
+      const { provider } = parsed.data;
+      const lobby = provider === "APSPORT" ? "TSPORT" : provider === "SBOBET" ? "KSPORT" : provider;
+      const sourceId = options.controlPlane?.collectionSourceId(lobby);
+      if (!sourceId || !options.controlPlane) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
+      try {
+        if (operation === "refresh-data") {
+          return reply.code(202).send({ provider, ...options.controlPlane.refreshSourceData(sourceId, now()) });
+        }
+        const plan = FootballCollectionPlanSchema.safeParse((parsed.data as { plan?: unknown }).plan);
+        if (!plan.success || plan.data.manualRequestId !== undefined) return reply.code(400).send({ error: "INVALID_COLLECTION_PLAN" });
+        const requested = options.controlPlane.setCollectionPlan(sourceId, plan.data);
+        if (requested !== 1) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
+        return reply.code(202).send({ provider, requested, revision: plan.data.revision });
+      } catch (error) {
+        return reply.code(409).send({ error: error instanceof Error ? error.message : "COLLECTION_REQUEST_FAILED" });
+      }
+    });
+  }
   app.post("/api/chrome-bridge/request-snapshot", async (request, reply) => {
     if (!isLoopback(request.ip)) return reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
     const parsed = SnapshotRequestBodySchema.safeParse(request.body);

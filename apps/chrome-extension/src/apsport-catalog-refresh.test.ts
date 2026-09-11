@@ -1,11 +1,36 @@
 import { describe, expect, it, vi } from "vitest";
-import { apsportSelectionPriceFromEvent, buildApsportPageRequestExpression, collectApsportCatalog,
+import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent, buildApsportPageRequestExpression, collectApsportCatalog,
   collectApsportEventDetail, eligibleApsportFootballEvent,
   type ApsportCatalogPageRequest, type ApsportRawEvent } from "./apsport-catalog-refresh.js";
 
 const NOW = Date.parse("2026-08-28T00:00:00.000Z");
 
+it("lets the shared scheduled lane handle retries without sleeping inside a detail job", async () => {
+  const request = vi.fn(async () => ({ status: 429, data: null, retryAfterMs: 60_000 }));
+  const sleep = vi.fn(async () => undefined);
+  const result = await collectApsportEventDetail({ eventId: "1", maxAttempts: 1,
+    template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+    request, sleep, isCurrent: () => true });
+  expect(result).toBeNull();
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(sleep).not.toHaveBeenCalled();
+});
+
 describe("buildApsportPageRequestExpression", () => {
+  it.each(["3600", new Date(NOW + 3_600_000).toUTCString()])(
+    "preserves full Retry-After %s even with a non-JSON refusal body", async header => {
+      const expression = buildApsportPageRequestExpression({ origin: "https://pacific.agenate.com",
+        headers: {}, body: {} }, { kind: "EVENTS", mode: 2,
+        url: "https://pacific.agenate.com/be-ui/pac/api/v3/events", body: {} });
+      const run = new Function("fetch", "AbortController", "setTimeout", "clearTimeout", "Date", `return ${expression}`);
+      const value = await run(async () => ({ status: 503, headers: { get: () => header },
+        text: async () => "upstream unavailable" }), AbortController, setTimeout, clearTimeout,
+        { now: () => NOW, parse: Date.parse });
+      expect(value).toMatchObject({ status: 503, data: null, retryAfterMs: 3_600_000 });
+      expect(apsportPageResponseFromEvaluation({ result: { value } })).toMatchObject({
+        status: 503, retryAfterMs: 3_600_000 });
+    });
+
   it("aborts a provider fetch inside the page instead of leaving it spinning after CDP times out", () => {
     const expression = buildApsportPageRequestExpression({
       origin: "https://pacific.agenate.com", headers: { lng: "vi" }, body: { si: 1 }
@@ -114,6 +139,17 @@ describe("collectApsportCatalog", () => {
   const normalizedTotalIdentity = { providerEventId: "5682368",
     providerMarketId: "tsport:3:1985150448351005", providerSelectionId: "56823680030000005a",
     marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "UNDER", line: "0.5" };
+
+  it("releases a scheduled roster after one refusal without waiting inside the lane", async () => {
+    const request = vi.fn(async () => ({ status: 503, data: null, retryAfterMs: 3_600_000 }));
+    const sleep = vi.fn(async () => undefined);
+    await expect(collectApsportCatalog({ generation: "scheduled", nowMs: NOW, prematchWindowHours: 24,
+      maxAttempts: 1, template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request, sleep, isCurrent: () => true, onRoster: async () => undefined,
+      onDetail: async () => undefined })).rejects.toThrow();
+    expect(request).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+  });
 
   it("resolves a normalized AP market ID using both its native group and intact offer ID", () => {
     expect(apsportSelectionPriceFromEvent(nativeTotal, normalizedTotalIdentity))
@@ -319,7 +355,8 @@ describe("collectApsportCatalog", () => {
 
   it.each([
     [408, undefined, 1_000],
-    [429, 90_000, 60_000],
+    [429, 90_000, 90_000],
+    [503, 90_000, 90_000],
     [503, undefined, 1_000]
   ] as const)("retries transient roster status %s with a bounded delay",
     async (status, retryAfterMs, expectedDelayMs) => {
@@ -575,4 +612,25 @@ describe("collectApsportCatalog", () => {
     expect(detailIds).toEqual(["1"]);
     expect(completed).toEqual([]);
   });
+});
+
+it("stops legacy admission after roster when a plan arrives, flushing the in-flight receipt", async () => {
+  let admitted = true;
+  const details: string[] = [];
+  const onDetail = vi.fn(async () => undefined);
+  await collectApsportCatalog({ generation: "switch:1", nowMs: NOW, prematchWindowHours: 24,
+    template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+    sleep: async () => undefined, isCurrent: () => true, shouldContinueDetails: () => admitted,
+    onRoster: async () => undefined, onDetail,
+    request: async input => {
+      if (input.kind === "DETAIL") {
+        details.push(input.eventId); admitted = false;
+        return { status: 200, data: [league("Premier League", [event(input.eventId)])] };
+      }
+      return { status: 200, data: input.kind === "EVENTS"
+        ? [league("Premier League", [event("1"), event("2")])] : [] };
+    } });
+  expect(details).toEqual(["1"]);
+  expect(onDetail).toHaveBeenCalledWith(expect.objectContaining({ complete: false,
+    records: [event("1")] }));
 });

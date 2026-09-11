@@ -311,6 +311,12 @@ export class ChromeCatalogDataPlane {
     }
     if (!isObservedCatalog(update.value)) return this.#reject(envelope, `ADAPTER_VALUE_INVALID:${route.adapter.id}`);
     let nextCatalog = update.value;
+    // Only pair a native source receipt with the exact publication it belongs
+    // to. SABA localizes quote clocks and supplies its own API-domain anchor.
+    if (nextCatalog.provider !== "SABA" && nextCatalog.observedMonotonicMs === undefined &&
+      nextCatalog.observedAtMs === envelope.observedAtMs && update.observedAtMs === envelope.observedAtMs) {
+      nextCatalog = { ...nextCatalog, observedMonotonicMs: envelope.receivedMonotonicMs };
+    }
     const provenance = update.provenance ?? catalogProvenance(envelope.transport);
     const completeCmdRoster = envelope.lobby === "CMD" && route.adapter.id === "cmd-public-dom-v1" &&
       provenance === "AUTHENTICATED_HTTP" && update.completeRosterEvidence === true;
@@ -337,7 +343,8 @@ export class ChromeCatalogDataPlane {
       // A qualified DOM BASELINE is a complete replacement generation. Unioning
       // it with the retained catalog keeps expired events and changed lines
       // forever. Only a DOM DELTA needs the retained socket/hidden-market view.
-      if (retained !== undefined && mode !== "BASELINE") {
+      if (retained !== undefined && mode !== "BASELINE" &&
+        !(route.adapter.id === "saba-ws-catalog-v1" && update.completeRetainedView === true)) {
         nextCatalog = overlaySabaDomCatalog(retained, nextCatalog);
         // A viewport price overlay cannot replace the socket's authority.
         // Otherwise its next real stream failure is hidden as a DOM-only fault.

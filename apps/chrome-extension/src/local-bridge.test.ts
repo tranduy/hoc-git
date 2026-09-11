@@ -1294,3 +1294,18 @@ describe("keepalive from the server", () => {
     expect(bridge.serverContactAgeMs()).toBe(0);
   });
 });
+
+
+it("dispatches validated collection plans without snapshot or navigation recovery", () => {
+  const socket = new FakeSocket();
+  const onCollectionPlan = vi.fn();
+  const onSnapshotRequest = vi.fn();
+  const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key",
+    onCollectionPlan, onSnapshotRequest });
+  bridge.connect();
+  const request = { sourceId: "chrome:SABA:7", plan: { revision: 1, events: [] } };
+  socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "SET_COLLECTION_PLAN", ...request }) });
+  expect(onCollectionPlan).toHaveBeenCalledWith(request);
+  expect(onSnapshotRequest).not.toHaveBeenCalled();
+  bridge.close();
+});

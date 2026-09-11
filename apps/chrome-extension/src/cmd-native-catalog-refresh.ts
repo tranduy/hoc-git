@@ -143,10 +143,24 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       root.dataset.fieldlineCmdNativeCoverage = JSON.stringify(result);
       return result;
     };
+    const ownerDue = (owner) => {
+      if (owner.failed && owner.nextAt > Date.now()) return false;
+      const scheduler = root.__fieldlineCollectionSchedulerV1;
+      return scheduler ? [...owner.events].some(id => scheduler.due(id, owner.doneAt || null))
+        : owner.nextAt <= Date.now();
+    };
     const enqueue = () => {
+      state.queue = state.queue.filter(id => state.owners.has(id) && ownerDue(state.owners.get(id)));
       const queued = new Set(state.queue);
       for (const [id, owner] of state.owners) {
-        if (owner.nextAt <= Date.now() && !queued.has(id) && !state.active.has(id)) state.queue.push(id);
+        if (ownerDue(owner) && !queued.has(id) && !state.active.has(id)) state.queue.push(id);
+      }
+      const scheduler = root.__fieldlineCollectionSchedulerV1;
+      if (scheduler) {
+        const ranked = scheduler.sort(state.queue.flatMap(id => [...state.owners.get(id).events]));
+        const rank = new Map(ranked.map((id, index) => [id, index]));
+        const priority = id => Math.min(...[...state.owners.get(id).events].map(event => rank.get(event) ?? Infinity));
+        state.queue.sort((a, b) => priority(a) - priority(b));
       }
     };
     const pump = () => {
@@ -161,7 +175,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       while (current() && !paused() && Date.now() >= state.nextMoreAt && state.active.size < 2 && state.queue.length > 0) {
         const id = state.queue.shift();
         const owner = state.owners.get(id);
-        if (!owner || owner.nextAt > Date.now() || state.active.has(id)) continue;
+        if (!owner || !ownerDue(owner) || state.active.has(id)) continue;
         const job = { owner, generation, startedAtMs: Date.now() };
         state.active.set(id, job);
         const finish = (value) => {
@@ -172,10 +186,14 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
             const valid = value && Array.isArray(value.d) && value.d.length === 4 && value.d[0] === id &&
               owner.events.has(String(value.d[1])) && Array.isArray(value.d[2]) && Array.isArray(value.d[3]);
             owner.failed = !valid;
-            owner.nextAt = Date.now() + (valid ? 45000 : 15000);
+            const scheduler = root.__fieldlineCollectionSchedulerV1;
+            const refreshMs = scheduler ? Math.min(...[...owner.events].map(event =>
+              scheduler.policy(event).refreshMs ?? Infinity)) : 45000;
+            owner.nextAt = Date.now() + (valid ? refreshMs : 15000);
             if (valid) {
               requestSucceeded(job.startedAtMs);
               owner.doneAt = Date.now();
+              for (const event of owner.events) root.__fieldlineCollectionSchedulerV1?.completed(event, owner.doneAt);
               // Keep the latest bounded sports tuple for native/API coverage
               // comparison; it carries no request or account parameters.
               owner.nativeMore = { body: JSON.stringify(value), observedAtMs: owner.doneAt };

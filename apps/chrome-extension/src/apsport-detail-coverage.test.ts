@@ -61,3 +61,13 @@ describe("ApsportDetailCoverage", () => {
     });
   });
 });
+
+it("cancels queued work without losing receipts or physical in-flight state", () => {
+  const coverage = new ApsportDetailCoverage();
+  coverage.reconcileRoster(["old", "pending", "active"]);
+  coverage.markSuccess("old", true, 100);
+  coverage.markQueued("old"); coverage.markQueued("pending"); coverage.markInFlight("active");
+  coverage.cancelQueued();
+  expect(coverage.snapshot(200)).toMatchObject({ successfulEvents: 1, queuedEvents: 0,
+    inFlightEvents: 1, failedEvents: 0, oldestSuccessAgeMs: 100 });
+});

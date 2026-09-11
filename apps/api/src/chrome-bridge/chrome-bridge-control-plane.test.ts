@@ -672,3 +672,37 @@ describe("reloadExtension", () => {
     expect(closed.send).not.toHaveBeenCalled();
   });
 });
+
+
+it("stores only newer validated active plans and coalesces manual data refresh", () => {
+  const plane = new ChromeBridgeControlPlane();
+  const socket = { send: vi.fn(), readyState: 1 };
+  plane.attach("chrome:TSPORT:7", socket);
+  expect(() => plane.refreshSourceData("chrome:TSPORT:7", 100)).toThrow("PLAN_NOT_READY");
+  const plan = { revision: 2, events: [{ eventId: "e1", startAtUtcMs: null, isLive: true, urgent: false }] };
+  expect(plane.setCollectionPlan("chrome:TSPORT:7", plan)).toBe(1);
+  expect(() => plane.setCollectionPlan("chrome:TSPORT:7", { ...plan, revision: 1 })).toThrow("STALE_COLLECTION_PLAN");
+  const receipt = plane.refreshSourceData("chrome:TSPORT:7", 100);
+  expect(receipt).toMatchObject({ requested: 1, status: "QUEUED", requestedAtMs: 100 });
+  expect(plane.refreshSourceData("chrome:TSPORT:7", 101)).toEqual(receipt);
+  expect(socket.send).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(socket.send.mock.calls[1]![0])).toMatchObject({ kind: "SET_COLLECTION_PLAN",
+    sourceId: "chrome:TSPORT:7", plan: { revision: 2, manualRequestId: receipt.requestId } });
+  plane.attach("chrome:TSPORT:8", socket);
+  expect(plane.setCollectionPlan("chrome:TSPORT:7", plan)).toBe(0);
+  expect(plane.refreshSourceData("chrome:TSPORT:8", 102)).toEqual(receipt);
+});
+
+
+it("replays the latest provider plan to a replacement active source without repeating manual refresh", () => {
+  const plane = new ChromeBridgeControlPlane();
+  const first = { send: vi.fn(), readyState: 1 };
+  const replacement = { send: vi.fn(), readyState: 1 };
+  plane.attach("chrome:SABA:7", first);
+  plane.setCollectionPlan("chrome:SABA:7", { revision: 5, events: [] });
+  plane.refreshSourceData("chrome:SABA:7", 100);
+  plane.detach(first);
+  plane.attach("chrome:SABA:8", replacement);
+  expect(replacement.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ version: 1,
+    kind: "SET_COLLECTION_PLAN", sourceId: "chrome:SABA:8", plan: { revision: 5, events: [] } }));
+});

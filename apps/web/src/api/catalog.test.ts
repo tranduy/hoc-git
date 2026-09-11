@@ -16,6 +16,20 @@ const response = {
 afterEach(() => vi.useRealTimers());
 
 describe("CatalogApi", () => {
+  it("reads renewed event receipt bodies even when semantic prices have the same ETag", async () => {
+    let reads=0;
+    const api=new CatalogApi(async (_input,init) => {
+      reads++;
+      if (new Headers(init?.headers).has("if-none-match")) return new Response(null,{status:304});
+      return new Response(JSON.stringify({...response,observedAtMs:reads*100,observedMonotonicMs:reads*100}),
+        {headers:{etag:'"same-prices"',"x-catalog-revision":"same-prices"}});
+    });
+    const first=await api.readEventsRevision("account-1",["event-a"]);
+    const refreshed=await api.readEventsRevision("account-1",["event-a"]);
+    expect(first.catalog.observedAtMs).toBe(100);
+    expect(refreshed.catalog.observedAtMs).toBe(200);
+    expect(refreshed.catalog.observedMonotonicMs).toBe(200);
+  });
   it("starts queued detail deadlines after admission and releases slots on timeout", async () => {
     vi.useFakeTimers(); vi.setSystemTime(0);
     const starts: number[] = [];

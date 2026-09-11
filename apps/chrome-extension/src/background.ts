@@ -633,6 +633,11 @@ async function configureBridgeOnce(): Promise<boolean> {
         }
         void refreshBootstrapCatalogs();
       },
+      onCollectionPlan: async ({ sourceId, plan }) => {
+        const attached = registry.list().find(entry => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
+        if (attached !== undefined) await observer.setCollectionPlan({ sourceId,
+          lobby: attached.lobby, tabId: attached.tabId }, plan);
+      },
       onSnapshotRequest: async (request) => recoverSourceSnapshot(request),
       onSourceResync: async (sourceId) => {
         observer.beginBridgeSourceEpoch(sourceId);

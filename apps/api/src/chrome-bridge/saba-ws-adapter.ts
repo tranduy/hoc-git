@@ -159,6 +159,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #decoders = new Map<string, SabaPushDecoder>();
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #collectorAssembler = new SabaCollectorDomAssembler();
+  readonly #collectorBindings = new Map<string, {
+    readonly generation: string; readonly frame: string; readonly document: string;
+    readonly rosters: ReadonlyMap<string, ValidatedSabaCollectorCandidate["captures"][number]>;
+    readonly lastScheduledClock: Map<string, number>;
+  }>();
   readonly #collectorEpochs = new Map<string, string>();
   readonly #collectorPrematchIds = new Map<string, ReadonlySet<string>>();
   readonly #completeCollectorGenerations = new Map<string, string>();
@@ -253,6 +258,9 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     this.#assembler.resetSource(sourceId);
     this.#collectorAssembler.resetSource(sourceId);
     this.#collectorEpochs.delete(sourceId);
+    for (const key of this.#collectorBindings.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#collectorBindings.delete(key);
+    }
     for (const key of this.#collectorPrematchIds.keys()) {
       if (key.startsWith(`${sourceId}|`)) this.#collectorPrematchIds.delete(key);
     }
@@ -335,10 +343,49 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         }
         const normalized = normalizeCollectorCandidate(candidate);
         if (normalized === null) return this.#ignore("collector-market-id-collision");
-        if (incompleteNormalizedCatalog(normalized, true)) {
+        if (candidate.coverage !== "SCHEDULED_OWNERS" && incompleteNormalizedCatalog(normalized, true)) {
           return this.#ignore("incomplete-normalized-catalog");
         }
         const epochKey = sourceEpochKey(envelope);
+        if (candidate.coverage === "SCHEDULED_OWNERS") {
+          const binding = this.#collectorBindings.get(epochKey);
+          const mainPart = this.#parts.get(`${epochKey}|COLLECTOR`);
+          if (binding === undefined || mainPart === undefined ||
+            binding.generation !== candidate.terminal.mainRosterGeneration ||
+            binding.frame !== candidate.sweepFrameKey || binding.document !== candidate.sweepDocumentKey ||
+            candidate.captures.some(capture => {
+              const key = `${capture.period}\u0000${capture.ownerMatchId}`;
+              const original = binding.rosters.get(key);
+              return original === undefined || capture.record.providerTimezoneOffsetMinutes === undefined ||
+                capture.record.providerTimezoneOffsetMinutes !== original.record.providerTimezoneOffsetMinutes ||
+                JSON.stringify(capture.record.teamNames) !== JSON.stringify(original.record.teamNames) ||
+                capture.record.leagueId !== original.record.leagueId ||
+                (capture.captureKind === "ROSTER" && collectorRosterFingerprint(original) !== collectorRosterFingerprint(capture));
+            })) return this.#ignore("collector-scheduled-binding-unproven");
+          const actualCaptures = candidate.captures.filter(capture => capture.captureKind !== "ROSTER");
+          if (actualCaptures.length === 0) return this.#ignore("collector-scheduled-no-new-capture");
+          if (actualCaptures.some(capture => capture.capturedMonotonicMs <=
+            (binding.lastScheduledClock.get(`${capture.period}\u0000${capture.ownerMatchId}`) ?? -1))) {
+            return this.#ignore("collector-scheduled-stale-capture");
+          }
+          const prior = this.#parts.get(`${epochKey}|SCHEDULED`);
+          const combined = prior === undefined ? normalized : mergeScheduledCollectorParts(prior, normalized);
+          const captureRecords = canonicalizeSabaDomMarketIds(actualCaptures.map(capture => capture.record));
+          if (captureRecords === null) return this.#ignore("collector-market-id-collision");
+          const capturedMarketClocks = new Map<string, { monotonic: number; wall: number }>();
+          actualCaptures.forEach((capture, index) => {
+            for (const group of captureRecords[index]!.groups) for (const odd of group.odds) {
+              capturedMarketClocks.set(`${capture.ownerMatchId}\u0000${odd.marketOddsId}`,
+                { monotonic: capture.capturedMonotonicMs, wall: capture.capturedAtMs });
+            }
+          });
+          const updates = this.#update(envelope, "SCHEDULED", combined, { evidenceMode: "DELTA",
+            generation: candidate.terminal.mainRosterGeneration, provenance: "DOM_FALLBACK" }, false, capturedMarketClocks);
+          if (updates.length > 0) for (const capture of actualCaptures) {
+            binding.lastScheduledClock.set(`${capture.period}\u0000${capture.ownerMatchId}`, capture.capturedMonotonicMs);
+          }
+          return updates;
+        }
         this.#pendingCollectorRetentions.delete(epochKey);
         const knownPrematchIds = new Set(normalized.events.map(({ providerEventId }) => providerEventId));
         this.#collectorPrematchIds.set(epochKey, knownPrematchIds);
@@ -354,6 +401,13 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
             this.#parts.set(domKey, retained);
           }
         }
+        const scheduledKey = `${epochKey}|SCHEDULED`;
+        const scheduled = this.#parts.get(scheduledKey);
+        if (candidate.coverage === "HIDDEN_COMPLETE") {
+          this.#parts.delete(scheduledKey);
+          this.#partObservedAtMs.delete(scheduledKey);
+        } else if (scheduled !== undefined) this.#parts.set(scheduledKey,
+          filterCatalogPart(scheduled, event => knownPrematchIds.has(event.providerEventId)));
         const establishesCollectorAuthority = this.#requireSocketBaseline ||
           this.#domReadySources.has(envelope.sourceId);
         const updates = this.#update(envelope, "COLLECTOR", normalized, establishesCollectorAuthority
@@ -361,10 +415,18 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
               generation: candidate.collectorGeneration, provenance: "DOM_FALLBACK" }
           : { evidenceMode: "DELTA", generation: candidate.collectorGeneration,
                provenance: "DOM_FALLBACK" }, true);
-        if (updates.length > 0) this.#collectorCoverageByEpoch.set(epochKey, {
-          mainRosterComplete: true, hiddenMarketsComplete: candidate.hiddenMarketsComplete,
-          collectorGeneration: candidate.collectorGeneration
-        });
+        if (updates.length > 0) {
+          this.#collectorCoverageByEpoch.set(epochKey, {
+            mainRosterComplete: true, hiddenMarketsComplete: candidate.hiddenMarketsComplete,
+            collectorGeneration: candidate.collectorGeneration
+          });
+          this.#collectorBindings.set(epochKey, { generation: candidate.collectorGeneration,
+            frame: candidate.sweepFrameKey, document: candidate.sweepDocumentKey,
+            lastScheduledClock: new Map([...(this.#collectorBindings.get(epochKey)?.lastScheduledClock ?? [])]
+              .filter(([key]) => candidate.captures.some(capture => key === `${capture.period}\u0000${capture.ownerMatchId}`))),
+            rosters: new Map(candidate.captures.filter(capture => capture.captureKind === "ROSTER")
+              .map(capture => [`${capture.period}\u0000${capture.ownerMatchId}`, capture])) });
+        }
         return updates;
       }
       // The DOM is only the visible viewport, never an authoritative baseline.
@@ -816,17 +878,28 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     normalized: NormalizedCatalogPart,
     evidence: Pick<Extract<DecodedCatalogUpdate, { readonly value: unknown }>, "authoritativeBaseline" |
       "evidenceMode" | "generation" | "provenance"> = {},
-    allowCompleteEmpty = false): readonly DecodedCatalogUpdate[] {
-    if (incompleteNormalizedCatalog(normalized, allowCompleteEmpty)) {
+    allowCompleteEmpty = false,
+    capturedMarketClocks?: ReadonlyMap<string, { readonly monotonic: number; readonly wall: number }>): readonly DecodedCatalogUpdate[] {
+    if (incompleteNormalizedCatalog(normalized, allowCompleteEmpty) &&
+      !(partition === "SCHEDULED" && (normalized.nativeMarketObservations?.length ?? 0) > 0)) {
       return this.#ignore("incomplete-normalized-catalog");
     }
     // Source clocks remain in internal parts for native ordering. Each new
     // quote gets one API-local acquisition clock, shared across candidate
     // adapters by object identity; publication never renews retained quotes.
-    try { this.#quoteClockMapper?.observe(normalized.quotes, envelope); }
+    let receiptClock: { readonly observedAtMs: number; readonly observedMonotonicMs?: number };
+    try { receiptClock = this.#quoteClockMapper?.observe(normalized.quotes, envelope) ?? {
+      observedAtMs: envelope.observedAtMs, observedMonotonicMs: envelope.receivedMonotonicMs }; }
     catch { return this.#ignore("quote-clock-invalid"); }
     const epochKey = sourceEpochKey(envelope);
     const partitionKey = `${epochKey}|${partition}`;
+    if (capturedMarketClocks !== undefined) {
+      for (const [key, part] of this.#parts) {
+        if (key.startsWith(`${epochKey}|`) && key !== partitionKey) {
+          this.#parts.set(key, withoutSupersededCapturedMarkets(part, capturedMarketClocks));
+        }
+      }
+    }
     this.#parts.delete(partitionKey);
     this.#parts.set(partitionKey, normalized);
     this.#partObservedAtMs.set(partitionKey, envelope.observedAtMs);
@@ -883,7 +956,8 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       // contradict them.
       resolveScheduledPhase: true });
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-      observedAtMs: envelope.observedAtMs, value: catalog, ...evidence }];
+      observedAtMs: envelope.observedAtMs, value: { ...catalog, ...receiptClock }, ...evidence,
+      ...(partition === "SCHEDULED" ? { completeRetainedView: true as const } : {}) }];
   }
 
   streamStats(): { readonly sourceEpochs: number; readonly trackedStreamIds: number } {
@@ -1038,7 +1112,8 @@ function normalizeCollectorCandidate(candidate: ValidatedSabaCollectorCandidate)
   const native = new Map<string,
     NonNullable<NormalizedCatalogPart["nativeMarketObservations"]>[number]>();
   const diagnostics: unknown[] = [];
-  const captures = [...candidate.captures].sort((left, right) =>
+  const captures = candidate.captures.filter(capture => candidate.coverage !== "SCHEDULED_OWNERS" ||
+    capture.captureKind !== "ROSTER").sort((left, right) =>
     left.captureOrdinal - right.captureOrdinal);
   const canonicalRecords = canonicalizeSabaDomMarketIds(captures.map(({ record }) => record));
   if (canonicalRecords === null) return null;
@@ -1075,4 +1150,57 @@ function normalizeCollectorCandidate(candidate: ValidatedSabaCollectorCandidate)
   }
   return { events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()],
     nativeMarketObservations: [...native.values()], diagnostics };
+}
+
+
+function collectorRosterFingerprint(capture: ValidatedSabaCollectorCandidate["captures"][number]): string {
+  return JSON.stringify({ record: capture.record, kickoffDate: capture.kickoffDate,
+    capturedAtMs: capture.capturedAtMs, capturedMonotonicMs: capture.capturedMonotonicMs });
+}
+
+function mergeScheduledCollectorParts(prior: NormalizedCatalogPart, next: NormalizedCatalogPart): NormalizedCatalogPart {
+  const events = new Map(prior.events.map(event => [event.providerEventId, event]));
+  const markets = new Map(prior.markets.map(market => [`${market.providerEventId}\u0000${market.providerMarketId}`, market]));
+  const quotes = new Map(prior.quotes.map(quote => [quoteKey(quote), quote]));
+  const native = new Map((prior.nativeMarketObservations ?? []).map(observation =>
+    [`${observation.providerEventId}\u0000${observation.providerMarketId}\u0000${observation.nativeType}`, observation]));
+  // A captured market is a fresh inventory for that exact market. Its missing
+  // selection can be closed, while unmentioned markets and owners stay retained.
+  const refreshedMarkets = new Set((next.nativeMarketObservations ?? []).map(observation =>
+    `${observation.providerEventId}\u0000${observation.providerMarketId}`));
+  for (const [key, quote] of quotes) {
+    if (refreshedMarkets.has(`${quote.providerEventId}\u0000${quote.providerMarketId}`)) quotes.delete(key);
+  }
+  for (const key of refreshedMarkets) markets.delete(key);
+  for (const event of next.events) events.set(event.providerEventId, event);
+  for (const market of next.markets) markets.set(`${market.providerEventId}\u0000${market.providerMarketId}`, market);
+  for (const quote of next.quotes) {
+    const key = quoteKey(quote);
+    if (quote.receivedMonotonicMs >= (quotes.get(key)?.receivedMonotonicMs ?? -1)) quotes.set(key, quote);
+  }
+  for (const observation of next.nativeMarketObservations ?? []) {
+    const key = `${observation.providerEventId}\u0000${observation.providerMarketId}\u0000${observation.nativeType}`;
+    if (observation.observedAtMs >= (native.get(key)?.observedAtMs ?? -1)) native.set(key, observation);
+  }
+  return { events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()],
+    nativeMarketObservations: [...native.values()], diagnostics: next.diagnostics };
+}
+
+
+function withoutSupersededCapturedMarkets(part: NormalizedCatalogPart,
+  clocks: ReadonlyMap<string, { readonly monotonic: number; readonly wall: number }>): NormalizedCatalogPart {
+  const marketKey = (row: { readonly providerEventId: string; readonly providerMarketId: string }): string =>
+    `${row.providerEventId}\u0000${row.providerMarketId}`;
+  const quotes = part.quotes.filter(quote => {
+    const captured = clocks.get(marketKey(quote));
+    return captured === undefined || quote.receivedMonotonicMs > captured.monotonic;
+  });
+  const newerMarkets = new Set(quotes.map(marketKey));
+  return { ...part, quotes,
+    markets: part.markets.filter(market => !clocks.has(marketKey(market)) || newerMarkets.has(marketKey(market))),
+    ...(part.nativeMarketObservations === undefined ? {} : {
+      nativeMarketObservations: part.nativeMarketObservations.filter(observation => {
+        const captured = clocks.get(marketKey(observation));
+        return captured === undefined || observation.observedAtMs > captured.wall;
+      }) }) };
 }

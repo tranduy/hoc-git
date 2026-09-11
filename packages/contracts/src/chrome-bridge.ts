@@ -196,6 +196,28 @@ const AckMessageSchema = z.strictObject({
   sequence: SafeIntegerSchema
 });
 
+export const FootballCollectionPlanSchema = z.strictObject({
+  revision: SafeIntegerSchema,
+  events: z.array(z.strictObject({
+    eventId: z.string().trim().min(1).max(128),
+    startAtUtcMs: TimestampSchema.nullable(),
+    isLive: z.boolean(),
+    urgent: z.boolean()
+  })).max(10_000),
+  manualRequestId: PublicGenerationIdSchema.optional()
+}).superRefine((plan, context) => {
+  if (new Set(plan.events.map(event => event.eventId)).size !== plan.events.length) {
+    context.addIssue({ code: "custom", path: ["events"], message: "DUPLICATE_COLLECTION_EVENT" });
+  }
+}).transform(({ manualRequestId, ...plan }) => ({
+  ...plan, ...(manualRequestId === undefined ? {} : { manualRequestId })
+}));
+
+const CollectionPlanMessageSchema = z.strictObject({
+  version: z.literal(1), kind: z.literal("SET_COLLECTION_PLAN"),
+  sourceId: SourceIdSchema, plan: FootballCollectionPlanSchema
+});
+
 const SnapshotRequestMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("REQUEST_SNAPSHOT"),
@@ -331,6 +353,7 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
   HelloMessageSchema,
   AckMessageSchema,
   SnapshotRequestMessageSchema,
+  CollectionPlanMessageSchema,
   ReloadSourceMessageSchema,
   ReloadExtensionMessageSchema,
   KeepAliveMessageSchema,

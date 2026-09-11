@@ -1,4 +1,5 @@
 import { sbobetMoreBatchFromResponse, type SbobetMoreBatch, type SbobetMoreRequest } from "./sbobet-more-protocol.js";
+import type { FootballCollectionScheduler } from "./football-collection-scheduler.js";
 
 export interface SbobetPrematchEvent {
   readonly eventId: string;
@@ -37,6 +38,7 @@ export interface SbobetDetailBatch {
 }
 
 export interface SbobetRefreshOptions {
+  readonly collectionScheduler?: () => FootballCollectionScheduler | undefined;
   readonly mode?: "COMPLETE_EVENT";
   readonly request: (input: SbobetDetailRequest) => Promise<SbobetDetailResponse>;
   /** An asynchronous emitter must check signal/source epoch again before committing externally. */
@@ -49,6 +51,7 @@ export interface SbobetRefreshOptions {
   readonly timeoutMs?: number;
   readonly backoffMs?: number;
   readonly maxBackoffMs?: number;
+  /** Legacy option: validated for compatibility; provider deadlines are never shortened. */
   readonly maxRetryAfterMs?: number;
   readonly minimumDelayMs?: number;
   readonly maxConcurrent?: number;
@@ -93,7 +96,6 @@ export class SbobetCatalogRefresh {
   readonly #timeoutMs: number;
   readonly #backoffMs: number;
   readonly #maxBackoffMs: number;
-  readonly #maxRetryAfterMs: number;
   readonly #minimumDelayMs: number;
   readonly #maxConcurrent: number;
   readonly #maxRequestsPerTick: number;
@@ -118,7 +120,7 @@ export class SbobetCatalogRefresh {
     this.#timeoutMs = positive(options.timeoutMs ?? 8_000);
     this.#backoffMs = positive(options.backoffMs ?? 2_000);
     this.#maxBackoffMs = positive(options.maxBackoffMs ?? 60_000);
-    this.#maxRetryAfterMs = positive(options.maxRetryAfterMs ?? 300_000);
+    positive(options.maxRetryAfterMs ?? 300_000);
     this.#minimumDelayMs = options.minimumDelayMs ?? 250;
     this.#maxConcurrent = positive(options.maxConcurrent ?? 2);
     this.#maxRequestsPerTick = positive(options.maxRequestsPerTick ?? 4);
@@ -185,6 +187,9 @@ export class SbobetCatalogRefresh {
   }
 
   #dueAt(state: EventState, now: number): number {
+    const scheduler = this.#options.collectionScheduler?.();
+    if (scheduler !== undefined) return scheduler.due(state.event.eventId, state.receivedAtMs,
+      state.event.startAtUtcMs, false) ? state.retryAtMs : Infinity;
     const ttl = state.event.startAtUtcMs - now <= this.#nearWindowMs ? this.#nearTtlMs : this.#farTtlMs;
     return Math.max(state.retryAtMs, state.receivedAtMs === null ? 0 : state.receivedAtMs + ttl);
   }
@@ -195,9 +200,12 @@ export class SbobetCatalogRefresh {
     const now = this.#now();
     if (generation === null || this.#options.canRequest?.() === false ||
       now < this.#providerRetryAtMs || now < this.#nextRequestAtMs) return;
-    const selected = [...this.#events.values()].filter((state) => this.#dueAt(state, now) <= now &&
+    const due = [...this.#events.values()].filter((state) => this.#dueAt(state, now) <= now &&
       ![...this.#active].some((active) => active.state === state))
-      .sort((a, b) => this.#dueAt(a, now) - this.#dueAt(b, now) || a.event.startAtUtcMs - b.event.startAtUtcMs)
+      .sort((a, b) => this.#dueAt(a, now) - this.#dueAt(b, now) || a.event.startAtUtcMs - b.event.startAtUtcMs);
+    const orderedIds = this.#options.collectionScheduler?.()?.sort(due.map(s => s.event.eventId));
+    const byId = new Map(due.map(s => [s.event.eventId, s]));
+    const selected = (orderedIds === undefined ? due : orderedIds.flatMap(id => byId.has(id) ? [byId.get(id)!] : []))
       .slice(0, this.#maxRequestsPerTick);
     const controller = new AbortController();
     this.#drainController = controller;
@@ -221,7 +229,7 @@ export class SbobetCatalogRefresh {
           continue; // Recheck ownership, capacity and provider backoff after every wait.
         }
         const state = selected[next++]!;
-        if (this.#events.get(state.event.eventId) !== state) continue;
+        if (this.#events.get(state.event.eventId) !== state || this.#dueAt(state, this.#now()) > this.#now()) continue;
         const operation = this.#refresh(state, generation, lifecycle);
         started.push(operation);
         running.add(operation);
@@ -273,7 +281,7 @@ export class SbobetCatalogRefresh {
       }
       if (result.result.status !== 200) {
         this.#failure(state, generation, `HTTP_${result.result.status}`, result.result.retryAfterMs,
-          result.result.status === 429);
+          result.result.status === 429 || result.result.status === 503);
         return;
       }
       if (!Number.isSafeInteger(result.observedAtMs) || result.observedAtMs < 0) {
@@ -312,6 +320,7 @@ export class SbobetCatalogRefresh {
         return;
       }
       state.receivedAtMs = result.observedAtMs;
+      this.#options.collectionScheduler?.()?.completed(eventId, result.observedAtMs);
       state.retryAtMs = 0;
       state.failures = 0;
     } finally {
@@ -327,8 +336,8 @@ export class SbobetCatalogRefresh {
     state.failures = Math.min(state.failures + 1, 32);
     const exponential = Math.min(this.#maxBackoffMs, this.#backoffMs * 2 ** (state.failures - 1));
     const providerDelay = typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs > 0
-      ? Math.min(this.#maxRetryAfterMs, retryAfterMs) : 0;
-    state.retryAtMs = this.#now() + Math.max(exponential, providerDelay);
+      ? retryAfterMs : 0;
+    state.retryAtMs = Math.min(Number.MAX_SAFE_INTEGER, this.#now() + Math.max(exponential, providerDelay));
     if (providerLimited) {
       this.#providerRetryAtMs = Math.max(this.#providerRetryAtMs, state.retryAtMs);
       this.#drainController?.abort();

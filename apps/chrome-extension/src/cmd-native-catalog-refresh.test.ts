@@ -51,6 +51,26 @@ describe("CMD native catalog collector", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
   afterEach(() => { vi.useRealTimers(); });
 
+  it("uses the fastest due event in each owner while retaining far roster members", () => {
+    const h = harness();
+    const completed = vi.fn();
+    const root = (h.globals.document as any).documentElement;
+    root.__fieldlineCollectionSchedulerV1 = {
+      due: (id: string, receipt: number) => id === "2" && (!receipt || Date.now() - receipt >= 10_000),
+      policy: (id: string) => ({ refreshMs: id === "2" ? 10_000 : null }),
+      sort: (ids: string[]) => [...ids].reverse(), completed
+    };
+    h.tick(); h.commit([row(1), row(2, group(1)), row(3)], []);
+    expect(h.more()).toHaveLength(1);
+    h.complete(h.more()[0]!, 2);
+    expect(completed).toHaveBeenCalledWith("2", START);
+    expect(h.tick()).toMatchObject({ groups: 2, done: 1 });
+    vi.setSystemTime(START + 9_999); h.tick();
+    expect(h.more()).toHaveLength(1);
+    vi.setSystemTime(START + 10_000); h.tick();
+    expect(h.more()).toHaveLength(2);
+  });
+
   it("queues the actual captured prematch owner using its native sport and group columns", () => {
     // Untouched public row from native-discovery-1788862499540, fc1 today;
     // only the test clock is synthetic. Column51 is sport, column56 is date.

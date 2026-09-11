@@ -283,7 +283,7 @@ describe("ProviderSourceRecoveryCoordinator", () => {
     remounted.dispose();
   });
 
-  it("manually reloads an active provider and keeps its progress visible until completion", async () => {
+  it("keeps queued manual DATA refresh waiting until newer observed data confirms completion", async () => {
     let finish!: () => void;
     const recover = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
     const coordinator = new ProviderSourceRecoveryCoordinator({ recover });
@@ -298,8 +298,16 @@ describe("ProviderSourceRecoveryCoordinator", () => {
     finish();
     await expect(reloading).resolves.toBe(true);
     expect(coordinator.snapshot("APSPORT")).toMatchObject({
-      phase: "IDLE", manualRetryAfterSeconds: 60
+      phase: "WAITING", manualRetryAfterSeconds: 60
     });
+    coordinator.update([source("APSPORT", true)]);
+    coordinator.confirmData("APSPORT", Date.now());
+    expect(coordinator.snapshot("APSPORT").phase).toBe("WAITING");
+    await vi.advanceTimersByTimeAsync(90_001);
+    expect(coordinator.snapshot("APSPORT")).toMatchObject({ phase: "WAITING", lastError: null });
+    expect(recover).toHaveBeenCalledTimes(1);
+    coordinator.confirmData("APSPORT", Date.now() + 1);
+    expect(coordinator.snapshot("APSPORT").phase).toBe("IDLE");
     coordinator.dispose();
   });
 

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { StrictMode } from "react";
 import type { AccountStatus, CatalogSourceStatus, ProviderEvent, ProviderMarket, ProviderQuote,
   ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountApiLike } from "../api/accounts.js";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
 import type { CatalogRealtimeFeed } from "../api/client.js";
@@ -42,9 +42,9 @@ const quotes: ProviderQuote[] = ["HOME", "AWAY"].map((selection, index) => ({
   line: "-0.5", rawOdds: ["1.8", "2.5"][index]!, rawFormat: "DECIMAL", status: "OPEN",
   isLive: false, sourceTimestampMs: null, receivedMonotonicMs: 100, sequence: 1
 }));
-const catalog: LiveCatalogResponse = {
+let catalog: LiveCatalogResponse = {
   dataMode: "LIVE", accountId: account.id, provider: "CMD", category: "FOOTBALL",
-  comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100,
+  comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: Date.now(), observedMonotonicMs: 100,
   rejectedMarketCount: 0,
   events: [event], markets: [market], quotes
 };
@@ -56,6 +56,8 @@ const accountApi: AccountApiLike = {
 };
 const catalogApi: CatalogApiLike = { read: async () => catalog };
 
+beforeEach(() => { catalog = {...catalog, observedAtMs:Date.now()}; });
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -65,6 +67,38 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
+  it.each([false,true])("hydrates only due paired receipts while the live revision is unchanged (unpaired-only due: %s)", async unpairedOnlyDue => {
+    vi.useFakeTimers({shouldAdvanceTime:true});
+    const start=Date.now();
+    const providers=["SABA","CMD"] as const;
+    const sources=providers.map(provider => ({id:`catalog-source:${provider}:FOOTBALL`,provider,alias:provider,
+      category:"FOOTBALL" as const,sessionState:"ACTIVE" as const,sessionSource:"FABET_LOGIN" as const,acquiredAtMs:start,reason:null}));
+    let details=0,rosterReads=0;
+    const sourceCatalog=(id:string):LiveCatalogResponse => {
+      const provider=sources.find(source => source.id === id)!.provider;
+      return {...catalog,accountId:id,provider,observedAtMs:Date.now(),observedMonotonicMs:100+Date.now()-start,
+        events:[{...event,provider,startAtUtcMs:start+(unpairedOnlyDue ? 30 : 1)*3600000},
+          ...(unpairedOnlyDue ? [{...event,provider,providerEventId:`${provider}-unpaired`,
+            participantA:`${provider} Unpaired Home`,participantB:`${provider} Unpaired Away`,
+            competition:`${provider} Unmatched League`,startAtUtcMs:start+3600000}] : [])],markets:[{...market,provider}],
+        quotes:quotes.map(q => ({...q,provider,receivedMonotonicMs:100+Date.now()-start}))};
+    };
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{...accountApi,list:async () => []}}
+      catalogSourceApi={{list:async () => sources}}
+      catalogRealtime={{connectionState:"LIVE",baseline:{sequence:1,entries:sources.map(source => ({accountId:source.id,
+        revision:"unchanged",observedAtMs:start,snapshotState:"FRESH"}))},revision:null}}
+      catalogApi={{read:async id => sourceCatalog(id),readRosterRevision:async id => {rosterReads++;return {catalog:{...sourceCatalog(id),markets:[],quotes:[]},
+        revision:"roster",sourceRevision:"unchanged"};},readEventsRevision:async id => {
+          details++;return {catalog:sourceCatalog(id),revision:"detail",sourceRevision:"unchanged"};
+        }}} />);
+    await screen.findByRole("button",{name:"Compare Alpha vs Beta"});
+    const initial=details,initialRosters=rosterReads;
+    await act(async () => vi.advanceTimersByTimeAsync(16000));
+    if (unpairedOnlyDue) {
+      expect(details).toBe(initial);
+      expect(rosterReads).toBe(initialRosters);
+    } else expect(details).toBeGreaterThan(initial);
+  });
   it.each(["inactive", "missing"] as const)("preserves checked and unchecked books after %s source recovery", async outage => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const atMs = Date.now();
@@ -125,9 +159,9 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByLabelText("Tổng kèo ghép").textContent).toContain(`${expiredAp ? 1 : 3} cặp market`);
     expect(screen.queryByText("No exact two-book comparison is currently available")).toBeNull();
     if (expiredAp) {
-      expect(screen.getByText("ĐÃ GHÉP · CHỜ GIÁ")).toBeTruthy();
-      expect(screen.getByText("Chờ giá mới từ APSPORT")).toBeTruthy();
-      expect(view.container.querySelector(".catalog-event .roi-badge")).toBeNull();
+      expect(screen.getByText(/Historical observation/)).toBeTruthy();
+      expect(screen.getByText(/Price age: 16s/)).toBeTruthy();
+      expect(view.container.querySelector(".catalog-event--display-only")).not.toBeNull();
     } else expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
   });
 
@@ -515,7 +549,8 @@ describe("LiveCatalogPage", () => {
 
     finish();
     await act(async () => { await recoveryRequest; });
-    expect(await screen.findByRole("button", { name: "Reload CMD" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "\u0110ang reload CMD" })).toBeTruthy();
+    expect(screen.getByText("Đang cập nhật dữ liệu theo hàng đợi")).toBeTruthy();
   });
 
   it("loads source catalogs without waiting for the slower account/profile list", async () => {
@@ -921,14 +956,15 @@ describe("LiveCatalogPage", () => {
         providerSelectionId: `${providerAccount.provider}-${quote.selection}`, sourceTimestampMs: observedAtMs,
         rawOdds: quote.selection === "HOME" ? over : under }))
     });
+    const sourceTime = Date.now();
     let sabaReads = 0;
     const api: CatalogApiLike = { read: async (id) => {
       if (id === sabaAccount.id) {
         sabaReads += 1;
-        return sabaReads === 1 ? providerCatalog(sabaAccount, "2.20", "1.70", 1_000)
-          : providerCatalog(sabaAccount, "1.70", "2.20", 1_100);
+        return sabaReads === 1 ? providerCatalog(sabaAccount, "2.20", "1.70", sourceTime)
+          : providerCatalog(sabaAccount, "1.70", "2.20", sourceTime + 100);
       }
-      return providerCatalog(sbobetAccount, "2.20", "1.70", sabaReads === 1 ? 1_000 : 1_100);
+      return providerCatalog(sbobetAccount, "2.20", "1.70", sabaReads === 1 ? sourceTime : sourceTime + 100);
     } };
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
 
@@ -1103,7 +1139,7 @@ describe("LiveCatalogPage", () => {
         };
       }
       cmdReads += 1;
-      return { ...catalog, observedAtMs: 100 + cmdReads,
+      return { ...catalog, observedAtMs: Date.now(),
         quotes: quotes.map((quote) => ({ ...quote,
           rawOdds: quote.selection === "HOME" && cmdReads > 1 ? "2.1" : quote.rawOdds,
           sequence: cmdReads })) };

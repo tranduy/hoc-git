@@ -925,3 +925,14 @@ describe("BtiHttpCatalogAdapter", () => {
     expect(adapter.decode(envelope("not-json"))).toEqual([]);
   });
 });
+
+
+it("pairs a retained BTI roster receipt with its translated monotonic clock", () => {
+  const adapter = new BtiHttpCatalogAdapter();
+  const now = envelope().observedAtMs;
+  const body = JSON.stringify({ ...payload, fieldlineBtiRoster: {
+    observedAtMs: now - 10, requestedAtMs: now - 12, generation: "bti:1000:1" } });
+  const catalog = committedCatalog(adapter, "bti:1000:1", 1, body) as ObservedProviderCatalog;
+  expect(catalog).toMatchObject({ observedAtMs: now - 10, observedMonotonicMs: 10 });
+  expect(catalog.quotes.every(quote => quote.receivedMonotonicMs === 10)).toBe(true);
+});

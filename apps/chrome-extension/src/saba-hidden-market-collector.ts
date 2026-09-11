@@ -58,6 +58,7 @@ export interface SabaCollectorOwnerCaptureResult {
   readonly binding: SabaCollectorBinding;
   readonly period: SabaCollectorPeriod;
   readonly ownerMatchId: string;
+  readonly observedAtMs?: number;
   readonly controlOpened: true;
   readonly terminalControlState: "RESTORED_CLOSED";
   readonly restored: true;
@@ -147,11 +148,23 @@ export type SabaMainRosterItem = SabaCollectorCaptureItem | SabaMainRosterTermin
 export type SabaCollectorAdvanceError = "BINDING_CHANGED" | "ADAPTER_ERROR" |
   "ROSTER_UNCONFIRMED" | "OWNER_CAPTURE_UNSAFE" | "TODAY_RESTORE_UNCONFIRMED";
 
+export interface SabaScheduledOwnerTerminalItem {
+  readonly kind: "SCHEDULED_OWNER_TERMINAL";
+  readonly collectorGeneration: string;
+  readonly mainRosterGeneration: string;
+  readonly owners: readonly { readonly period: SabaCollectorPeriod; readonly ownerMatchId: string }[];
+  readonly hiddenMarketsComplete: false;
+}
+
 export interface SabaCollectorAdvanceResult {
   readonly status: "INCOMPLETE" | "COMPLETE" | "SAFE_ERROR" | "STALE_BINDING";
   readonly items: readonly SabaCollectorDomItem[];
   readonly candidateItems: readonly SabaCollectorDomItem[];
   readonly mainRosterItems?: readonly SabaMainRosterItem[];
+  readonly mainRosterChanged?: boolean;
+  readonly scheduledCaptureItems?: readonly SabaCollectorCaptureItem[];
+  readonly scheduledItems?: readonly (SabaCollectorDomItem | SabaScheduledOwnerTerminalItem)[];
+  readonly scheduledVisits?: readonly { readonly period: SabaCollectorPeriod; readonly ownerMatchId: string }[];
   readonly error?: SabaCollectorAdvanceError;
 }
 
@@ -160,6 +173,14 @@ export interface SabaHiddenMarketCollectorOptions {
   readonly binding: SabaCollectorBinding;
   readonly adapter: SabaCollectorPageAdapter;
   readonly publishMainRosterFirst?: boolean;
+  /** Opt-in recurring partial acquisition. A deferred owner is never marked complete. */
+  readonly shouldCaptureOwner?: (period: SabaCollectorPeriod, owner: SabaCollectorRosterOwner,
+    lastVisitAtMs: number | null) => boolean;
+  readonly onCaptured?: (period: SabaCollectorPeriod, owner: SabaCollectorRosterOwner,
+    actualReadAtMs: number) => void;
+  readonly sortOwners?: (eventIds: readonly string[]) => readonly string[];
+  readonly nowMs?: () => number;
+  readonly isSchedulingEnabled?: () => boolean;
 }
 
 interface PeriodState {
@@ -260,6 +281,13 @@ export class SabaHiddenMarketCollector {
   readonly #binding: SabaCollectorBinding;
   readonly #adapter: SabaCollectorPageAdapter;
   readonly #publishMainRosterFirst: boolean;
+  readonly #schedule: Pick<SabaHiddenMarketCollectorOptions, "shouldCaptureOwner" | "onCaptured" | "sortOwners" | "isSchedulingEnabled">;
+  readonly #lastVisits = new Map<string, number>();
+  #scheduledPeriod: SabaCollectorPeriod | null = null;
+  #scheduledSequence = 0;
+  readonly #now: () => number;
+  #nextMainRefreshAtMs = Infinity;
+  #mainSequence = 0;
   #mainPeriodIndex = 0;
   #mainRosterItems: readonly SabaMainRosterItem[] | undefined;
   readonly #periods: Record<SabaCollectorPeriod, PeriodState> = {
@@ -280,14 +308,29 @@ export class SabaHiddenMarketCollector {
     this.#generation = options.collectorGeneration;
     this.#binding = { ...options.binding };
     this.#adapter = options.adapter;
-    this.#publishMainRosterFirst = options.publishMainRosterFirst === true;
+    this.#schedule = options;
+    this.#now = options.nowMs ?? Date.now;
+    this.#publishMainRosterFirst = options.publishMainRosterFirst === true || options.shouldCaptureOwner !== undefined;
   }
 
   get currentPeriod(): SabaCollectorPeriod | null {
     if (this.#publishMainRosterFirst && this.#mainRosterItems === undefined) {
       return PERIODS[this.#mainPeriodIndex] ?? "TODAY";
     }
+    if (this.scheduledCollection) {
+      if (this.#scheduledPeriod) return this.#scheduledPeriod;
+      try {
+        for (const period of PERIODS) if (this.#periods[period].roster?.some(owner =>
+          owner.control === "ELIGIBLE_MORE" && this.#schedule.shouldCaptureOwner!(period, owner,
+            this.#lastVisits.get(`${period}:${owner.ownerMatchId}`) ?? null))) return period;
+      } catch { /* The advance operation owns scheduling error handling. */ }
+      return "TODAY";
+    }
     return this.#terminalEmitted || this.#periodIndex >= PERIODS.length ? null : PERIODS[this.#periodIndex]!;
+  }
+
+  get scheduledCollection(): boolean {
+    return this.#schedule.shouldCaptureOwner !== undefined && (this.#schedule.isSchedulingEnabled?.() ?? true);
   }
 
   get mainRosterComplete(): boolean { return this.#mainRosterItems !== undefined; }
@@ -357,11 +400,26 @@ export class SabaHiddenMarketCollector {
   async #advance(maxOwnersPerSlice: number,
     shouldContinue?: () => boolean, maxPassiveOwnersPerSlice?: number): Promise<SabaCollectorAdvanceResult> {
     const emitted: SabaCollectorDomItem[] = [];
+    if (this.#terminalEmitted && this.scheduledCollection) {
+      this.#terminalEmitted = false;
+      this.#candidateItems.splice(0, this.#candidateItems.length,
+        ...this.#candidateItems.filter(item => item.kind === "CAPTURE" && item.captureKind === "ROSTER"));
+    }
     if (this.#terminalEmitted) return this.#result("COMPLETE", emitted);
     if (this.#frozen) return this.#result(this.#frozen.status, emitted, this.#frozen.error);
+    if (this.scheduledCollection && this.#mainRosterItems !== undefined &&
+      this.#now() >= this.#nextMainRefreshAtMs) {
+      this.#mainSequence += 1;
+      this.#mainPeriodIndex = 0;
+      this.#mainRosterItems = undefined;
+      this.#candidateItems.splice(0);
+      for (const period of PERIODS) this.#periods[period] = {
+        roster: null, cursor: 0, complete: false, validatedNoGrowthPending: false };
+    }
     if (this.#publishMainRosterFirst && this.#mainRosterItems === undefined) {
       return this.#advanceMainRoster(emitted, shouldContinue);
     }
+    if (this.scheduledCollection) return this.#advanceScheduled(maxOwnersPerSlice, shouldContinue);
     let processedOwners = 0;
     let passiveOwners = 0;
 
@@ -492,6 +550,89 @@ export class SabaHiddenMarketCollector {
     return this.#finish(emitted);
   }
 
+  async #advanceScheduled(limit: number, shouldContinue?: () => boolean): Promise<SabaCollectorAdvanceResult> {
+    const emitted: SabaCollectorDomItem[] = [];
+    const captures: SabaCollectorCaptureItem[] = [];
+    const visits: { period: SabaCollectorPeriod; ownerMatchId: string }[] = [];
+    const complete: SabaCollectorOwnerCompleteItem[] = [];
+    const eligible = PERIODS.flatMap(period => (this.#periods[period].roster ?? [])
+      .filter(owner => owner.control === "ELIGIBLE_MORE")
+      .map(owner => ({ period, owner })));
+    const due = ({ period, owner }: typeof eligible[number]) => this.#schedule.shouldCaptureOwner!(
+      period, owner, this.#lastVisits.get(`${period}:${owner.ownerMatchId}`) ?? null);
+    let candidates: typeof eligible;
+    try {
+      candidates = eligible.filter(due);
+      const order = this.#schedule.sortOwners?.(candidates.map(({ owner }) => owner.ownerMatchId));
+      if (order) {
+        const ranks = new Map(order.map((id, index) => [id, index]));
+        candidates.sort((a, b) => (ranks.get(a.owner.ownerMatchId) ?? Infinity) -
+          (ranks.get(b.owner.ownerMatchId) ?? Infinity));
+      }
+    } catch { return this.#freeze("SAFE_ERROR", "ADAPTER_ERROR", emitted); }
+    for (const candidate of candidates.slice(0, limit)) {
+      if (!continuationAllowed(shouldContinue)) break;
+      const { period, owner } = candidate;
+      this.#scheduledPeriod = period;
+      let result: SabaCollectorOwnerCaptureResult;
+      try {
+        if (!due(candidate)) continue;
+        result = await this.#adapter.captureOwner(period, owner);
+      } catch { return this.#freeze("SAFE_ERROR", "ADAPTER_ERROR", emitted); }
+      if (!sameBinding(result.binding, this.#binding)) return this.#freeze("STALE_BINDING", "BINDING_CHANGED", emitted);
+      const structural = result.safeControlOutcome === "ALTERNATE_ROWS_ADDED" ||
+        result.safeControlOutcome === "OWNER_GROUPS_EXPANDED";
+      const capture = result.capture;
+      const validCapture = capture !== undefined && capture.record.matchId === owner.ownerMatchId &&
+        validWallClock(capture.capturedAtMs) && validMonotonicClock(capture.capturedMonotonicMs) &&
+        capture.capturedMonotonicMs >= this.#lastCapturedMonotonicMs && validKickoffDate(capture.kickoffDate);
+      if (result.period !== period || result.ownerMatchId !== owner.ownerMatchId ||
+        !result.controlOpened || result.terminalControlState !== "RESTORED_CLOSED" || !result.restored ||
+        structural !== validCapture || (!structural && result.safeControlOutcome !== "NO_STRUCTURAL_CHANGE")) {
+        return this.#freeze("SAFE_ERROR", "OWNER_CAPTURE_UNSAFE", emitted);
+      }
+      visits.push({ period, ownerMatchId: owner.ownerMatchId });
+      // This is an actual successful page read, never a synthetic quote timestamp.
+      // Older adapters lack a clock for empty structural reads, so do not fabricate one.
+      const receipt = capture?.capturedAtMs ?? result.observedAtMs;
+      if (receipt === undefined || !validWallClock(receipt)) {
+        return this.#freeze("SAFE_ERROR", "OWNER_CAPTURE_UNSAFE", emitted);
+      }
+      if (receipt !== undefined && validWallClock(receipt)) {
+        this.#lastVisits.set(`${period}:${owner.ownerMatchId}`, receipt);
+        this.#schedule.onCaptured?.(period, owner, receipt);
+      }
+      complete.push({ kind: "OWNER_COMPLETE", collectorGeneration: this.#generation, period,
+        ownerMatchId: owner.ownerMatchId, safeControlOutcome: result.safeControlOutcome, restored: true });
+      if (structural && capture) {
+        const item = this.#capture(period, owner.ownerMatchId,
+          result.safeControlOutcome as "ALTERNATE_ROWS_ADDED" | "OWNER_GROUPS_EXPANDED", capture);
+        captures.push(item); emitted.push(item);
+      }
+    }
+    this.#scheduledPeriod = null;
+    // A partial proof lists only actual visits, never deferred owners. Its unique
+    // transport generation cannot replace authoritative main roster membership.
+    const scheduledItems: (SabaCollectorDomItem | SabaScheduledOwnerTerminalItem)[] = [];
+    if (visits.length > 0) {
+      const generation = `${this.#generation}:scheduled:${++this.#scheduledSequence}`;
+      const keys = new Set(visits.map(visit => `${visit.period}:${visit.ownerMatchId}`));
+      const rosters = this.#candidateItems.filter((item): item is SabaCollectorCaptureItem =>
+        item.kind === "CAPTURE" && item.captureKind === "ROSTER" && keys.has(`${item.period}:${item.ownerMatchId}`));
+      const ordered = [...rosters, ...captures].sort((a, b) => a.capturedMonotonicMs - b.capturedMonotonicMs ||
+        a.captureOrdinal - b.captureOrdinal);
+      scheduledItems.push(...ordered.map((item, captureOrdinal) => ({ ...item,
+        collectorGeneration: generation, captureOrdinal })),
+        ...complete.map(item => ({ ...item, collectorGeneration: generation })),
+        { kind: "SCHEDULED_OWNER_TERMINAL", collectorGeneration: generation,
+          mainRosterGeneration: this.#mainRosterItems!.at(-1)!.collectorGeneration, owners: visits,
+          hiddenMarketsComplete: false });
+    }
+    // Retain only initial roster proof: repeated visits cannot grow candidate memory.
+    return { ...this.#result("INCOMPLETE", emitted), scheduledCaptureItems: captures,
+      scheduledVisits: visits, scheduledItems };
+  }
+
   async #advanceMainRoster(emitted: SabaCollectorDomItem[],
     shouldContinue?: () => boolean): Promise<SabaCollectorAdvanceResult> {
     // Roster proof is independent of More expansion. Bound public reads per slice,
@@ -548,7 +689,7 @@ export class SabaHiddenMarketCollector {
     if (restoration.selectedPrematch !== true || !sameRosterMembership(restoration.rosterMatchIds, todayIds)) {
       return this.#freeze("SAFE_ERROR", "TODAY_RESTORE_UNCONFIRMED", emitted);
     }
-    const collectorGeneration = `${this.#generation}:main`;
+    const collectorGeneration = `${this.#generation}:main${this.#mainSequence === 0 ? "" : `:${this.#mainSequence}`}`;
     this.#mainRosterItems = [
       ...this.#candidateItems.filter((item): item is SabaCollectorCaptureItem =>
         item.kind === "CAPTURE" && item.captureKind === "ROSTER")
@@ -561,7 +702,11 @@ export class SabaHiddenMarketCollector {
         todayRestoration: { selected: true, rosterMatchIds: todayIds, rosterCount: todayIds.length },
         hiddenMarketsComplete: false }
     ];
-    return this.#result("INCOMPLETE", emitted);
+    this.#nextMainRefreshAtMs = this.#now() + 30_000;
+    const active = new Set(PERIODS.flatMap(period => (this.#periods[period].roster ?? [])
+      .map(owner => `${period}:${owner.ownerMatchId}`)));
+    for (const key of this.#lastVisits.keys()) if (!active.has(key)) this.#lastVisits.delete(key);
+    return { ...this.#result("INCOMPLETE", emitted), mainRosterChanged: true };
   }
 
   #capture(period: SabaCollectorPeriod, ownerMatchId: string,

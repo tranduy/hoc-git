@@ -1,10 +1,11 @@
-import type { ProviderId, ProviderQuote } from "@tool-chenh/contracts";
+import { footballRefreshPolicy, type ProviderId, type ProviderQuote } from "@tool-chenh/contracts";
 import { Decimal } from "@tool-chenh/core";
 import { decimalOdds, type ComparisonEvent, type ComparisonRow } from "../catalog/comparison.js";
 import { buildObservedFixedBaseStakeEstimate, enumerateOpposingLegPairs, type FixedBaseStakePlan,
   type FixedBaseStakePolicy } from "./fixed-base-stake.js";
 import type { ObservedPriceMovement } from "./price-movement-tracker.js";
 import type { VerifiedTicketEvidence } from "./ticket-preflight-coordinator.js";
+import { urgentFootballEventKeys } from "../catalog/pairable-event-plan.js";
 import { sortProviders } from "../catalog/provider-order.js";
 
 export type RankedTicketState = "VERIFIED_PROFIT" | "VERIFIED_NO_PROFIT" | "OBSERVATION";
@@ -16,6 +17,9 @@ export interface RankedTicket {
   /** Original retained evidence for manual price reads only; never a pricing/placement input. */
   readonly auditRow?: ComparisonRow;
   readonly plan: FixedBaseStakePlan | null;
+  /** Retained arithmetic only; never eligible for preflight or verification. */
+  readonly historicalPlan?: FixedBaseStakePlan | null;
+  readonly observationAgeMs?: number;
   /** An exact selected source relation survives when its prices need renewal. */
   readonly hasOpposingSources?: boolean;
   /** Scalar source-pair proof for a waiting row when local book selection changes. */
@@ -48,77 +52,93 @@ export interface EventEdgeSummary {
   readonly state: RankedTicketState;
 }
 
-const APSPORT_LIVE_QUOTE_MAX_AGE_MS = 5_000;
-const APSPORT_PREMATCH_QUOTE_MAX_AGE_MS = 15_000;
-const apsportQuoteDeadlineCache = new WeakMap<ComparisonEvent["catalogs"][number], ReadonlyMap<string, number>>();
-
 function quoteIdentity(quote: ProviderQuote): string {
-  // A later price for this selection cannot renew a historical display quote.
-  // Selection/line may be oriented for comparison; keep native IDs and receipt terms.
-  return JSON.stringify([quote.providerEventId, quote.providerMarketId, quote.providerSelectionId,
+  return JSON.stringify([quote.provider, quote.providerEventId, quote.providerMarketId, quote.providerSelectionId,
     quote.receivedMonotonicMs, quote.sequence, quote.sourceTimestampMs,
     quote.rawOdds, quote.rawFormat, quote.status]);
 }
 
-function apsportQuoteDeadlines(catalog: ComparisonEvent["catalogs"][number]): ReadonlyMap<string, number> {
-  const cached = apsportQuoteDeadlineCache.get(catalog);
+const receiptCache = new WeakMap<ComparisonEvent["catalogs"][number], ReadonlyMap<string, number>>();
+const nativeLiveCache = new WeakMap<ComparisonEvent["catalogs"][number], ReadonlyMap<string, boolean>>();
+const eventIndexCache = new WeakMap<ComparisonEvent["catalogs"][number], ReadonlyMap<string,
+  ComparisonEvent["catalogs"][number]["events"][number]>>();
+function catalogReceipts(catalog: ComparisonEvent["catalogs"][number]): ReadonlyMap<string, number> {
+  const cached = receiptCache.get(catalog);
   if (cached !== undefined) return cached;
-  // The publication clock is paired with observedAtMs, including updates that
-  // contain no new quotes. Older API bodies lack it; their fallback uses the
-  // newest receipt across the single AP observer, never a separate event clock.
-  let newestReceivedAt = catalog.observedMonotonicMs ?? 0;
-  if (catalog.observedMonotonicMs === undefined) {
-    for (const quote of catalog.quotes) {
-      newestReceivedAt = Math.max(newestReceivedAt, quote.receivedMonotonicMs);
-    }
-  }
-  const result = new Map<string, number>();
+  const result = new Map<string,number>();
+  const liveStates = new Map<string,boolean>();
+  const eventAnchors = new Map(catalog.eventReceiptAnchors?.map(anchor => [anchor.providerEventId,anchor]));
   for (const quote of catalog.quotes) {
-    const offsetMs = Math.max(0, newestReceivedAt - quote.receivedMonotonicMs);
-    result.set(quoteIdentity(quote), catalog.observedAtMs + (quote.isLive
-      ? APSPORT_LIVE_QUOTE_MAX_AGE_MS : APSPORT_PREMATCH_QUOTE_MAX_AGE_MS) - offsetMs);
+    // Only a paired publication anchor translates monotonic time into wall time.
+    // An old body without that anchor may use the source timestamp conservatively.
+    const eventAnchor = eventAnchors.get(quote.providerEventId);
+    const anchor = eventAnchor?.observedMonotonicMs ?? catalog.observedMonotonicMs;
+    const latestAnchor = catalog.observedMonotonicMs ?? anchor;
+    const paired = anchor !== undefined && Number.isFinite(anchor) &&
+      latestAnchor !== undefined && Number.isFinite(quote.receivedMonotonicMs) && quote.receivedMonotonicMs <= latestAnchor
+      ? (eventAnchor?.observedAtMs ?? catalog.observedAtMs) - (anchor - quote.receivedMonotonicMs) : Number.POSITIVE_INFINITY;
+    const source = quote.sourceTimestampMs !== null && Number.isFinite(quote.sourceTimestampMs)
+      ? quote.sourceTimestampMs : Number.POSITIVE_INFINITY;
+    result.set(quoteIdentity(quote), Math.min(paired,source));
+    liveStates.set(quoteIdentity(quote),quote.isLive);
   }
-  apsportQuoteDeadlineCache.set(catalog, result);
-  return result;
+  receiptCache.set(catalog,result); nativeLiveCache.set(catalog,liveStates); return result;
 }
 
-function apsportFreshnessIndexes(event: ComparisonEvent): readonly ReadonlyMap<string, number>[] {
-  return event.catalogs.flatMap((catalog) => catalog.provider === "APSPORT" &&
-    catalog.snapshotState !== "STALE" && catalog.quotes.length > 0 ? [apsportQuoteDeadlines(catalog)] : []);
-}
-
-function isFreshApsportQuote(indexes: readonly ReadonlyMap<string, number>[], quote: ProviderQuote,
-  nowMs: number): boolean {
-  if (quote.provider !== "APSPORT") return true;
-  const key = quoteIdentity(quote);
-  for (const index of indexes) {
-    const deadlineMs = index.get(key);
-    if (deadlineMs !== undefined) return nowMs <= deadlineMs;
+function quoteReceipt(event:ComparisonEvent, quote:ProviderQuote):number {
+  let hasCatalog = false;
+  for (const catalog of event.catalogs) {
+    if (catalog.provider !== quote.provider) continue;
+    hasCatalog = true;
+    const receipt = catalogReceipts(catalog).get(quoteIdentity(quote));
+    if (receipt !== undefined) return receipt;
   }
-  return false;
+  if (hasCatalog) return Number.NEGATIVE_INFINITY;
+  // Rows without source catalogs still need original source evidence.
+  return quote.sourceTimestampMs !== null && Number.isFinite(quote.sourceTimestampMs)
+    ? quote.sourceTimestampMs : Number.NEGATIVE_INFINITY;
 }
 
-function freshnessFilteredRow(row: ComparisonRow,
-  freshnessIndexes: readonly ReadonlyMap<string, number>[], nowMs: number): {
-  readonly row: ComparisonRow; readonly rejectedApsportQuote: boolean; readonly rejectedHistoricalQuote: boolean;
+function quotePolicy(event:ComparisonEvent, quote:ProviderQuote, urgent:boolean, nowMs:number) {
+  const sourceCatalog = event.catalogs.find(c => c.provider === quote.provider);
+  let sourceEvents = sourceCatalog === undefined ? undefined : eventIndexCache.get(sourceCatalog);
+  if (sourceCatalog !== undefined && sourceEvents === undefined) {
+    sourceEvents = new Map(sourceCatalog.events.map(event => [event.providerEventId,event]));
+    eventIndexCache.set(sourceCatalog,sourceEvents);
+  }
+  const sourceEvent = sourceEvents?.get(quote.providerEventId);
+  if (sourceCatalog !== undefined) catalogReceipts(sourceCatalog);
+  const nativeLive = sourceCatalog === undefined ? quote.isLive :
+    nativeLiveCache.get(sourceCatalog)?.get(quoteIdentity(quote)) ?? quote.isLive;
+  return footballRefreshPolicy(sourceEvent?.startAtUtcMs ?? (sourceCatalog === undefined ? event.event.startAtUtcMs : null),
+    nativeLive || sourceEvent?.isLive === true,urgent,nowMs);
+}
+
+function freshnessFilteredRow(row:ComparisonRow,event:ComparisonEvent,urgent:boolean,nowMs:number): {
+  readonly row:ComparisonRow; readonly rejectedFootballQuote:boolean; readonly rejectedHistoricalQuote:boolean;
 } {
-  let rejectedApsportQuote = false;
-  let rejectedHistoricalQuote = false;
-  const cells = row.cells.map((cell) => {
+  let rejectedFootballQuote=false;
+  let rejectedHistoricalQuote=false;
+  const fresh = (quote:ProviderQuote):boolean => {
+    if (quote.category !== "FOOTBALL") return true;
+    if (event.catalogs.some(catalog => catalog.provider === quote.provider && catalog.snapshotState === "STALE")) return false;
+    const receipt = quoteReceipt(event,quote);
+    const policy = quotePolicy(event,quote,urgent,nowMs);
+    return Number.isFinite(receipt) && receipt <= nowMs && policy.refreshMs !== null &&
+      nowMs <= receipt + policy.quoteMaxAgeMs;
+  };
+  const cells = row.cells.map(cell => {
     if (cell.historical) {
-      rejectedHistoricalQuote = true;
-      return { ...cell, quotes: [], ...(cell.sourceQuotes === undefined ? {} : { sourceQuotes: [] }) };
+      rejectedHistoricalQuote=true;
+      return {...cell,quotes:[],...(cell.sourceQuotes === undefined ? {} : {sourceQuotes:[]})};
     }
-    if (cell.provider !== "APSPORT") return cell;
-    const quotes = cell.quotes.filter((quote) => {
-      const fresh = isFreshApsportQuote(freshnessIndexes, quote, nowMs);
-      if (!fresh) rejectedApsportQuote = true;
-      return fresh;
+    const quotes=cell.quotes.filter(quote => {
+      const accepted=fresh(quote); if (!accepted) rejectedFootballQuote=true; return accepted;
     });
-    const sourceQuotes = cell.sourceQuotes?.filter((quote) => isFreshApsportQuote(freshnessIndexes, quote, nowMs));
-    return { ...cell, quotes, ...(sourceQuotes === undefined ? {} : { sourceQuotes }) };
+    const sourceQuotes=cell.sourceQuotes?.filter(fresh);
+    return {...cell,quotes,...(sourceQuotes === undefined ? {} : {sourceQuotes})};
   });
-  return { row: { ...row, cells }, rejectedApsportQuote, rejectedHistoricalQuote };
+  return {row:{...row,cells},rejectedFootballQuote,rejectedHistoricalQuote};
 }
 
 export function ticketEdgeSummary(ticket: RankedTicket): EventEdgeSummary | null {
@@ -195,26 +215,13 @@ function priceGaps(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId
   }));
 }
 
-/**
- * The next instant at which ranking could reach a different answer.
- *
- * Ranking was recomputed once a second because the page's clock ticks once a
- * second, and with 654 fixtures on screen that measured 668ms of work per tick
- * - two thirds of a core, spent almost entirely on arriving at the answer it
- * already had. Nothing here actually varies continuously with the clock: a
- * quote's freshness, a verified ticket's expiry and a fixture's kickoff each
- * turn over at one computable moment and hold their answer either side of it.
- *
- * Waking at those moments is the same computation, not a cheaper approximation
- * of it. Coarsening the clock instead would be the cheaper approximation, and
- * it would let an APSPORT quote sit past the deadline that exists to keep a
- * stale price out of a ticket.
- *
- * Returns null when nothing ahead can change, which is the case for a board of
- * fixtures none of which APSPORT prices.
+/** Next quote expiry, verified expiry, kickoff or tier promotion.
+ * Deadlines keep clock ticks from recomputing the full board every second.
+ * Catalog receipt indexes retain the original paired clocks across re-renders.
  */
 export function nextRankingDeadlineMs(input: {
   readonly events: readonly ComparisonEvent[];
+  readonly urgentEventKeys?: ReadonlySet<string>;
   readonly verified: ReadonlyMap<string, VerifiedTicketEvidence>;
   readonly nowMs: number;
 }): number | null {
@@ -223,15 +230,23 @@ export function nextRankingDeadlineMs(input: {
     if (!Number.isFinite(atMs) || atMs <= input.nowMs) return;
     if (earliest === null || atMs < earliest) earliest = atMs;
   };
+  const urgentKeys = input.urgentEventKeys ?? urgentFootballEventKeys(input.events,input.nowMs);
+  const urgentIds = new Set(input.events.filter(event => urgentKeys.has(event.key))
+    .flatMap(event => Object.entries(event.providerEventIds).map(([provider,id]) => `${provider}:${id}`)));
   const measured = new Set<ComparisonEvent["catalogs"][number]>();
   for (const event of input.events) {
-    // A fixture that has not started leaves the board when its kickoff passes.
     if (!event.event.isLive) consider(event.event.startAtUtcMs);
+    const urgent = urgentKeys.has(event.key);
+    const policy = footballRefreshPolicy(event.event.startAtUtcMs,event.event.isLive,urgent,input.nowMs);
+    if (policy.nextBoundaryAtMs !== null) consider(policy.nextBoundaryAtMs);
     for (const catalog of event.catalogs) {
-      if (catalog.provider !== "APSPORT" || catalog.snapshotState === "STALE" ||
-        measured.has(catalog)) continue;
+      if (catalog.category !== "FOOTBALL" || catalog.snapshotState === "STALE" || measured.has(catalog)) continue;
       measured.add(catalog);
-      for (const deadlineMs of apsportQuoteDeadlines(catalog).values()) consider(deadlineMs);
+      for (const quote of catalog.quotes) {
+        const quoteTiming = quotePolicy(event,quote,urgentIds.has(`${quote.provider}:${quote.providerEventId}`),input.nowMs);
+        if (quoteTiming.nextBoundaryAtMs !== null) consider(quoteTiming.nextBoundaryAtMs);
+        consider(quoteReceipt(event,quote)+quoteTiming.quoteMaxAgeMs);
+      }
     }
   }
   for (const evidence of input.verified.values()) consider(evidence.expiresAtMs);
@@ -246,16 +261,17 @@ export function rankTicketsForEvent(input: {
   readonly observationPolicy: FixedBaseStakePolicy;
   readonly nowMs: number;
   readonly limit?: number;
+  readonly urgent?: boolean;
 }): readonly RankedTicket[] {
-  const freshnessIndexes = apsportFreshnessIndexes(input.event);
+  const urgent = input.urgent ?? urgentFootballEventKeys([input.event],input.nowMs).has(input.event.key);
   const tickets = input.event.rows.map((row): RankedTicket => {
-    const freshness = freshnessFilteredRow(row, freshnessIndexes, input.nowMs);
+    const freshness = freshnessFilteredRow(row, input.event, urgent, input.nowMs);
     const safeRow = freshness.row;
     const verified = input.verified.get(`${input.event.key}::${row.key}`);
     const movementMagnitude = movementFor(input.event.key, row.key, input.movements);
     const gapsBySelection = priceGaps(safeRow, input.selectedProviders);
     if (row.opposition === undefined && verified !== undefined && verified.eventKey === input.event.key && verified.rowKey === row.key &&
-      verified.expiresAtMs > input.nowMs && !freshness.rejectedApsportQuote && !freshness.rejectedHistoricalQuote) {
+      verified.expiresAtMs > input.nowMs && !freshness.rejectedFootballQuote && !freshness.rejectedHistoricalQuote) {
       const profitable = new Decimal(verified.plan.worstCaseProfit).gte(20_000);
       return { key: row.key, eventKey: input.event.key, row: safeRow, plan: verified.plan,
         state: profitable ? "VERIFIED_PROFIT" : "VERIFIED_NO_PROFIT",
@@ -264,16 +280,22 @@ export function rankTicketsForEvent(input: {
     }
     const plan = observedStakeEstimates.estimate(`${input.event.key}::${row.key}`, safeRow,
       input.selectedProviders, input.observationPolicy);
+    const historicalPlan = plan === null ? observedStakeEstimates.estimate(`historical::${input.event.key}::${row.key}`,
+      {...row,cells:row.cells.map(({historical: _historical,...cell}) => cell)},input.selectedProviders,input.observationPolicy) : null;
+    const receipts = row.cells.flatMap(cell => cell.quotes.map(quote => quoteReceipt(input.event,quote)))
+      .filter(Number.isFinite);
+    const observationAgeMs = receipts.length > 0 ? Math.max(0,input.nowMs-Math.min(...receipts)) : undefined;
     const opposingProviderPairs = plan === null ? [...new Map(enumerateOpposingLegPairs(row, input.selectedProviders)
       .map(pair => {
         const providers = [pair.first.provider, pair.second.provider].sort() as [ProviderId, ProviderId];
         return [providers.join("|"), providers] as const;
       })).values()] : [];
-    return { key: row.key, eventKey: input.event.key, row: safeRow, plan,
+    return { key: row.key, eventKey: input.event.key, row: safeRow, plan, historicalPlan,
+      ...(observationAgeMs === undefined ? {} : {observationAgeMs}),
       ...(plan === null ? { hasOpposingSources: opposingProviderPairs.length > 0, opposingProviderPairs } : {}),
       ...(plan === null && opposingProviderPairs.length > 0 && row.opposition === undefined ? { auditRow: row } : {}),
-      state: "OBSERVATION", reason: freshness.rejectedHistoricalQuote ? "Waiting for a complete current quote" : freshness.rejectedApsportQuote
-        ? "APSPORT quote freshness not confirmed" : row.opposition !== undefined
+      state: "OBSERVATION", reason: freshness.rejectedHistoricalQuote ? "Waiting for a complete current quote" : freshness.rejectedFootballQuote
+        ? "Football quote freshness not confirmed" : row.opposition !== undefined
           ? "Chỉ ước tính; kiểm tra vé ghép 1X2/cơ hội kép chưa hỗ trợ" : "Provider preflight required", movementMagnitude, gapsBySelection };
   });
 

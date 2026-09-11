@@ -130,6 +130,10 @@ export function buildImCatalogRefreshExpression(generation: string,
     // Five types already yield more markets than the pipeline published when
     // it was last healthy, and leave the request at half the provider budget.
     const MARKET_1_BET_TYPE_LIMIT = 5;
+    // Proven native GetSE has DateFrom only: it mixes near and far events in
+    // each bulk market. A far-only plan cannot prove newly listed near events
+    // absent, so keep the healthy bulk cadence until a native bounded scope is
+    // demonstrated. The safe caller disables per-event GetEBI enrichment.
     const common = { SportId: 1,
       BetTypeIds: betTypeIds,
       GamePeriods: [1, 2, 3], IsCombo: false, ['O' + 'ddsType']: 2,

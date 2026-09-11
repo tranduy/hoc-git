@@ -43,14 +43,14 @@ function intermediate(before: LiveCatalogResponse, current: LiveCatalogResponse,
 describe("intermediate worker native receipt binding", () => {
   it("keeps an identical newly confirmed AP offer calculable after its original snapshot expires", () => {
     const before = catalog("APSPORT", 1_000), current = catalog("APSPORT", 21_000);
-    const output = intermediate(before, current), event = output.freshEvents.find(event => event.rows.length > 0)!;
+    const output = intermediate(before, current, catalog("BTI",21_000)), event = output.freshEvents.find(event => event.rows.length > 0)!;
     const tickets = rankTicketsForEvent({ event, verified: new Map(), movements: [],
       selectedProviders: new Set(["BTI", "APSPORT"]), nowMs: 22_000, limit: 10,
       observationPolicy: { currency: "VND", baseStake: "500000", minStake: "1000",
         maxStake: "1000000000000", stakeStep: "1", balance: "1000000000000" } });
     expect(tickets[0]!.plan).not.toBeNull();
     expect(event.catalogs.find(source => source.provider === "APSPORT")).toBe(current);
-    expect(event.catalogs.find(source => source.provider === "BTI")!.observedAtMs).toBe(1_000);
+    expect(event.catalogs.find(source => source.provider === "BTI")!.observedAtMs).toBe(21_000);
     expect(event.rows[0]!.cells.find(cell => cell.provider === "APSPORT")!.quotes[0])
       .toMatchObject({ receivedMonotonicMs: 21_000, sequence: 21_000, sourceTimestampMs: 21_000 });
     expect(before.quotes[0]!.receivedMonotonicMs).toBe(1_000);
@@ -92,7 +92,7 @@ describe("intermediate worker native receipt binding", () => {
         receivedMonotonicMs: receipt, sourceTimestampMs: receipt, sequence: receipt }))] });
     const before = withNeighbor(catalog("APSPORT", 1_000), 1_000);
     const current = withNeighbor(catalog("APSPORT", 1_000), 21_000);
-    const peer = withNeighbor(catalog("BTI", 1_000), 1_000);
+    const peer = withNeighbor(catalog("BTI", 21_000), 21_000);
     const event = intermediate(before, current, peer).freshEvents.find(event => event.rows.length > 0)!;
     const receipts = event.rows.map(row => ({ line: row.line,
       receipt: row.cells.find(cell => cell.provider === "APSPORT")!.quotes[0]!.receivedMonotonicMs }));

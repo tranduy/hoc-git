@@ -38,6 +38,8 @@ export interface ApsportCatalogBatch {
 }
 
 export interface CollectApsportCatalogOptions {
+  /** A scheduled roster returns to the shared lane after one refused request. */
+  readonly maxAttempts?: number;
   readonly generation: string;
   readonly nowMs: number;
   readonly prematchWindowHours: number;
@@ -45,6 +47,8 @@ export interface CollectApsportCatalogOptions {
   readonly request: (request: ApsportCatalogPageRequest) => Promise<ApsportCatalogPageResponse>;
   readonly sleep: (delayMs: number) => Promise<void>;
   readonly isCurrent: () => boolean;
+  /** Stops new legacy work without invalidating an actual in-flight response. */
+  readonly shouldContinueDetails?: () => boolean;
   readonly onRoster: (batch: ApsportCatalogBatch) => Promise<void>;
   readonly onDetail: (batch: ApsportCatalogBatch) => Promise<void>;
   readonly onDetailState?: (state: ApsportDetailStateUpdate) => void;
@@ -54,7 +58,7 @@ export interface CollectApsportCatalogOptions {
 
 export type ApsportDetailStateUpdate = {
   readonly eventId: string;
-  readonly state: "QUEUED" | "IN_FLIGHT" | "FAILURE" | "INELIGIBLE";
+  readonly state: "QUEUED" | "IN_FLIGHT" | "FAILURE" | "INELIGIBLE" | "CANCELLED";
 } | {
   readonly eventId: string;
   readonly state: "SUCCESS";
@@ -62,6 +66,8 @@ export type ApsportDetailStateUpdate = {
 };
 
 export interface CollectApsportEventDetailOptions {
+  /** Scheduled jobs return the physical slot to their shared queue after one attempt. */
+  readonly maxAttempts?: number;
   readonly eventId: string;
   readonly leagueId?: string;
   readonly template: ApsportRequestTemplate;
@@ -276,17 +282,22 @@ export function buildApsportPageRequestExpression(
         const response = await fetch(input.url, { method: 'POST', headers: input.headers,
           body: JSON.stringify(input.body), credentials: 'include', cache: 'no-store',
           signal: controller.signal });
-        const text = await response.text();
-        let value = text.length === 0 ? null : JSON.parse(text);
-        if (value && typeof value === 'object' && typeof value.data === 'string') {
-          value = value.data.length === 0 ? null : JSON.parse(value.data);
-        } else if (value && typeof value === 'object' && 'data' in value) {
-          value = value.data;
-        }
-        const retryAfterSeconds = Number(response.headers.get('retry-after') || 0);
-        return { status: response.status, data: value,
-          retryAfterMs: Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-            ? Math.min(60000, retryAfterSeconds * 1000) : undefined };
+        const header = response.headers.get('retry-after')?.trim() || '';
+        const delay = /^[0-9]+(?:[.][0-9]+)?$/.test(header)
+          ? Number(header) * 1000 : Date.parse(header) - Date.now();
+        const retryAfterMs = Number.isFinite(delay) && delay > 0
+          ? Math.min(Number.MAX_SAFE_INTEGER, delay) : undefined;
+        let value = null;
+        try {
+          const text = await response.text();
+          value = text.length === 0 ? null : JSON.parse(text);
+          if (value && typeof value === 'object' && typeof value.data === 'string') {
+            value = value.data.length === 0 ? null : JSON.parse(value.data);
+          } else if (value && typeof value === 'object' && 'data' in value) {
+            value = value.data;
+          }
+        } catch { /* A refusal body cannot erase its status or Retry-After. */ }
+        return { status: response.status, data: value, retryAfterMs };
       } finally { clearTimeout(requestTimer); }
     } catch { return { status: 0, data: null }; }
   })()`;
@@ -301,7 +312,7 @@ export function apsportPageResponseFromEvaluation(value: unknown): ApsportCatalo
   return { status: Number.isSafeInteger(status) && status >= 0 && status <= 599 ? status : 0,
     data: response?.data ?? null,
     ...(Number.isFinite(retryAfterMs) && retryAfterMs > 0
-      ? { retryAfterMs: Math.min(maximumRetryDelayMs, retryAfterMs) }
+      ? { retryAfterMs: Math.min(Number.MAX_SAFE_INTEGER, retryAfterMs) }
       : {}) };
 }
 
@@ -339,11 +350,13 @@ function compareDetailPriority(left: ApsportRawEvent, right: ApsportRawEvent): n
 }
 
 async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
-  "template" | "request" | "sleep" | "isCurrent">,
+  "template" | "request" | "sleep" | "isCurrent" | "maxAttempts">,
   rawEvent: ApsportRawEvent): Promise<ApsportCatalogPageResponse | null> {
   const id = eventId(rawEvent);
   if (id === null) return null;
-  for (let attempt = 0; attempt < maxDetailAttempts; attempt += 1) {
+  const attempts = options.maxAttempts ?? maxDetailAttempts;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > maxDetailAttempts) return null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (!options.isCurrent()) return null;
     let response: ApsportCatalogPageResponse;
     try {
@@ -356,22 +369,26 @@ async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
     const transient = response.status === 0 || response.status === 408 || response.status === 429 ||
       response.status >= 500 && response.status <= 599;
     if (!transient) return response;
-    if (attempt + 1 >= maxDetailAttempts) return null;
-    const requestedDelay = response.status === 429 && Number.isFinite(response.retryAfterMs) &&
+    if (attempt + 1 >= attempts || !options.isCurrent()) return null;
+    const requestedDelay = (response.status === 429 || response.status === 503) && Number.isFinite(response.retryAfterMs) &&
       (response.retryAfterMs ?? 0) > 0
       ? response.retryAfterMs!
       : response.status === 429 ? 15_000 * (attempt + 1) : 1_000 * (attempt + 1);
-    await options.sleep(Math.min(maximumRetryDelayMs, requestedDelay));
+    const providerDelay = (response.status === 429 || response.status === 503) &&
+      Number.isFinite(response.retryAfterMs) && (response.retryAfterMs ?? 0) > 0;
+    await options.sleep(providerDelay ? requestedDelay : Math.min(maximumRetryDelayMs, requestedDelay));
     if (!options.isCurrent()) return null;
   }
   return null;
 }
 
 async function rosterResponse(options: Pick<CollectApsportCatalogOptions,
-  "request" | "sleep" | "isCurrent">,
+  "request" | "sleep" | "isCurrent" | "maxAttempts">,
   input: Extract<ApsportCatalogPageRequest, { readonly kind: ApsportRosterRequestKind }>
 ): Promise<ApsportCatalogPageResponse | null> {
-  for (let attempt = 0; attempt < maxRosterAttempts; attempt += 1) {
+  const attempts = options.maxAttempts ?? maxRosterAttempts;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > maxRosterAttempts) throw new Error("APSPORT_ROSTER_ATTEMPTS_INVALID");
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (!options.isCurrent()) return null;
     let response: ApsportCatalogPageResponse;
     try { response = await options.request(input); }
@@ -383,12 +400,14 @@ async function rosterResponse(options: Pick<CollectApsportCatalogOptions,
     }
     const transient = response.status === 0 || response.status === 408 || response.status === 429 ||
       response.status >= 500 && response.status <= 599;
-    if (!transient || attempt + 1 >= maxRosterAttempts) assertRosterResponse(response);
-    const requestedDelay = response.status === 429 && Number.isFinite(response.retryAfterMs) &&
+    if (!transient || attempt + 1 >= attempts) assertRosterResponse(response);
+    const requestedDelay = (response.status === 429 || response.status === 503) && Number.isFinite(response.retryAfterMs) &&
       (response.retryAfterMs ?? 0) > 0
       ? response.retryAfterMs!
       : response.status === 429 ? 15_000 * (attempt + 1) : 1_000 * (attempt + 1);
-    await options.sleep(Math.min(maximumRetryDelayMs, requestedDelay));
+    const providerDelay = (response.status === 429 || response.status === 503) &&
+      Number.isFinite(response.retryAfterMs) && (response.retryAfterMs ?? 0) > 0;
+    await options.sleep(providerDelay ? requestedDelay : Math.min(maximumRetryDelayMs, requestedDelay));
     if (!options.isCurrent()) return null;
   }
   return null;
@@ -453,6 +472,8 @@ export async function collectApsportCatalog(options: CollectApsportCatalogOption
   if (!Number.isSafeInteger(detailDelayMs) || detailDelayMs < 0 || detailDelayMs > 60_000) {
     throw new Error("APSPORT_DETAIL_DELAY_INVALID");
   }
+  const continueDetails = () => options.shouldContinueDetails?.() !== false;
+  if (!continueDetails()) return;
   const detailCandidates = retained.filter((item) => item["6"] !== true);
   for (const candidate of detailCandidates) {
     const id = eventId(candidate);
@@ -461,9 +482,14 @@ export async function collectApsportCatalog(options: CollectApsportCatalogOption
   let allDetailsSucceeded = true;
   for (let index = 0; index < detailCandidates.length; index += 1) {
     if (!options.isCurrent()) return;
+    if (!continueDetails()) {
+      if (batch.length > 0) await options.onDetail({ schemaVersion: 1, generation: options.generation,
+        phase: "DETAIL", complete: false, prematchWindowHours: options.prematchWindowHours, records: batch });
+      return;
+    }
     const candidateId = eventId(detailCandidates[index]!);
     if (candidateId !== null) options.onDetailState?.({ eventId: candidateId, state: "IN_FLIGHT" });
-    const response = await detailResponse(options, detailCandidates[index]!);
+    const response = await detailResponse({ ...options, isCurrent: () => options.isCurrent() && continueDetails() }, detailCandidates[index]!);
     if (!options.isCurrent()) return;
     let detailResolved = false;
     if (response?.status === 200) {
@@ -484,7 +510,7 @@ export async function collectApsportCatalog(options: CollectApsportCatalogOption
     }
     if (!detailResolved) {
       allDetailsSucceeded = false;
-      if (candidateId !== null) options.onDetailState?.({ eventId: candidateId, state: "FAILURE" });
+      if (candidateId !== null) options.onDetailState?.({ eventId: candidateId, state: !continueDetails() && response === null ? "CANCELLED" : "FAILURE" });
     }
     const isLast = index + 1 === detailCandidates.length;
     if (batch.length >= detailBatchSize || isLast) {
@@ -493,7 +519,7 @@ export async function collectApsportCatalog(options: CollectApsportCatalogOption
         prematchWindowHours: options.prematchWindowHours, records: batch });
       batch = [];
     }
-    if (!isLast && detailDelayMs > 0 && options.isCurrent()) await options.sleep(detailDelayMs);
+    if (!isLast && detailDelayMs > 0 && options.isCurrent() && continueDetails()) await options.sleep(detailDelayMs);
   }
   if (detailCandidates.length === 0 && options.isCurrent()) {
     await options.onDetail({ schemaVersion: 1, generation: options.generation,

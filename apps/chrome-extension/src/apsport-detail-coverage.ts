@@ -40,6 +40,15 @@ export class ApsportDetailCoverage {
     this.#rosterEstablished = true;
   }
 
+  cancelQueued(): void {
+    for (const state of this.#events.values()) state.queued = false;
+  }
+
+  markCancelled(eventId: string): void {
+    const state = this.#events.get(eventId);
+    if (state !== undefined) { state.queued = false; state.inFlight = false; }
+  }
+
   markQueued(eventId: string): void {
     const state = this.#events.get(eventId);
     if (state === undefined) return;

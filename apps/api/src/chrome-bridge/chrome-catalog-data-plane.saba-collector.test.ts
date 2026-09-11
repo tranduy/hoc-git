@@ -133,6 +133,7 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     expect(plane.ingest({ ...completeEmptyCollector(6), sourceEpoch: "worker-a:1",
       observedAtMs: WALL + 106, receivedMonotonicMs: sourceClock + 1 })).toBe(true);
     const catalog = await plane.read("catalog-source:SABA:FOOTBALL");
+    expect(catalog).toMatchObject({ observedAtMs: WALL + 106, observedMonotonicMs: apiClock - 29 });
     expect(catalog.quotes).toHaveLength(2);
     expect(catalog.quotes.map(({ receivedMonotonicMs }) => receivedMonotonicMs)).toEqual([apiClock - 30, apiClock - 30]);
   });
@@ -251,4 +252,38 @@ describe("ChromeCatalogDataPlane SABA collector boundary", () => {
     expect(plane.ingest(collectorEnvelope(2), { connectionGeneration: 1 })).toBe(true);
     expect(publish).toHaveBeenCalledOnce();
   });
+});
+
+
+it("does not resurrect prices withdrawn by a scheduled owner capture", async () => {
+  const plane = new ChromeCatalogDataPlane({ now: () => WALL + 100, monotonicNow: () => 1000 });
+  const base = collectorEnvelope(3);
+  const body = JSON.parse(base.payload.body);
+  for (const item of body.records) if (item.kind === "CAPTURE") item.record.providerTimezoneOffsetMinutes = 480;
+  expect(plane.ingest({ ...base, payload: { encoding: "UTF8", body: JSON.stringify(body) } })).toBe(true);
+  const original = body.records.find((item: { kind: string; ownerMatchId?: string }) => item.kind === "CAPTURE" && item.ownerMatchId === "hidden");
+  const scheduled = (sequence: number, price: string) => {
+    const generation = `saba:collector:scheduled-${sequence}`;
+    const expanded = { ...original, collectorGeneration: generation, captureKind: "OWNER_GROUPS_EXPANDED",
+      captureOrdinal: 4, capturedAtMs: WALL + sequence, capturedMonotonicMs: 300 + sequence,
+      record: { ...original.record, groups: [{ ...group("scheduled-extra"), odds: group("scheduled-extra").odds.map(odd => ({ ...odd, priceText: price })) }] } };
+    return { ...base, sequence, observedAtMs: WALL + sequence, receivedMonotonicMs: 400 + sequence,
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ ...body,
+        snapshotId: `saba:collector:scheduled-snapshot-${sequence}`, sweepId: generation,
+        records: [{ ...original, collectorGeneration: generation }, expanded,
+          { kind: "OWNER_COMPLETE", collectorGeneration: generation, period: "TODAY", ownerMatchId: "hidden",
+            safeControlOutcome: "OWNER_GROUPS_EXPANDED", restored: true },
+          { kind: "SCHEDULED_OWNER_TERMINAL", collectorGeneration: generation, mainRosterGeneration: body.sweepId,
+            hiddenMarketsComplete: false, owners: [{ period: "TODAY", ownerMatchId: "hidden" }] }] }) } };
+  };
+  expect(plane.ingest(scheduled(5, "0.95"))).toBe(true);
+  expect((await plane.read("catalog-source:SABA:FOOTBALL")).quotes.some(quote => quote.providerMarketId === "scheduled-extra")).toBe(true);
+  expect(plane.ingest(scheduled(6, "0"))).toBe(true);
+  expect((await plane.read("catalog-source:SABA:FOOTBALL")).quotes.some(quote => quote.providerMarketId === "scheduled-extra")).toBe(false);
+  const closedMain = scheduled(7, "0");
+  closedMain.payload.body = closedMain.payload.body.replaceAll("scheduled-extra", "hidden-market");
+  expect(plane.ingest(closedMain)).toBe(true);
+  const after = await plane.read("catalog-source:SABA:FOOTBALL");
+  expect(after.quotes.some(quote => quote.providerMarketId === "hidden-market")).toBe(false);
+  expect(after.quotes.some(quote => quote.providerMarketId === "legacy-0-market")).toBe(true);
 });

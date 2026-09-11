@@ -1938,3 +1938,31 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read(CMD)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
 });
+
+
+it.each(["CMD", "IM", "SBOBET", "BTI"] as const)("publishes the %s receipt anchor without refreshing retained quote clocks", async provider => {
+  const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+  let receipt: ChromeBridgeEnvelope;
+  if (provider === "CMD") {
+    receipt = cmdHttpEnvelope(1); plane.ingest(receipt);
+  } else if (provider === "IM") {
+    const event = { eid: 112516390, htn: "Monterrey", atn: "Nashville", cn: "Cup",
+      edt: "1970-01-01T00:00:02.000Z", isrbt: false, iscyb: false, mls: [{ mi: 10, bti: 1, gp: 1,
+        ws: [{ wsi: 101, si: 1, hdp: -0.5, dih: "+0.5", o: 0.67 },
+          { wsi: 102, si: 2, hdp: -0.5, dih: "-0.5", o: -0.79 }] }] };
+    plane.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100, sel: [event] }));
+    receipt = imEnvelope(2, "IM_MARKET_2", { StatusCode: 100, sel: [] }); plane.ingest(receipt);
+  } else if (provider === "SBOBET") {
+    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100));
+    plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100));
+    receipt = ksportEarlyEnvelope(3); plane.ingest(receipt);
+  } else {
+    receipt = btiEnvelope(1, btiListPaths[0]);
+    btiListPaths.forEach((path, index) => { receipt = btiEnvelope(index + 1, path); plane.ingest(receipt); });
+  }
+  const catalog = await plane.read(`catalog-source:${provider}:FOOTBALL`);
+  expect(catalog).toMatchObject({ observedAtMs: receipt!.observedAtMs, observedMonotonicMs: receipt!.receivedMonotonicMs });
+  expect(catalog.quotes.length).toBeGreaterThan(0);
+  expect(catalog.quotes.every(quote => quote.receivedMonotonicMs <= receipt!.receivedMonotonicMs)).toBe(true);
+  if (provider === "IM" || provider === "SBOBET") expect(catalog.quotes.some(quote => quote.receivedMonotonicMs < receipt!.receivedMonotonicMs)).toBe(true);
+});

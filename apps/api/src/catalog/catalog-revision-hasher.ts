@@ -32,7 +32,9 @@ export class CatalogRevisionHasher {
     // Keep field/row order and the existing clock projections. The v3 domain
     // separates this representation from the original full-JSON revision.
     for (const [key, value] of Object.entries({ ...semanticCatalog, quotes })) {
-      if (value === undefined) continue;
+      // Native receipt anchors accompany clocks, not semantic price changes.
+      // APSPORT retains its existing per-receipt notification contract.
+      if (value === undefined || key === "observedMonotonicMs" && catalog.provider !== "APSPORT") continue;
       if (!first) hash.update(",");
       first = false;
       hash.update(JSON.stringify(key)).update(":");

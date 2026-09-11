@@ -402,3 +402,18 @@ describe("KEEPALIVE control message", () => {
     }).success).toBe(false);
   });
 });
+
+
+describe("collection plan controls", () => {
+  const command = { version: 1, kind: "SET_COLLECTION_PLAN", sourceId: "chrome:SABA:7",
+    plan: { revision: 1, events: [{ eventId: "e1", startAtUtcMs: null, isLive: true, urgent: false }] } };
+  it("accepts a bounded collection plan", () => {
+    expect(contracts.ChromeBridgeControlMessageSchema.safeParse(command).success).toBe(true);
+  });
+  it("rejects duplicate identities and excess events", () => {
+    for (const events of [[command.plan.events[0], command.plan.events[0]],
+      Array.from({ length: 10001 }, (_, i) => ({ ...command.plan.events[0], eventId: String(i) }))]) {
+      expect(contracts.ChromeBridgeControlMessageSchema.safeParse({ ...command, plan: { revision: 1, events } }).success).toBe(false);
+    }
+  });
+});

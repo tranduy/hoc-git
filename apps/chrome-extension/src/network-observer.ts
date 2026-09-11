@@ -3,7 +3,8 @@ import { imRefreshDiagnostic, type ImRefreshEvaluationDiagnostic } from "./im-re
 import { cmdNativeRequestMetadata, CMD_MORE_PATH } from "./cmd-native-request.js";
 import { buildCmdNativeCatalogRefreshExpression, formatCmdNativeCatalogDiagnostic } from "./cmd-native-catalog-refresh.js";
 import { SbobetRequestBackoff, SBOBET_RETRY_AFTER_EXPRESSION, sbobetRetryAfterMs } from "./sbobet-request-backoff.js";
-import type { ChromeBridgeEnvelope, ChromeBridgeHttpMethod, ChromeLobbyId } from "@tool-chenh/contracts";
+import { footballRefreshPolicy, type FootballCollectionPlan, type ChromeBridgeEnvelope, type ChromeBridgeHttpMethod, type ChromeLobbyId } from "@tool-chenh/contracts";
+import { collectionPlanExpression, createFootballCollectionScheduler, type FootballCollectionScheduler } from "./football-collection-scheduler.js";
 import { utf8ByteLength } from "./utf8-length.js";
 import { splitNetworkBodyText } from "./network-body-chunker.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
@@ -1154,6 +1155,8 @@ export class NetworkObserver {
   readonly #apsportEventDetailTimers = new Map<string, { readonly sourceId: string;
     readonly timer: ReturnType<typeof setTimeout> }>();
   readonly #apsportEventDetailJobs = new Map<string, symbol>();
+  readonly #apsportPhysicalDetailKeys = new Set<string>();
+  readonly #apsportScheduledRetryAtMs = new Map<string, number>();
   readonly #apsportEventDetailLastAtMs = new Map<string, number>();
   readonly #apsportEventDetailTails = new Map<string, Promise<void>>();
   readonly #apsportPageRequestTails = new Map<string, Promise<void>>();
@@ -1229,6 +1232,10 @@ export class NetworkObserver {
   readonly #imReadyBaselines = new Map<string, { readonly observedAtMs: number; readonly isCurrent: () => boolean }>();
   readonly #ksportSnapshotOrdinals = new Map<string, number>();
   readonly #startedTabs = new Set<number>();
+  readonly #collectionPlans = new Map<string, FootballCollectionPlan>();
+  readonly #collectionSchedulers = new Map<string, FootballCollectionScheduler>();
+  readonly #collectionPlanFrames = new WeakMap<MainWorldContextBinding, string>();
+  readonly #collectionPlanInstalls = new Map<string, Promise<void>>();
   readonly #mainWorldContexts = new Map<number, Map<string, MainWorldContextBinding>>();
   readonly #observedChildSessions = new Map<string, Set<string>>();
   readonly #ksportAttachedTargetSessions = new Map<string, Map<string, string>>();
@@ -1980,6 +1987,14 @@ export class NetworkObserver {
   }
 
   beginSourceEpoch(sourceId: string): string {
+    const retainedPlan = this.#collectionPlans.get(sourceId);
+    if (retainedPlan !== undefined) {
+      const { manualRequestId: _manualRequestId, ...plan } = retainedPlan;
+      const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, this.#now);
+      scheduler.setPlan(plan);
+      this.#collectionPlans.set(sourceId, plan);
+      this.#collectionSchedulers.set(sourceId, scheduler);
+    }
     this.#clearSbobetDetail(sourceId);
     this.#retireCmdRecovery(sourceId, "DOCUMENT_CHANGED");
     const priorGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
@@ -2190,6 +2205,12 @@ export class NetworkObserver {
   }
 
   releaseTab(tabId: number): void {
+    for (const sourceId of this.#collectionPlans.keys()) if (sourceId.endsWith(`:${tabId}`)) {
+      this.#collectionPlans.delete(sourceId);
+      this.#collectionSchedulers.delete(sourceId);
+      this.#collectionPlanInstalls.delete(sourceId);
+      this.#apsportScheduledRetryAtMs.delete(sourceId);
+    }
     this.#cmdRequestRetryAtMs.delete(`chrome:CMD:${tabId}`);
     this.#tabGenerations.set(tabId, this.#captureTabGeneration(tabId) + 1);
     this.#startedTabs.delete(tabId);
@@ -2369,7 +2390,82 @@ export class NetworkObserver {
     } catch { finish(); }
   }
 
+  collectionStatus(sourceId: string) { return this.#collectionSchedulers.get(sourceId)?.snapshot() ?? null; }
+
+  async setCollectionPlan(source: ObservedSource, plan: FootballCollectionPlan): Promise<void> {
+    if (!this.#startedTabs.has(source.tabId) || source.sourceId !== `chrome:${source.lobby}:${source.tabId}` ||
+      !["SABA", "IM", "KSPORT", "TSPORT", "BTI", "CMD"].includes(source.lobby)) return;
+    const prior = this.#collectionPlans.get(source.sourceId);
+    if (prior !== undefined && (plan.revision < prior.revision ||
+      (plan.revision === prior.revision && (plan.manualRequestId === undefined ||
+        plan.manualRequestId === prior.manualRequestId ||
+        JSON.stringify(plan.events) !== JSON.stringify(prior.events))))) return;
+    this.#collectionPlans.set(source.sourceId, plan);
+    let scheduler = this.#collectionSchedulers.get(source.sourceId);
+    if (scheduler === undefined) {
+      scheduler = createFootballCollectionScheduler(footballRefreshPolicy, this.#now);
+      this.#collectionSchedulers.set(source.sourceId, scheduler);
+    }
+    scheduler.setPlan(plan);
+    if (source.lobby === "TSPORT") {
+      this.#apsportCoverage(source.sourceId).cancelQueued();
+      for (const key of this.#apsportEventDetailJobs.keys()) {
+        if (!key.startsWith(`${source.sourceId}\u0000`) || this.#apsportPhysicalDetailKeys.has(key)) continue;
+        const pending = this.#apsportEventDetailTimers.get(key);
+        if (pending !== undefined) clearTimeout(pending.timer);
+        this.#apsportEventDetailTimers.delete(key);
+        this.#apsportEventDetailJobs.delete(key);
+      }
+    }
+    await this.#installCollectionPlan(source);
+    if (source.lobby === "TSPORT") this.#pumpApsportCollection(source);
+  }
+
+  #installCollectionPlan(source: ObservedSource): Promise<void> {
+    const prior = this.#collectionPlanInstalls.get(source.sourceId);
+    if (prior !== undefined) return prior;
+    const plan = this.#collectionPlans.get(source.sourceId);
+    if (plan === undefined || !this.#startedTabs.has(source.tabId)) return Promise.resolve();
+    const generation = this.#captureSourceGeneration(source.sourceId);
+    const current = () => this.#collectionPlans.get(source.sourceId) === plan &&
+      this.#isSourceGenerationCurrent(source.sourceId, generation) && this.#startedTabs.has(source.tabId);
+    const operation = (async () => {
+      const expression = collectionPlanExpression(plan);
+      const installationKey = JSON.stringify([plan.revision, plan.manualRequestId ?? null]);
+      for (const context of [...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])].slice(0, 12)) {
+        if (!current()) return;
+        if (this.#collectionPlanFrames.get(context) === installationKey) continue;
+        const params = { expression, contextId: context.contextId, returnByValue: true, awaitPromise: false };
+        try {
+          const result = await this.#withFrameCommandTimeout(context.sessionId === undefined
+            ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+            : this.#sendCommand(source.tabId, "Runtime.evaluate", params, context.sessionId), 2_000);
+          if (current() && (!isRecord(result) || result.exceptionDetails === undefined)) {
+            this.#collectionPlanFrames.set(context, installationKey);
+          }
+        } catch { /* A retired context waits for its replacement; no source recovery. */ }
+      }
+    })().finally(() => { if (this.#collectionPlanInstalls.get(source.sourceId) === operation) {
+      this.#collectionPlanInstalls.delete(source.sourceId);
+    } });
+    this.#collectionPlanInstalls.set(source.sourceId, operation);
+    return operation;
+  }
+
+  #pumpApsportCollection(source: ObservedSource): void {
+    const scheduler = this.#collectionSchedulers.get(source.sourceId);
+    const active = this.#apsportActiveCatalogs.get(source.sourceId);
+    if (scheduler === undefined || active === undefined || this.#apsportRefreshesInFlight.has(source.sourceId) ||
+      (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) > this.#now()) return;
+    const due = [...active.hiddenDetailEventIds].filter(id => scheduler.due(id, null));
+    for (const id of scheduler.sort(due).slice(0, 4)) {
+      this.#scheduleApsportEventDetail(source, id, active.rosterLeagueIds.get(id));
+    }
+  }
+
   async maintain(source: ObservedSource): Promise<void> {
+    void this.#installCollectionPlan(source);
+    if (source.lobby === "TSPORT") this.#pumpApsportCollection(source);
     const pulsePage = async (): Promise<void> => {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Emulation.setFocusEmulationEnabled", { enabled: true })).catch(() => ({}));
@@ -2893,6 +2989,16 @@ export class NetworkObserver {
           adapter, inFlight: false, restorePending: false, finished: false, mainRosterPublished: false,
           publicMarketSampleKinds: new Set(),
           collector: new SabaHiddenMarketCollector({ binding, adapter, publishMainRosterFirst: true,
+            shouldCaptureOwner: (_period, owner, lastVisitAtMs) => {
+              const scheduler = this.#collectionSchedulers.get(source.sourceId);
+              return scheduler ? scheduler.due(owner.ownerMatchId, lastVisitAtMs)
+                : lastVisitAtMs === null || this.#now() - lastVisitAtMs >= 45_000;
+            },
+            onCaptured: (_period, owner, observedAtMs) =>
+              this.#collectionSchedulers.get(source.sourceId)?.completed(owner.ownerMatchId, observedAtMs),
+            sortOwners: ids => this.#collectionSchedulers.get(source.sourceId)?.sort(ids) ?? [...ids],
+            nowMs: this.#now,
+            isSchedulingEnabled: () => this.#collectionSchedulers.has(source.sourceId),
             collectorGeneration: `saba:collector:${source.tabId}:${this.#now()}` }) });
       } else if (isRecord(diagnostic) && diagnostic.mutated === false) {
         // Read-only discovery has no terminal coverage result to retain. A
@@ -2923,6 +3029,7 @@ export class NetworkObserver {
       return !this.#sabaProbePublicationBlocks.has(source.sourceId);
     }
     if (state.inFlight) return false;
+    if (state.finished && state.collector.scheduledCollection && !state.collector.terminalError) state.finished = false;
     if (state.finished && !this.#sabaCollectorDomBlocks.has(source.sourceId)) return true;
     state.inFlight = true;
     try {
@@ -2942,12 +3049,15 @@ export class NetworkObserver {
         (!state.collector.mainRosterComplete || state.mainRosterPublished),
       { maxPassiveOwnersPerSlice: 512 });
     if (!current()) return false;
+    if (result?.mainRosterChanged) state.mainRosterPublished = false;
     const collectionErrorCode = state.lastErrorCode();
     const collectionFailure = state.takePageFailure();
     // A captured Today owner has already proved two stable closed reads on the
     // bound document. Do not repeat that whole-page proof; no-control and Early
     // slices still need independent Today restoration before publication.
     let restored = result?.status === "COMPLETE" ||
+      (result?.status === "INCOMPLETE" && result.scheduledVisits !== undefined &&
+        (result.scheduledVisits.length === 0 || result.scheduledVisits.at(-1)?.period === "TODAY")) ||
       (!state.mainRosterPublished && result?.mainRosterItems !== undefined && result.status === "INCOMPLETE") ||
       (result?.status === "INCOMPLETE" &&
       result.items.some((item) => item.kind === "OWNER_COMPLETE" && item.period === "TODAY" &&
@@ -3040,6 +3150,24 @@ export class NetworkObserver {
       return restored;
     }
     if (result?.status === "INCOMPLETE") {
+      const scheduled = result.scheduledItems;
+      const terminal = scheduled?.find(item => item.kind === "SCHEDULED_OWNER_TERMINAL");
+      if (scheduled && terminal && restored && state.mainRosterPublished) {
+        const chunks = chunkCmdSnapshot(scheduled, terminal.collectorGeneration, undefined, {
+          sweepId: terminal.collectorGeneration, sweepComplete: true,
+          sweepFrameKey: state.binding.frameKey, sweepDocumentKey: state.binding.documentKey
+        });
+        const observedAtMs = this.#now();
+        const receivedMonotonicMs = this.#monotonicNow();
+        for (const chunk of chunks) {
+          if (!current()) return false;
+          await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT",
+            { encoding: "UTF8", body: JSON.stringify(chunk) }, {
+              observedAtMs, receivedMonotonicMs, sourceGeneration: state.sourceGeneration,
+              tabGeneration: state.tabGeneration, beforeForward: () => current()
+            });
+        }
+      }
       const completedOwners = result.candidateItems.filter((item) => item.kind === "OWNER_COMPLETE").length;
       const expandedOwners = result.candidateItems.filter((item) => item.kind === "CAPTURE" &&
         item.captureKind !== "ROSTER").length;
@@ -4273,6 +4401,9 @@ export class NetworkObserver {
   async #requestApsportPage(source: ObservedSource, template: BoundApsportRequestTemplate,
     input: ApsportCatalogPageRequest) {
     if (!this.#apsportTemplateIsCurrent(source, template)) return { status: 0, data: null };
+    const scheduled = this.#collectionSchedulers.has(source.sourceId);
+    const retryInMs = () => Math.max(0, (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) - this.#now());
+    if (scheduled && retryInMs() > 0) return { status: 429, data: null, retryAfterMs: retryInMs() };
     const prior = this.#apsportPageRequestTails.get(source.sourceId) ?? Promise.resolve();
     let release!: () => void;
     const turn = new Promise<void>((resolve) => { release = resolve; });
@@ -4281,6 +4412,7 @@ export class NetworkObserver {
     await prior.catch(() => undefined);
     try {
       if (!this.#apsportTemplateIsCurrent(source, template)) return { status: 0, data: null };
+      if (scheduled && retryInMs() > 0) return { status: 429, data: null, retryAfterMs: retryInMs() };
       this.#lastCaptureExit.set(source.sourceId, `APSPORT_${input.kind}_START`);
       const binding = this.#mainWorldContexts.get(source.tabId)?.get(template.frameId);
       if (binding === undefined || binding.sessionId !== template.sessionId) return { status: 0, data: null };
@@ -4292,7 +4424,17 @@ export class NetworkObserver {
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId),
       APSPORT_PAGE_REQUEST_TIMEOUT_MS).catch(() => null);
+      if (!this.#apsportTemplateIsCurrent(source, template)) return { status: 0, data: null };
       const response = apsportPageResponseFromEvaluation(evaluation);
+      if (scheduled && (response.status === 429 || response.status === 401 || response.status === 403 ||
+        response.status === 0 || response.status >= 500)) {
+        const localWaitMs = response.status === 429 ? 15_000
+          : response.status === 401 || response.status === 403 ? 60_000 : 10_000;
+        const waitMs = Math.max(localWaitMs, response.retryAfterMs ?? 0);
+        this.#apsportScheduledRetryAtMs.set(source.sourceId, Math.max(
+          this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0,
+          Math.min(Number.MAX_SAFE_INTEGER, this.#now() + waitMs)));
+      }
       this.#lastCaptureExit.set(source.sourceId, `APSPORT_${input.kind}_${response.status}`);
       return response;
     } finally {
@@ -4310,6 +4452,10 @@ export class NetworkObserver {
       !this.#apsportRequestTemplates.has(source.sourceId)) return;
     const key = `${source.sourceId}\u0000${eventId}`;
     if (this.#apsportEventDetailJobs.has(key)) return;
+    const scheduler = this.#collectionSchedulers.get(source.sourceId);
+    if (scheduler !== undefined && (!scheduler.due(eventId, null) ||
+      (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) > this.#now() ||
+      [...this.#apsportEventDetailJobs.keys()].filter(id => id.startsWith(`${source.sourceId}\u0000`)).length >= 6)) return;
     const token = Symbol(eventId);
     this.#apsportEventDetailJobs.set(key, token);
     this.#apsportCoverage(source.sourceId).markQueued(eventId);
@@ -4326,8 +4472,12 @@ export class NetworkObserver {
       const prior = this.#apsportEventDetailTails.get(source.sourceId) ?? Promise.resolve();
       const operation = prior.catch(() => undefined).then(async () => {
         if (this.#apsportEventDetailJobs.get(key) !== token) return;
+        if (scheduler !== undefined && !scheduler.due(eventId, null)) return;
+        if ((this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) > this.#now()) return;
         this.#apsportCoverage(source.sourceId).markInFlight(eventId);
-        await this.#refreshApsportEventDetail(source, eventId, leagueId);
+        this.#apsportPhysicalDetailKeys.add(key);
+        try { await this.#refreshApsportEventDetail(source, eventId, leagueId); }
+        finally { this.#apsportPhysicalDetailKeys.delete(key); }
         // Preserve the provider-safe cadence used by full sweeps while the
         // independent queue works through every roster event.
         await new Promise<void>((resolve) => setTimeout(resolve, APSPORT_DETAIL_DELAY_MS));
@@ -4360,6 +4510,7 @@ export class NetworkObserver {
     let detailed: Record<string, unknown> | null;
     try {
       detailed = await this.#collectApsportEventDetail({ eventId,
+        ...(this.#collectionSchedulers.has(source.sourceId) ? { maxAttempts: 1 } : {}),
         ...(rosterLeagueId === undefined ? {} : { leagueId: rosterLeagueId }),
         template: { origin: template.origin, headers: template.headers, body: template.body },
         request: (input) => this.#requestApsportPage(source, template, input),
@@ -4413,6 +4564,7 @@ export class NetworkObserver {
         verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
           ...(template.sessionId === undefined ? {} : { sessionId: template.sessionId }) }
       });
+    if (isCurrent()) this.#collectionSchedulers.get(source.sourceId)?.completed(eventId, this.#now());
   }
 
   async #probeApsportEventDetail(source: ObservedSource,
@@ -4479,6 +4631,8 @@ export class NetworkObserver {
       this.#lastCaptureExit.set(source.sourceId, "APSPORT_TEMPLATE_GENERATION_STALE");
       return;
     }
+    if (this.#collectionSchedulers.has(source.sourceId) &&
+      (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) > this.#now()) return;
     const refreshStartedAtMs = this.#now();
     const previousRefreshAtMs = this.#apsportLastRefreshStartedAtMs.get(source.sourceId);
     if (previousRefreshAtMs !== undefined &&
@@ -4514,9 +4668,11 @@ export class NetworkObserver {
     this.#apsportRefreshesInFlight.set(source.sourceId, refreshToken);
     try {
       await this.#collectApsportCatalog({ generation, nowMs: refreshStartedAtMs, prematchWindowHours,
+        ...(this.#collectionSchedulers.has(source.sourceId) ? { maxAttempts: 1 } : {}),
         template: { origin: template.origin, headers: template.headers, body: template.body }, request,
         sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
-        isCurrent: refreshIsCurrent, onRoster: async (batch) => {
+        isCurrent: refreshIsCurrent,
+        shouldContinueDetails: () => !this.#collectionSchedulers.has(source.sourceId), onRoster: async (batch) => {
           const roster = batch.records.flatMap((record) => {
               const rawEventId = record["2"];
               const eventId = typeof rawEventId === "string" || typeof rawEventId === "number"
@@ -4552,13 +4708,15 @@ export class NetworkObserver {
                 rosterEventIds });
             this.#apsportCoverage(source.sourceId).reconcileRoster(roster
               .filter(({ hiddenDetail }) => hiddenDetail).map(({ eventId }) => eventId));
-            if (options.rosterOnly === true) {
+            if (this.#collectionSchedulers.has(source.sourceId)) {
+              this.#pumpApsportCollection(source);
+            } else if (options.rosterOnly === true) {
               for (const item of roster) {
                 if (item.hiddenDetail) this.#scheduleApsportEventDetail(source, item.eventId, item.leagueId);
               }
             }
           }
-          if (options.rosterOnly === true && batch.complete) rosterOnlyComplete = true;
+          if ((options.rosterOnly === true || this.#collectionSchedulers.has(source.sourceId)) && batch.complete) rosterOnlyComplete = true;
         }, onDetail: emitBatch,
         onDetailState: (state) => {
           if (!refreshIsCurrent()) return;
@@ -4592,6 +4750,7 @@ export class NetworkObserver {
     } finally {
       if (this.#apsportRefreshesInFlight.get(source.sourceId) === refreshToken) {
         this.#apsportRefreshesInFlight.delete(source.sourceId);
+        if (templateIsCurrent()) this.#pumpApsportCollection(source);
       }
     }
   }
@@ -5042,6 +5201,7 @@ export class NetworkObserver {
     else if (state.state === "INELIGIBLE") coverage.removeEvent(state.eventId);
     else if (state.state === "QUEUED") coverage.markQueued(state.eventId);
     else if (state.state === "IN_FLIGHT") coverage.markInFlight(state.eventId);
+    else if (state.state === "CANCELLED") coverage.markCancelled(state.eventId);
     else coverage.markFailure(state.eventId);
   }
 
@@ -6116,6 +6276,7 @@ export class NetworkObserver {
     let state = this.#sbobetMoreStates.get(source.sourceId);
     if (state === undefined) {
       const refresh = new SbobetCatalogRefresh({ mode: "COMPLEMENTARY_MORE", now: this.#now,
+        collectionScheduler: () => this.#collectionSchedulers.get(source.sourceId),
         canRequest: () => !this.#sbobetRequestBackoff.paused(),
         allocateRequestStartSequence: () => Math.max(0, (this.#sequences.get(source.sourceId) ?? 0) - 1),
         request: input => this.#requestSbobetMore(state!, input),

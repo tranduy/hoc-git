@@ -85,14 +85,14 @@ describe("exact rows waiting for prices", () => {
     const expired = topRankedTicketItems([rank(event, undefined, nowMs + 15_001)]);
     expect(expired).toHaveLength(1);
     expect(expired[0]!.ticket).toMatchObject({ plan: null, hasOpposingSources: true,
-      reason: "APSPORT quote freshness not confirmed" });
+      reason: "Football quote freshness not confirmed" });
     expect(expired[0]!.ticket.row.cells.find(cell => cell.provider === "APSPORT")!.quotes).toEqual([]);
     expect(topRankedTicketItems([rank(event, new Set(["CMD"]), nowMs + 15_001)])).toEqual([]);
   });
 
   it("puts every usable plan, including a losing one, ahead of exact waiting rows", () => {
     const waiting = buildComparisonEvents([catalog("CMD", ["1.9", "2.1"]), catalog("APSPORT", ["2.12", "1.92"])])[0]!;
-    const fresh = buildComparisonEvents([catalog("CMD", ["1.8", "1.8"]), catalog("BTI", ["1.8", "1.8"])])[0]!;
+    const fresh = buildComparisonEvents([catalog("CMD", ["1.8", "1.8"]), catalog("BTI", ["1.8", "1.8"])].map(source => ({...source, quotes:source.quotes.map(quote => ({...quote,sourceTimestampMs:nowMs+15001}))})))[0]!;
     const result = topRankedTicketItems([rank(waiting, undefined, nowMs + 15_001),
       rank({ ...fresh, key: "fresh-negative" }, undefined, nowMs + 15_001)]);
     expect(result).toHaveLength(2);

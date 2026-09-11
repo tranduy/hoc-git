@@ -48,6 +48,8 @@ export interface LocalBridgeOptions {
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer?: (handle: unknown) => void;
   readonly onOpen?: () => void | Promise<void>;
+  readonly onCollectionPlan?: (request: Omit<Extract<ChromeBridgeControlMessage,
+    { readonly kind: "SET_COLLECTION_PLAN" }>, "version" | "kind">) => void | Promise<void>;
   readonly onSnapshotRequest?: (request: Omit<Extract<ChromeBridgeControlMessage,
     { readonly kind: "REQUEST_SNAPSHOT" }>, "version" | "kind">) => void | Promise<void>;
   readonly onSourceResync?: (sourceId: string) => void | Promise<void>;
@@ -76,6 +78,7 @@ export class LocalBridge {
   readonly #setTimer: (callback: () => void, delayMs: number) => unknown;
   readonly #clearTimer: (handle: unknown) => void;
   readonly #onOpen: () => void | Promise<void>;
+  readonly #onCollectionPlan: NonNullable<LocalBridgeOptions["onCollectionPlan"]>;
   readonly #onSnapshotRequest: NonNullable<LocalBridgeOptions["onSnapshotRequest"]>;
   readonly #onSourceResync: (sourceId: string) => void | Promise<void>;
   readonly #onSourceReload: (sourceId: string) => void | Promise<void>;
@@ -134,6 +137,7 @@ export class LocalBridge {
     this.#setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     this.#onOpen = options.onOpen ?? (() => undefined);
+    this.#onCollectionPlan = options.onCollectionPlan ?? (() => undefined);
     this.#onSnapshotRequest = options.onSnapshotRequest ?? (() => undefined);
     this.#onSourceResync = options.onSourceResync ??
       ((sourceId) => this.#onSnapshotRequest({ sourceId, prematchWindowHours: undefined }));
@@ -395,6 +399,12 @@ export class LocalBridge {
       const parsed = ChromeBridgeControlMessageSchema.safeParse(JSON.parse(raw));
       if (!parsed.success) return;
       this.#lastServerContactAtMs = this.#now();
+      if (parsed.data.kind === "SET_COLLECTION_PLAN") {
+        const { sourceId, plan } = parsed.data;
+        try { void Promise.resolve(this.#onCollectionPlan({ sourceId, plan })).catch(() => undefined); }
+        catch { /* collection failures cannot interrupt the bridge */ }
+        return;
+      }
       if (parsed.data.kind === "REQUEST_SNAPSHOT") {
         const { sourceId, prematchWindowHours } = parsed.data;
         this.#enqueueSnapshotRecovery({ sourceId, prematchWindowHours });

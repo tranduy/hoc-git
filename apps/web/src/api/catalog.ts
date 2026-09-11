@@ -30,6 +30,10 @@ export interface LiveCatalogResponse {
   readonly observedAtMs: number;
   /** Receipt clock captured together with observedAtMs in the source observer. */
   readonly observedMonotonicMs?: number;
+  /** Original paired clocks for event subsets retained by local hydration. */
+  readonly eventReceiptAnchors?: readonly {
+    readonly providerEventId: string; readonly observedAtMs: number; readonly observedMonotonicMs: number;
+  }[];
   readonly snapshotState?: "FRESH" | "STALE";
   readonly rejectedMarketCount: number;
   readonly events: readonly ProviderEvent[];
@@ -128,6 +132,22 @@ function validateCatalogEnvelope(value: unknown, expectedAccountId: string,
   if (typeof value !== "object" || value === null) throw new Error("Invalid live catalog response");
   const record = value as Record<string, unknown>;
   const nativeCoverageByEvent = parseNativeCoverage(record.nativeCoverageByEvent);
+  let eventReceiptAnchors: LiveCatalogResponse["eventReceiptAnchors"];
+  if (record.eventReceiptAnchors !== undefined) {
+    if (!Array.isArray(record.eventReceiptAnchors)) throw new Error("Invalid receipt anchors");
+    const seen = new Set<string>();
+    eventReceiptAnchors = record.eventReceiptAnchors.map((anchor: unknown) => {
+      if (typeof anchor !== "object" || anchor === null) throw new Error("Invalid receipt anchor");
+      const item = anchor as Record<string,unknown>;
+      if (typeof item.providerEventId !== "string" || seen.has(item.providerEventId) ||
+        typeof item.observedAtMs !== "number" || !Number.isFinite(item.observedAtMs) ||
+        typeof item.observedMonotonicMs !== "number" || !Number.isFinite(item.observedMonotonicMs) ||
+        item.observedMonotonicMs < 0) throw new Error("Invalid receipt anchor");
+      seen.add(item.providerEventId);
+      return {providerEventId:item.providerEventId,observedAtMs:item.observedAtMs,
+        observedMonotonicMs:item.observedMonotonicMs};
+    });
+  }
   const events = validateArray(record.events, ProviderEventSchema);
   const markets = validateArray(record.markets, ProviderMarketSchema);
   const quotes = validateArray(record.quotes, ProviderQuoteSchema);
@@ -153,6 +173,7 @@ function validateCatalogEnvelope(value: unknown, expectedAccountId: string,
     dataMode: "LIVE", accountId: expectedAccountId, provider: record.provider as ProviderId, category: category.data,
     comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: record.observedAtMs,
     ...(record.observedMonotonicMs === undefined ? {} : { observedMonotonicMs: record.observedMonotonicMs }),
+    ...(eventReceiptAnchors === undefined ? {} : {eventReceiptAnchors}),
     snapshotState: record.snapshotState === "STALE" ? "STALE" : "FRESH",
     rejectedMarketCount: record.rejectedMarketCount,
     events: events.data, markets: markets.data, quotes: quotes.data,
@@ -284,7 +305,9 @@ export class CatalogApi implements CatalogApiLike {
         method: useBody ? "POST" : "GET", cache: "no-store", signal: controller.signal,
         ...(useBody ? { headers: { "content-type": "application/json" },
           body: JSON.stringify(Object.fromEntries(new URLSearchParams(query))) }
-          : cached === undefined ? {} : { headers: { "if-none-match": cached.etag } })
+          // Semantic ETags deliberately ignore most receipt clocks. Due event
+          // reads need the current body even when the actual price is unchanged.
+          : cached === undefined || viewKey.startsWith("events:") ? {} : { headers: { "if-none-match": cached.etag } })
       });
       if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
       // A separate transfer budget is opt-in; existing callers keep one deadline.
