@@ -20,13 +20,34 @@ describe("football collection scheduling", () => {
 
   it("uses native timing consistently for receipt tiers and near-first ordering", () => {
     const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, () => at);
-    scheduler.setPlan({ revision: 1, events: [] });
+    scheduler.setPlan({ revision: 1, events: [
+      { eventId: "a-far", startAtUtcMs: at + 30 * hour, isLive: false, urgent: false },
+      { eventId: "z-near", startAtUtcMs: at + hour, isLive: false, urgent: false }
+    ] });
     expect(scheduler.due("a-far", null, at + 30 * hour, false)).toBe(true);
     expect(scheduler.due("z-near", null, at + hour, false)).toBe(true);
     expect(scheduler.sort(["a-far", "z-near"])).toEqual(["z-near", "a-far"]);
     scheduler.completed("a-far", at);
     expect(scheduler.due("a-far", at, at + 30 * hour, false)).toBe(false);
     expect(scheduler.policy("a-far").tier).toBe("24_72H");
+  });
+  it("does not spend detail capacity on an event omitted by the paired-fixture plan", () => {
+    const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, () => at);
+    scheduler.setPlan(plan());
+
+    expect(scheduler.due("unmatched", null, at + hour, false)).toBe(false);
+    expect(scheduler.due("near", null)).toBe(true);
+  });
+  it("puts one uncollected 24-72 hour event into every four-item batch", () => {
+    const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, () => at);
+    scheduler.setPlan({ revision: 1, events: [
+      ...Array.from({ length: 8 }, (_, index) => ({ eventId: `near-${index}`,
+        startAtUtcMs: at + hour, isLive: false, urgent: false })),
+      { eventId: "far", startAtUtcMs: at + 30 * hour, isLive: false, urgent: false }
+    ] });
+
+    expect(scheduler.sort(["near-0", "near-1", "near-2", "near-3", "near-4", "far"])
+      .slice(0, 4)).toContain("far");
   });
   it("retains native timing through unchanged plans and invalidates it on authoritative timing changes", () => {
     const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, () => at);

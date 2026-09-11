@@ -46,13 +46,18 @@ export function footballCollectionPlans(catalogs: readonly LiveCatalogResponse[]
   const groups = planningGroups(sources);
   const urgentKeys = urgentFootballEventKeys(groups,nowMs);
   const urgentIds = new Map<ProviderId, Set<string>>();
+  const pairableIds = new Map<ProviderId, Set<string>>();
   for (const group of groups) {
-    if (!urgentKeys.has(group.key)) continue;
+    if (new Set(group.providers).size < 2) continue;
     for (const provider of group.providers) {
       const id = group.providerEventIds[provider];
       if (id === undefined) continue;
-      const ids = urgentIds.get(provider) ?? new Set<string>();
-      ids.add(id); urgentIds.set(provider,ids);
+      const paired = pairableIds.get(provider) ?? new Set<string>();
+      paired.add(id); pairableIds.set(provider,paired);
+      if (urgentKeys.has(group.key)) {
+        const urgent = urgentIds.get(provider) ?? new Set<string>();
+        urgent.add(id); urgentIds.set(provider,urgent);
+      }
     }
   }
   const plans = new Map<ProviderId, FootballCollectionPlan>();
@@ -60,7 +65,8 @@ export function footballCollectionPlans(catalogs: readonly LiveCatalogResponse[]
     const previous = plans.get(catalog.provider)?.events ?? [];
     const events = new Map(previous.map(event => [event.eventId,event]));
     for (const event of catalog.events) {
-      if (event.category !== "FOOTBALL" || event.isVirtual !== false) continue;
+      if (event.category !== "FOOTBALL" || event.isVirtual !== false ||
+        pairableIds.get(catalog.provider)?.has(event.providerEventId) !== true) continue;
       events.set(event.providerEventId,{eventId:event.providerEventId,
         startAtUtcMs:Number.isFinite(event.startAtUtcMs) && event.startAtUtcMs > 0 ? event.startAtUtcMs : null,
         isLive:event.isLive, urgent:urgentIds.get(catalog.provider)?.has(event.providerEventId) ?? false});

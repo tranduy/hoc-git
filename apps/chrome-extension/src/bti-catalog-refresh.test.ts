@@ -101,6 +101,24 @@ describe("BTI All Early roster", () => {
     expect(completed).toHaveBeenCalledWith("near", receipt);
   });
 
+  it("retains and requests detail only for events in the installed comparison plan", async () => {
+    const h = harness(["unpaired-a", "paired", "unpaired-b"]);
+    h.root.__fieldlineCollectionPlanV1 = { revision: 1,
+      events: [{ eventId: "paired", startAtUtcMs: START + 60_000, isLive: false }] };
+    h.root.__fieldlineCollectionSchedulerV1 = {
+      policy: () => ({ refreshMs: 30_000 }), due: () => true,
+      sort: (ids: string[]) => ids, completed: vi.fn()
+    };
+
+    await h.refresh(); await h.settle();
+
+    expect(h.requests.map(request => request.eventId)).toEqual(["paired"]);
+    expect(h.cache().map(item => item.eventId)).toEqual(["paired"]);
+    expect(JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!)).toMatchObject({
+      detailRosterEvents: 1, detailCachedEvents: 1, detailOverCapEvents: 0
+    });
+  });
+
   it("discovers leagues beyond the initial ten and hydrates by master ID before publishing", async () => {
     const root: PageRoot = { dataset: {} };
     const requests: string[] = [];

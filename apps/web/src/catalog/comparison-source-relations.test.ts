@@ -109,7 +109,7 @@ describe("native source relations", () => {
     }
   });
 
-  it.each(["SUSPENDED", "PROFILE", "LINE", "PERIOD"] as const)(
+  it.each(["SUSPENDED", "PROFILE", "PERIOD"] as const)(
     "keeps the %s gate on recovered fixture relations", gate => {
       const bti = catalog("BTI", "Huracan");
       const ap = catalog("APSPORT", "Huracan (ARG)");
@@ -117,12 +117,21 @@ describe("native source relations", () => {
       const im: LiveCatalogResponse = { ...original,
         markets: original.markets.map(market => gate === "SUSPENDED" ? { ...market, status: "SUSPENDED" }
           : gate === "PROFILE" ? { ...market, settlementProfile: "different-settlement" }
-          : gate === "LINE" ? { ...market, line: "3.5" }
           : { ...market, marketType: "FH_TOTAL", scope: "FIRST_HALF" }),
-        quotes: original.quotes.map(quote => gate === "LINE" ? { ...quote, line: "3.5" }
-          : gate === "PERIOD" ? { ...quote, marketType: "FH_TOTAL", scope: "FIRST_HALF" } : quote) };
+        quotes: original.quotes.map(quote => gate === "PERIOD"
+          ? { ...quote, marketType: "FH_TOTAL", scope: "FIRST_HALF" } : quote) };
       expect(pairs([bti, ap, im])).toEqual(pairs([bti, ap]));
     });
+
+  it("recovers a different-line total relation when the lower over and higher under cover every result", () => {
+    const bti = catalog("BTI", "Huracan");
+    const ap = catalog("APSPORT", "Huracan (ARG)");
+    const original = catalog("IM", "Club Atletico Huracan");
+    const im: LiveCatalogResponse = { ...original,
+      markets: original.markets.map(market => ({ ...market, line: "3.5" })),
+      quotes: original.quotes.map(quote => ({ ...quote, line: "3.5" })) };
+    expect(pairs([bti, ap, im])).toEqual([...pairs([bti, ap]), ...pairs([bti, im])].sort());
+  });
 
   it("qualifies reused native market IDs by their native fixture before assembling quotes", () => {
     const ap = catalog("APSPORT", "Huracan", "ap-huracan", "reused-native-market");

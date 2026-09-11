@@ -63,6 +63,27 @@ describe("proven native football equivalences",()=>{
     for(const c of result){expect(c.sourceMarket).toBe(source.market);expect(c.sourceQuotes).toBe(source.quotes);
       expect(c.quotes[0]!.rawOdds).toBe("2.1");expect(c.quotes[0]!.receivedMonotonicMs).toBe(13);expect(c.quotes[0]!.sequence).toBe(14);}
   });
+  it.each([
+    ["CORNER_FT_1X2", "CORNER_FT_AH"],
+    ["CORNER_FH_1X2", "CORNER_FH_AH"]
+  ] as const)("projects %s team wins to the exact half-corner handicap predicates", (type, target) => {
+    const source = cell(type, null, ["HOME", "DRAW", "AWAY"]);
+    const result = footballComparisonEquivalents(source);
+    expect(result.map(c => [c.market.marketType, c.market.line, c.quotes.map(q => q.selection)]))
+      .toEqual([[target, "-0.5", ["HOME"]], [target, "0.5", ["AWAY"]]]);
+    for (const projected of result) {
+      expect(projected.sourceMarket).toBe(source.market);
+      expect(projected.sourceQuotes).toBe(source.quotes);
+    }
+  });
+  it("projects only the easier prematch over leg onto observed higher total lines", () => {
+    const source = cell("CORNER_FT_TOTAL", "8", ["OVER", "UNDER"]);
+    const result = footballComparisonEquivalents(source, ["7.5", "8", "8.25", "8.5", "9"]);
+    expect(result.map(c => [c.market.line, c.quotes.map(q => q.selection)]))
+      .toEqual([["8.25", ["OVER"]], ["8.5", ["OVER"]], ["9", ["OVER"]]]);
+    expect(footballComparisonEquivalents(cell("CORNER_FT_TOTAL", "8", ["OVER"], true), ["8.5"]))
+      .toEqual([]);
+  });
   it.each(["FT_DRAW_NO_BET","FH_DRAW_NO_BET","SH_DRAW_NO_BET"] as const)("retains %s without inferring the Asian settlement rule",type=>{
     const out=footballComparisonEquivalents(cell(type,null,["HOME","AWAY"]));
     expect(out).toEqual([]);
@@ -96,6 +117,29 @@ function catalog(provider:"BTI"|"CMD"|"APSPORT",type:MarketType,line:string|null
     events:base.events.map(e=>reversed?{...e,participantA:e.participantB,participantB:e.participantA}:e)};
 }
 describe("equivalences in the real matcher",()=>{
+  it("matches a corner winner against the opposing half-corner handicap", () => {
+    const result = buildComparisonEvents([
+      catalog("BTI", "CORNER_FT_1X2", null, ["HOME"]),
+      catalog("APSPORT", "CORNER_FT_AH", "-0.5", ["AWAY"])
+    ]);
+    const row = result.flatMap(event => event.rows).find(candidate =>
+      candidate.marketType === "CORNER_FT_AH" && candidate.line === "-0.5");
+    expect(row).toBeDefined();
+    expect(binaryOpposingCellPairs(row!.cells)).toHaveLength(1);
+    expect(row!.margin).toBeGreaterThan(0);
+  });
+  it("matches a lower corner over against a higher corner under conservatively", () => {
+    const result = buildComparisonEvents([
+      catalog("BTI", "CORNER_FT_TOTAL", "8", ["OVER"]),
+      catalog("APSPORT", "CORNER_FT_TOTAL", "8.5", ["UNDER"])
+    ]);
+    const row = result.flatMap(event => event.rows).find(candidate =>
+      candidate.marketType === "CORNER_FT_TOTAL" && candidate.line === "8.5");
+    expect(row).toBeDefined();
+    expect(binaryOpposingCellPairs(row!.cells)).toHaveLength(1);
+    expect(row!.margin).toBeGreaterThan(0);
+    expect(row!.cells.find(candidate => candidate.provider === "BTI")?.sourceMarket?.line).toBe("8");
+  });
   it("does not pair Slavia IM exactly-zero half goals with CMD over 1.5", () => {
     const cmd = catalog("CMD", "FH_TOTAL", "1.5", ["OVER"]);
     const fixture = cmd.events[0]!;

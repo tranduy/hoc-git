@@ -265,7 +265,6 @@ describe("catalog comparison", () => {
 
   it.each([
     ["missing line", { line: null }, { line: null }],
-    ["different lines", { line: "2.5" }, { line: "3.5" }],
     ["different settlement", { settlementProfile: "football-regulation-including-added-time" },
       { settlementProfile: "provider-specific-total" }]
   ])("does not verify full-time totals with %s", (_caseName, leftMarket, rightMarket) => {
@@ -280,6 +279,23 @@ describe("catalog comparison", () => {
 
     const result = buildComparisonEvents([change(left, leftMarket), change(right, rightMarket)]);
     expect(result.flatMap((item) => item.rows)).toEqual([]);
+  });
+
+  it("compares different prematch total lines through their covered middle", () => {
+    const left = catalog("SABA", "saba-total", ["2.20", "1.72"]);
+    const right = catalog("SBOBET", "sbobet-total", ["2.08", "1.85"]);
+    const withLine = (source: LiveCatalogResponse, line: string): LiveCatalogResponse => ({
+      ...source, markets: source.markets.map(market => ({ ...market, line })),
+      quotes: source.quotes.map(quote => ({ ...quote, line }))
+    });
+
+    const rows = buildComparisonEvents([withLine(left, "2.5"), withLine(right, "3.5")])
+      .flatMap(item => item.rows);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ marketType: "FT_TOTAL", line: "3.5", crossBook: true });
+    expect(rows[0]?.margin).toBeGreaterThan(0);
+    expect(rows[0]?.cells.find(cell => cell.provider === "SABA")?.sourceMarket?.line).toBe("2.5");
   });
 
   it("does not accept HOME and AWAY as the outcome domain for a total", () => {

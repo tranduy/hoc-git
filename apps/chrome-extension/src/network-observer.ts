@@ -143,6 +143,7 @@ type SabaPublicDiscoveryFailureCategory = typeof SABA_PUBLIC_DISCOVERY_FAILURE_C
 type SabaPublicDiscoveryFailureCounts = Record<SabaPublicDiscoveryFailureCategory, number>;
 const APSPORT_PAGE_REQUEST_TIMEOUT_MS = 30_000;
 const APSPORT_DETAIL_DELAY_MS = 500;
+const APSPORT_DETAIL_MARKET_GROUPS = [1, 4, 9] as const;
 const APSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
 const APSPORT_ROSTER_COLLAPSE_FLOOR = 20;
 const APSPORT_MIN_RETAINED_ROSTER_SHARE = 0.9;
@@ -4488,6 +4489,7 @@ export class NetworkObserver {
         if (this.#apsportEventDetailTails.get(source.sourceId) === operation) {
           this.#apsportEventDetailTails.delete(source.sourceId);
         }
+        this.#pumpApsportCollection(source);
       };
       void operation.then(cleanup, cleanup);
     }, delayMs);
@@ -4510,6 +4512,7 @@ export class NetworkObserver {
     let detailed: Record<string, unknown> | null;
     try {
       detailed = await this.#collectApsportEventDetail({ eventId,
+        marketGroups: APSPORT_DETAIL_MARKET_GROUPS,
         ...(this.#collectionSchedulers.has(source.sourceId) ? { maxAttempts: 1 } : {}),
         ...(rosterLeagueId === undefined ? {} : { leagueId: rosterLeagueId }),
         template: { origin: template.origin, headers: template.headers, body: template.body },
@@ -4575,6 +4578,7 @@ export class NetworkObserver {
       ?.rosterLeagueIds.get(request.providerEventId);
     const isCurrent = (): boolean => this.#apsportTemplateIsCurrent(source, template);
     const detailed = await this.#collectApsportEventDetail({ eventId: request.providerEventId,
+      marketGroups: [/^CORNER_/u.test(request.marketType) ? 4 : /(?:^CARD_|_CARD_)/u.test(request.marketType) ? 9 : 1],
       ...(leagueId === undefined ? {} : { leagueId }),
       template: { origin: template.origin, headers: template.headers, body: template.body },
       request: (input) => this.#requestApsportPage(source, template, input),

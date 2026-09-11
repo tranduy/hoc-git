@@ -482,7 +482,12 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) priorVisits = parsed;
   } catch { /* A malformed page-owned dataset must not stop catalog refresh. */ }
   if (partitions.length === initialPlans.length && partitions.every(Boolean)) {
-    const ranked = prematchEventIds.map((eventId, index) => {
+    const plannedEvents = root.__fieldlineCollectionPlanV1?.events;
+    const plannedIds = Array.isArray(plannedEvents) ? new Set(plannedEvents.flatMap((item) =>
+      item && typeof item.eventId === 'string' && item.eventId.length > 0 ? [item.eventId] : [])) : null;
+    const detailEventIds = plannedIds === null ? prematchEventIds
+      : prematchEventIds.filter((eventId) => plannedIds.has(eventId));
+    const ranked = detailEventIds.map((eventId, index) => {
       const visitedAt = Number(priorVisits[eventId]);
       return { eventId, index, visitedAt: Number.isFinite(visitedAt) && visitedAt > 0 ? visitedAt : 0 };
     }).sort((left, right) => left.visitedAt - right.visitedAt || left.index - right.index);

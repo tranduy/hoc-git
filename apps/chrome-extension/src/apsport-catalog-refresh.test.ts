@@ -248,6 +248,37 @@ describe("collectApsportCatalog", () => {
     expect(result).toEqual(expect.objectContaining({ "2": "live-42" }));
   });
 
+  it("merges main, corner and card detail groups without publishing a partial event", async () => {
+    const requestedGroups: unknown[] = [];
+    const groups: Record<number, ApsportRawEvent> = {
+      1: { ...event("grouped"), "50": [{ "3": 3, "9": [], "10": "Active" }] },
+      4: { ...event("grouped"), "50": [{ "3": 21, "9": [], "10": "Active" }] },
+      9: { ...event("grouped"), "50": [{ "3": 31, "9": [], "10": "Active" }] }
+    };
+    const result = await collectApsportEventDetail({
+      eventId: "grouped", leagueId: "league-grouped", marketGroups: [1, 4, 9],
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async input => {
+        const group = Number(input.body.mg); requestedGroups.push(input.body.mg);
+        return { status: 200, data: [league("Detail", [groups[group]!])] };
+      },
+      sleep: async () => undefined, isCurrent: () => true
+    });
+
+    expect(requestedGroups).toEqual([1, 4, 9]);
+    expect((result?.["50"] as ApsportRawEvent[]).map(group => group["3"])).toEqual([3, 21, 31]);
+
+    const partial = await collectApsportEventDetail({
+      eventId: "grouped", leagueId: "league-grouped", marketGroups: [1, 4, 9], maxAttempts: 1,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async input => Number(input.body.mg) === 4
+        ? { status: 503, data: null }
+        : { status: 200, data: [league("Detail", [groups[Number(input.body.mg)]!])] },
+      sleep: async () => undefined, isCurrent: () => true
+    });
+    expect(partial).toBeNull();
+  });
+
   it("rejects structurally incomplete detail and non-object raw market rows", async () => {
     const malformedDetails: ApsportRawEvent[] = [
       { ...event("missing-home"), "5": "" },

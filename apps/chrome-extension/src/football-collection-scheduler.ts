@@ -7,7 +7,6 @@ export function createFootballCollectionScheduler(
   let revision = -1;
   let receivedPlanAt = 0;
   let manualId: string | undefined;
-  let orderCalls = 0;
   const events = new Map<string, FootballCollectionPlan["events"][number]>();
   const receipts = new Map<string, { at: number; tier: string }>();
   const manual = new Set<string>();
@@ -55,6 +54,7 @@ export function createFootballCollectionScheduler(
     },
     policy,
     due(id: string, lastRealReceiptMs: number | null, fallbackStart?: number | null, fallbackLive?: boolean): boolean {
+      if (revision >= 0 && !events.has(id)) return false;
       const effective = timing(id, fallbackStart, fallbackLive);
       if (!effective.live && typeof effective.start === "number" && Number.isFinite(effective.start) &&
         effective.start > 0 && effective.start < now()) return false;
@@ -84,17 +84,19 @@ export function createFootballCollectionScheduler(
           Number(manual.has(b)) - Number(manual.has(a)) ||
           (receipts.get(a)?.at ?? discoveredAt.get(a) ?? 0) - (receipts.get(b)?.at ?? discoveredAt.get(b) ?? 0) || a.localeCompare(b);
       });
-      // One slot per five batches for overdue background work, after any live job.
-      // No physical concurrency is created here; each collector retains its own gate.
-      if (++orderCalls % 5 === 0) {
-        const far = values.filter(id => (policy(id).refreshMs ?? 0) >= 600_000)
-          .sort((a, b) => (receipts.get(a)?.at ?? discoveredAt.get(a) ?? startedAt) -
-            (receipts.get(b)?.at ?? discoveredAt.get(b) ?? startedAt))[0];
-        if (far !== undefined) {
-          values.splice(values.indexOf(far), 1);
-          const firstNonLive = values.findIndex(id => !timing(id).live);
-          values.splice(firstNonLive < 0 ? values.length : firstNonLive, 0, far);
-        }
+      // Reserve one physical slot in each batch for 24-72 hour discovery so
+      // distant paired fixtures receive their first full market book promptly.
+      // Subsequent reads still obey the one-hour per-event refresh policy.
+      const background = values.filter(id => policy(id).tier === "24_72H");
+      const far = (background.length > 0 ? background : values.filter(id =>
+        (policy(id).refreshMs ?? 0) >= 600_000))
+        .sort((a, b) => (receipts.get(a)?.at ?? discoveredAt.get(a) ?? startedAt) -
+          (receipts.get(b)?.at ?? discoveredAt.get(b) ?? startedAt))[0];
+      const farIndex = far === undefined ? -1 : values.indexOf(far);
+      if (far !== undefined && farIndex >= 4) {
+        values.splice(farIndex, 1);
+        const firstNonLive = values.findIndex(id => !timing(id).live);
+        values.splice(firstNonLive < 0 ? values.length : firstNonLive, 0, far);
       }
       return values;
     },

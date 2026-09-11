@@ -61,7 +61,7 @@ describe("pairable event plan", () => {
     expect(reads.slice(2)).toEqual([["SABA-near"],["BTI-near"]]);
     expect(next.flatMap(result => result.status === "fulfilled" ? result.value.catalog.events : [])).toHaveLength(4);
   });
-  it("selects five unique globally matched fixtures and keeps unmatched roster IDs", () => {
+  it("selects five unique globally matched fixtures and sends only paired IDs to collectors", () => {
     const now = 1_800_000_000_000;
     const sources = (["SABA", "BTI"] as const).map(provider => {
       const source = catalog(provider, ["seed"]);
@@ -77,6 +77,15 @@ describe("pairable event plan", () => {
     expect(plans.get("SABA")!.events).toHaveLength(8);
     expect(footballCollectionPlans(sources,now+3100000,2).get("BTI")!.events.filter(e => e.urgent))
       .toHaveLength(3);
+  });
+  it("omits unmatched fixtures from provider collection plans", () => {
+    const saba = catalog("SABA", ["saba-shared", "saba-only"]);
+    const bti = catalog("BTI", ["bti-shared", "bti-only"]);
+
+    const plans = footballCollectionPlans([saba, bti], 1_800_000_000_000, 7);
+
+    expect(plans.get("SABA")?.events.map(event => event.eventId)).toEqual(["saba-shared"]);
+    expect(plans.get("BTI")?.events.map(event => event.eventId)).toEqual(["bti-shared"]);
   });
   it("publishes roster counts even when matching market hydration fails", async () => {
     const saba = catalog("SABA", ["saba-shared"]);

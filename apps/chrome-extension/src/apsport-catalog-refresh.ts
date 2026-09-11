@@ -70,6 +70,8 @@ export interface CollectApsportEventDetailOptions {
   readonly maxAttempts?: number;
   readonly eventId: string;
   readonly leagueId?: string;
+  /** Native event detail is partitioned by provider market-group ID. */
+  readonly marketGroups?: readonly number[];
   readonly template: ApsportRequestTemplate;
   readonly request: (request: ApsportCatalogPageRequest) => Promise<ApsportCatalogPageResponse>;
   readonly sleep: (delayMs: number) => Promise<void>;
@@ -351,7 +353,7 @@ function compareDetailPriority(left: ApsportRawEvent, right: ApsportRawEvent): n
 
 async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
   "template" | "request" | "sleep" | "isCurrent" | "maxAttempts">,
-  rawEvent: ApsportRawEvent): Promise<ApsportCatalogPageResponse | null> {
+  rawEvent: ApsportRawEvent, marketGroup = 1): Promise<ApsportCatalogPageResponse | null> {
   const id = eventId(rawEvent);
   if (id === null) return null;
   const attempts = options.maxAttempts ?? maxDetailAttempts;
@@ -362,7 +364,7 @@ async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
     try {
       response = await options.request({ kind: "DETAIL", eventId: id,
         url: endpoint(options.template, `events/${encodeURIComponent(id)}`),
-        body: { si: 1, li: rawEvent["1"], isExtra: false, opl: false, mg: 1 } });
+        body: { si: 1, li: rawEvent["1"], isExtra: false, opl: false, mg: marketGroup } });
     } catch {
       response = { status: 0, data: null };
     }
@@ -419,11 +421,24 @@ export async function collectApsportEventDetail(
   const id = eventId({ "2": options.eventId });
   if (id === null || !options.isCurrent()) return null;
   const leagueId = scalar(options.leagueId);
-  const response = await detailResponse(options, { "2": id,
-    ...(leagueId === null ? {} : { "1": leagueId }) });
-  if (response?.status !== 200 || !options.isCurrent()) return null;
-  const detailed = apsportEventsFromProviderData(response.data).find((item) => eventId(item) === id);
-  return detailed !== undefined && validateApsportDetail(detailed)?.eventId === id ? detailed : null;
+  const marketGroups = [...new Set(options.marketGroups ?? [1])];
+  if (marketGroups.length === 0 || marketGroups.some(group =>
+    !Number.isSafeInteger(group) || group < 1 || group > 64)) return null;
+  let merged: ApsportRawEvent | null = null;
+  for (const marketGroup of marketGroups) {
+    const response = await detailResponse(options, { "2": id,
+      ...(leagueId === null ? {} : { "1": leagueId }) }, marketGroup);
+    if (response?.status !== 200 || !options.isCurrent()) return null;
+    const detailed: ApsportRawEvent | undefined = apsportEventsFromProviderData(response.data)
+      .find((item) => eventId(item) === id);
+    if (detailed === undefined || validateApsportDetail(detailed)?.eventId !== id) return null;
+    if (merged === null) { merged = detailed; continue; }
+    if (["1", "2", "5", "6", "11", "22", "53"].some(key =>
+      String(merged![key]) !== String(detailed[key]))) return null;
+    merged = { ...merged, ...detailed,
+      "50": [...merged["50"] as unknown[], ...detailed["50"] as unknown[]] };
+  }
+  return merged;
 }
 
 export async function collectApsportCatalog(options: CollectApsportCatalogOptions): Promise<void> {

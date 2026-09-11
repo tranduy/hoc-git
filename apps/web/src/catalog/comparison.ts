@@ -1773,6 +1773,23 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
   return groups.map((group) => {
     const key = group.key;
     const rowGroups = new Map<string, ComparisonCell[]>();
+    const totalLinesByContract = new Map<string, Map<ProviderId, Set<string>>>();
+    for (const catalog of group.catalogs) {
+      const providerEventId = group.ids[catalog.provider];
+      const index = catalogIndexes.get(catalog)!;
+      for (const market of index.marketsByEvent.get(providerEventId ?? "") ?? []) {
+        const marketFamily: ComparisonMarketFamily = market.category === "LOL"
+          ? "ESPORTS" : footballMarketFamily(market.marketType);
+        if (marketFamily !== group.family) continue;
+        const oriented = orientMarket(market, group.orientations[catalog.provider] ?? "SAME");
+        if (oriented.line === null || oriented.player !== undefined ||
+          footballBinaryMarketSpec(oriented.marketType)?.family !== "TOTAL") continue;
+        const contract = [oriented.marketType, oriented.scope, oriented.settlementProfile].join("|");
+        const byProvider = totalLinesByContract.get(contract) ?? new Map<ProviderId, Set<string>>();
+        const lines = byProvider.get(catalog.provider) ?? new Set<string>();
+        lines.add(oriented.line); byProvider.set(catalog.provider, lines); totalLinesByContract.set(contract, byProvider);
+      }
+    }
     for (const catalog of group.catalogs) {
       const providerEventId = group.ids[catalog.provider];
       const index = catalogIndexes.get(catalog)!;
@@ -1796,7 +1813,11 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
           sourceMarket: market, sourceQuotes: phaseQuotes };
         cells.push(availableTwoWayCell(sourceCell) ?? sourceCell);
         rowGroups.set(rowKey, cells);
-        for (const equivalent of footballComparisonEquivalents(sourceCell)) {
+        const totalContract = [orientedMarket.marketType, orientedMarket.scope,
+          orientedMarket.settlementProfile].join("|");
+        const observedComparableLines = [...(totalLinesByContract.get(totalContract)?.entries() ?? [])]
+          .filter(([provider]) => provider !== catalog.provider).flatMap(([, lines]) => [...lines]);
+        for (const equivalent of footballComparisonEquivalents(sourceCell, observedComparableLines)) {
           const equivalentKey = marketKey(equivalent.market);
           const equivalentCells = rowGroups.get(equivalentKey) ?? [];
           equivalentCells.push(availableTwoWayCell(equivalent) ?? equivalent);

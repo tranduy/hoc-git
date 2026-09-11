@@ -87,4 +87,41 @@ describe("collection plan observer ownership", () => {
     await observer.stop(source);
     expect(observer.collectionStatus(source.sourceId)).toBeNull();
   });
+  it("keeps pumping scheduled APSPORT detail until every due paired event has completed", async () => {
+    vi.useFakeTimers();
+    const at = 1_800_000_000_000;
+    vi.setSystemTime(at);
+    const source = { lobby: "TSPORT", tabId: 7, sourceId: "chrome:TSPORT:7" } as const;
+    const records = Array.from({ length: 7 }, (_, index) => ({ "1": "league", "2": `event-${index}`,
+      "5": `Home ${index}`, "6": false, "10": "Active",
+      "11": new Date(at + (index + 1) * 3_600_000).toISOString(),
+      "22": `Away ${index}`, "50": [], "53": "League" }));
+    const detail = vi.fn(async ({ eventId }: { eventId: string }) =>
+      records.find(record => record["2"] === eventId) ?? null);
+    const observer = new NetworkObserver({ now: Date.now, monotonicNow: () => Date.now() - at + 100,
+      sendCommand: async (_tab, method) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap", loaderId: "loader" } } } : {},
+      forward: async () => undefined, collectApsportEventDetail: detail,
+      collectApsportCatalog: async options => options.onRoster({ schemaVersion: 1,
+        generation: options.generation, phase: "ROSTER", complete: true,
+        prematchWindowHours: 24, records }) });
+    try {
+      await observer.start(source);
+      await observer.handleEvent(source, "Runtime.executionContextCreated", { context: {
+        id: 41, auxData: { isDefault: true, frameId: "ap" } } });
+      await observer.handleEvent(source, "Network.requestWillBeSent", {
+        requestId: "native", type: "Fetch", frameId: "ap", loaderId: "loader", request: {
+          method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json" },
+          postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) } });
+      await observer.setCollectionPlan(source, { revision: at, events: records.map(record => ({
+        eventId: record["2"], startAtUtcMs: Date.parse(record["11"]), isLive: false, urgent: false })) });
+      await observer.refreshCatalog(source);
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(new Set(detail.mock.calls.map(call => call[0].eventId))).toEqual(
+        new Set(records.map(record => record["2"])));
+    } finally { await observer.stop(source); vi.useRealTimers(); }
+  });
 });
