@@ -255,8 +255,10 @@ export interface NetworkObserverDependencies {
   readonly sbobetRequestBackoff?: SbobetRequestBackoff;
   readonly sendCommand: (tabId: number, method: string, params?: Record<string, unknown>,
     sessionId?: string) => Promise<unknown>;
-  readonly forward: (envelope: ChromeBridgeEnvelope) => Promise<void>;
+  readonly forward: (envelope: ChromeBridgeEnvelope) => Promise<void | {
+    readonly acknowledgement: Promise<void> | null }>;
   readonly maxPendingForwardBytes?: number;
+  readonly maxPendingAcknowledgementBytes?: number;
   readonly onForwardOverflow?: (source: ObservedSource) => void | Promise<void>;
   readonly now?: () => number;
   readonly monotonicNow?: () => number;
@@ -1078,6 +1080,8 @@ export class NetworkObserver {
   readonly #streamOrdinals = new Map<string, number>();
   readonly #emissions: PendingSourceWork;
   readonly #maxPendingForwardBytes: number;
+  readonly #maxPendingAcknowledgementBytes: number;
+  readonly #pendingAcknowledgements = new Map<string, { bytes: number; entries: number }>();
   readonly #onForwardOverflow: NetworkObserverDependencies["onForwardOverflow"];
   readonly #forwardOverflowSources = new Set<string>();
   readonly #webSockets = new Map<string, ObservedWebSocketState>();
@@ -1281,6 +1285,7 @@ export class NetworkObserver {
     this.#sendCommand = dependencies.sendCommand;
     this.#forward = dependencies.forward;
     this.#maxPendingForwardBytes = dependencies.maxPendingForwardBytes ?? PENDING_FORWARD_BYTES_PER_SOURCE;
+    this.#maxPendingAcknowledgementBytes = dependencies.maxPendingAcknowledgementBytes ?? 192 * 1024 * 1024;
     this.#onForwardOverflow = dependencies.onForwardOverflow;
     const pendingBounds = { maxBytes: this.#maxPendingForwardBytes,
       maxEntries: PENDING_FORWARD_ENTRIES_PER_SOURCE };
@@ -6015,6 +6020,7 @@ export class NetworkObserver {
       streamId: `sbobet-early:${pending.source.tabId}:${pending.observerRequestOrdinal}`,
       reconcileCutoffSequence: early.requestStartSequence };
     const fragments = splitNetworkBodyText(JSON.stringify(batch));
+    const retainedBodyBytes = fragments.reduce((sum, fragment) => sum + fragment.length * 6, body.length * 2);
     const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
     let forwarded = 0;
     const forwarding = (async () => { for (const [chunkIndex, bodyFragment] of fragments.entries()) {
@@ -6023,7 +6029,7 @@ export class NetworkObserver {
       early.request.url, pending.resourceType, "HTTP_RESPONSE", { encoding: "UTF8",
         body: fragments.length === 1 ? bodyFragment : JSON.stringify({ schemaVersion: 1,
           snapshotId, chunkIndex, chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-      }, { request, ...clocks, sourceGeneration: pending.sourceGeneration,
+      }, { request, ...clocks, retainedBodyBytes, sourceGeneration: pending.sourceGeneration,
         tabGeneration: pending.tabGeneration, beforeForward: current,
         onForwarded: () => { forwarded += 1; } });
     } })();
@@ -6284,6 +6290,7 @@ export class NetworkObserver {
       streamId: `sbobet-more:${pending.source.tabId}:${pending.observerRequestOrdinal}`,
       reconcileCutoffSequence: more.requestStartSequence };
     const fragments = splitNetworkBodyText(JSON.stringify(batch));
+    const retainedBodyBytes = fragments.reduce((sum, fragment) => sum + fragment.length * 6, body.length * 2);
     const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
     // No snapshot replay/cache or full-event membership claim for complementary More.
     let forwarded = 0;
@@ -6293,7 +6300,7 @@ export class NetworkObserver {
       more.request.url, pending.resourceType, "HTTP_RESPONSE", { encoding: "UTF8",
         body: fragments.length === 1 ? bodyFragment : JSON.stringify({ schemaVersion: 1,
           snapshotId, chunkIndex, chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-      }, { request, ...clocks, sourceGeneration: pending.sourceGeneration,
+      }, { request, ...clocks, retainedBodyBytes, sourceGeneration: pending.sourceGeneration,
         tabGeneration: pending.tabGeneration, beforeForward: current,
         onForwarded: () => { forwarded += 1; } });
     } })();
@@ -6504,6 +6511,7 @@ export class NetworkObserver {
       reconcileCutoffSequence: batch.requestStartSequence };
     const url = template.url.replace(/([?&]eventId=)\d{1,30}(?=&|$)/u, `$1${batch.eventId}`);
     const fragments = splitNetworkBodyText(JSON.stringify(batch));
+    const retainedBodyBytes = fragments.reduce((sum, fragment) => sum + fragment.length * 6, 0);
     const snapshotId = networkSnapshotId(source.tabId, identity.observerRequestOrdinal);
     let admitted = true;
     const beforeForward = () => {
@@ -6516,7 +6524,7 @@ export class NetworkObserver {
       await this.#emit(source, url, "Fetch", "HTTP_RESPONSE", {
       encoding: "UTF8", body: fragments.length === 1 ? bodyFragment : JSON.stringify({ schemaVersion: 1,
         snapshotId, chunkIndex, chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-    }, { request, observedAtMs: batch.observedAtMs, receivedMonotonicMs: receipt.receivedMonotonicMs,
+    }, { request, retainedBodyBytes, observedAtMs: batch.observedAtMs, receivedMonotonicMs: receipt.receivedMonotonicMs,
       sourceGeneration: binding.sourceGeneration, tabGeneration: binding.tabGeneration, beforeForward });
     }
     if (!admitted || !current()) throw new Error("SBOBET_DETAIL_STALE");
@@ -7723,7 +7731,7 @@ export class NetworkObserver {
           let forwarded = false;
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: safeBody
-          }, { request: pendingRequestMetadata(pending), ...clocks,
+          }, { request: pendingRequestMetadata(pending), ...clocks, retainedBodyBytes: response.body.length * 2 + safeBody.length * 4,
             sourceGeneration: pending.sourceGeneration, tabGeneration: pending.tabGeneration,
             onForwarded: () => { forwarded = true; } });
           if (!forwarded) return;
@@ -7742,7 +7750,7 @@ export class NetworkObserver {
           await this.#emit(emissionPending.source, emissionPending.url, emissionPending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
               chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-          }, { request: pendingRequestMetadata(emissionPending), ...clocks,
+          }, { request: pendingRequestMetadata(emissionPending), ...clocks, retainedBodyBytes: response.body.length * 2 + safeBody.length * 4,
             sourceGeneration: emissionPending.sourceGeneration, tabGeneration: emissionPending.tabGeneration,
             // Hundreds of renderer round trips can age a healthy large body
             // past the API receipt limit. Intermediate fragments cannot
@@ -7872,7 +7880,7 @@ export class NetworkObserver {
     const onForwarded = () => { forwarded += 1; };
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
-        { ...request, ...clocks, sourceGeneration, tabGeneration, onForwarded });
+        { ...request, ...clocks, retainedBodyBytes: body.length * 2 + safeBody.length * 4, sourceGeneration, tabGeneration, onForwarded });
       if (forwarded !== 1) return;
       this.#rememberSbobetHttpPairAndDetailRoster(pending, safeBody, bridgeGeneration, clocks.observedAtMs);
       await this.#rememberSbobetMoreRoster(pending, safeBody, bridgeGeneration);
@@ -7891,7 +7899,7 @@ export class NetworkObserver {
         encoding: "UTF8",
         body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex, chunkCount: fragments.length,
           bodyEncoding: "UTF8", bodyFragment })
-      }, { ...request, ...clocks, sourceGeneration, tabGeneration, onForwarded });
+      }, { ...request, ...clocks, retainedBodyBytes: body.length * 2 + safeBody.length * 4, sourceGeneration, tabGeneration, onForwarded });
     }
     if (forwarded !== fragments.length) return;
     this.#rememberSbobetHttpPairAndDetailRoster(pending, safeBody, bridgeGeneration, clocks.observedAtMs);
@@ -8532,7 +8540,7 @@ export class NetworkObserver {
     return async (source: ObservedSource, url: string, resourceType: string,
       transport: ChromeBridgeEnvelope["transport"], payload: ChromeBridgeEnvelope["payload"],
       metadata: { readonly request: EmissionRequestMetadata; readonly observedAtMs: number;
-        readonly receivedMonotonicMs: number }): Promise<boolean> => {
+        readonly receivedMonotonicMs: number; readonly retainedBodyBytes?: number }): Promise<boolean> => {
       const sourceGeneration = sourceGenerations.get(source.sourceId) ?? 0;
       const bridgeGeneration = bridgeGenerations.get(source.sourceId) ?? 0;
       const tabGeneration = tabGenerations.get(source.tabId) ?? 0;
@@ -8580,7 +8588,7 @@ export class NetworkObserver {
         if (fragments.length === 1) {
           if (!await emitReplay(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: snapshot.body
-          }, { request: replayRequestMetadata(snapshot),
+          }, { request: replayRequestMetadata(snapshot), retainedBodyBytes: snapshot.body.length * 6,
             observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs })) return replayed;
         } else {
           const snapshotId = `network-replay:${snapshot.source.tabId}:${snapshot.observerRequestOrdinal}`;
@@ -8588,7 +8596,7 @@ export class NetworkObserver {
             if (!await emitReplay(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
               encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
                 chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-            }, { request: replayRequestMetadata(snapshot),
+            }, { request: replayRequestMetadata(snapshot), retainedBodyBytes: snapshot.body.length * 6,
               observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs })) return replayed;
           }
         }
@@ -9089,12 +9097,15 @@ export class NetworkObserver {
       readonly tabGeneration?: number;
       readonly beforeForward?: () => boolean | Promise<boolean>;
       readonly onForwarded?: () => void;
+      readonly retainedBodyBytes?: number;
     } = {}
   ): Promise<void> {
     if (this.#forwardOverflowSources.has(source.sourceId)) return;
     const sourceGeneration = metadata.sourceGeneration ?? this.#captureSourceGeneration(source.sourceId);
     const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const tabGeneration = metadata.tabGeneration ?? this.#captureTabGeneration(source.tabId);
+    let acknowledgement: Promise<void> | null = null;
+    let releaseAcknowledgement = () => {};
     const current = this.#emissions.enqueue(source.sourceId,
       retainedPayloadBytes(payload, this.#maxPendingForwardBytes) + url.length * 2, async () => {
       if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
@@ -9125,8 +9136,31 @@ export class NetworkObserver {
           request: { url, resourceType, ...metadata.request },
           payload
         }) as ChromeBridgeEnvelope;
-        await this.#forward(redacted);
-        metadata.onForwarded?.();
+        const admission = await this.#forward(redacted);
+        acknowledgement = admission?.acknowledgement ?? null;
+        if (acknowledgement !== null) {
+          // The suspended producer retains its full body, not only this final
+          // fragment. Keep a separate bound after releasing the sequence FIFO.
+          const bytes = metadata.retainedBodyBytes ?? retainedPayloadBytes(payload, this.#maxPendingAcknowledgementBytes);
+          const usage = this.#pendingAcknowledgements.get(source.sourceId) ?? { bytes: 0, entries: 0 };
+          if (usage.bytes + bytes > this.#maxPendingAcknowledgementBytes || usage.entries >= 8) {
+            this.#retireOverflowingForwarding(source);
+            // One overflow producer stays in the bounded FIFO until resync or
+            // ACK releases it. Never leave an unaccounted waiter outside it.
+            await acknowledgement;
+            acknowledgement = null;
+            return;
+          }
+          usage.bytes += bytes;
+          usage.entries += 1;
+          this.#pendingAcknowledgements.set(source.sourceId, usage);
+          releaseAcknowledgement = () => {
+            usage.bytes -= bytes;
+            usage.entries -= 1;
+            if (usage.entries === 0) this.#pendingAcknowledgements.delete(source.sourceId);
+          };
+        }
+        if (acknowledgement === null) metadata.onForwarded?.();
         if (transport === "WS_FRAME") {
           this.#wsAttachDiagnostic(source).framesForwarded += 1;
           this.#clearPreexistingSocketReconnect(source.sourceId);
@@ -9144,7 +9178,17 @@ export class NetworkObserver {
       }
     });
     if (current === null) this.#retireOverflowingForwarding(source);
-    else await current;
+    else {
+      await current;
+      // Release the sequence lane after bounded transport admission, while
+      // the originating producer keeps its final acknowledgement barrier.
+      if (acknowledgement !== null) {
+        try {
+          await acknowledgement;
+          metadata.onForwarded?.();
+        } finally { releaseAcknowledgement(); }
+      }
+    }
   }
 
   #clearPendingForwarding(sourceId: string): void {

@@ -176,7 +176,7 @@ observer = new NetworkObserver({
   },
   forward: async (envelope) => {
     if (!bridge) throw new Error("BRIDGE_NOT_CONFIGURED");
-    await bridge.enqueue(envelope, envelope.transport === "TAB_STATE" ? "DIAGNOSTIC" : "QUOTE");
+    return bridge.admit(envelope, envelope.transport === "TAB_STATE" ? "DIAGNOSTIC" : "QUOTE");
   },
   onForwardOverflow: (source) => {
     console.warn("[fieldline] pending forwarding limit reached; resyncing source", source.sourceId);

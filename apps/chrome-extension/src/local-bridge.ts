@@ -188,6 +188,11 @@ export class LocalBridge {
   }
 
   async enqueue(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): Promise<void> {
+    const admission = await this.admit(envelope, priority);
+    if (admission?.acknowledgement) await admission.acknowledgement;
+  }
+
+  async admit(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): Promise<{ readonly acknowledgement: Promise<void> | null } | void> {
     if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch ?? null)) return;
     const closeOrdinal = this.#closeOrdinal;
     const serialized = JSON.stringify(envelope);
@@ -226,7 +231,7 @@ export class LocalBridge {
     this.#queue.push(entry);
     this.#queueBytes += entry.bytes;
     this.#flush();
-    if (acknowledgement !== null) await acknowledgement;
+    return { acknowledgement };
   }
 
   /** True while a readiness probe is still holding connect() off. */
