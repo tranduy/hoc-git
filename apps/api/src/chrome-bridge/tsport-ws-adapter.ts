@@ -89,6 +89,40 @@ interface TsportMarketSemantics {
   readonly selections: readonly ["HOME" | "OVER" | "ODD" | "YES" | "HOME_DRAW", "AWAY" | "UNDER" | "EVEN" | "NO" | "DRAW_AWAY", ("DRAW" | "HOME_AWAY")?];
 }
 
+// Retained records are immutable receipts. Key the entire receipt so a real
+// re-observation always creates fresh quote clocks, even at an unchanged price.
+const normalizedReceipts = new WeakMap<RetainedRecord, NormalizedCatalogPart>();
+const trimmedRosters = new WeakMap<RetainedRecord, WeakMap<RetainedRecord, RetainedRecord>>();
+
+function normalizeReceipt(entry: RetainedRecord): NormalizedCatalogPart {
+  let normalized = normalizedReceipts.get(entry);
+  if (normalized === undefined) {
+    normalized = { ...normalizeSbobetCatalog([entry.record], {
+      observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
+      sequence: entry.sequence, provider: "APSPORT",
+      settlementProfile: "football-regulation-including-added-time"
+    }), nativeMarketObservations: entry.nativeMarketObservations };
+    normalizedReceipts.set(entry, normalized);
+  }
+  return normalized;
+}
+
+function trimRoster(entry: RetainedRecord, detail: RetainedRecord): RetainedRecord {
+  let byDetail = trimmedRosters.get(entry);
+  const cached = byDetail?.get(detail);
+  if (cached !== undefined) return cached;
+  const marketIds = new Set(detail.record.markets.map(market => market.marketId));
+  const nativeIds = new Set(detail.nativeMarketObservations.map(item =>
+    `${item.providerMarketId}|${item.nativeType}`));
+  const trimmed = { ...entry, record: { ...entry.record,
+    markets: entry.record.markets.filter(market => marketIds.has(market.marketId)) },
+    nativeMarketObservations: entry.nativeMarketObservations.filter(item =>
+      nativeIds.has(`${item.providerMarketId}|${item.nativeType}`)) };
+  if (byDetail === undefined) { byDetail = new WeakMap(); trimmedRosters.set(entry, byDetail); }
+  byDetail.set(detail, trimmed);
+  return trimmed;
+}
+
 const marketSemanticsByGroup: Readonly<Record<string, TsportMarketSemantics>> = {
   "1": { marketType: "FT_1X2", selections: ["HOME", "AWAY", "DRAW"] },
   "2": { marketType: "FH_1X2", selections: ["HOME", "AWAY", "DRAW"] },
@@ -710,33 +744,19 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     evidenceMode: "BASELINE" | "DELTA",
     provenance: "WS" | "AUTHENTICATED_HTTP"
   ): DecodedCatalogUpdate {
-    const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => ({
-      ...normalizeSbobetCatalog([entry.record], {
-        observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
-        sequence: entry.sequence, provider: "APSPORT",
-        settlementProfile: "football-regulation-including-added-time"
-      }),
-      nativeMarketObservations: entry.nativeMarketObservations
-    });
     // A completed event detail owns its market membership. A later shallow
     // roster can refresh matching main prices, but cannot resurrect omissions.
     const rosterEntries = [...state.rosterRecords].map(([eventId, entry]) => {
       const detail = state.detailRecords.get(eventId);
       if (detail === undefined) return entry;
-      const marketIds = new Set(detail.record.markets.map((market) => market.marketId));
-      const nativeIds = new Set(detail.nativeMarketObservations.map((item) =>
-        `${item.providerMarketId}|${item.nativeType}`));
-      return { ...entry, record: { ...entry.record,
-        markets: entry.record.markets.filter((market) => marketIds.has(market.marketId)) },
-        nativeMarketObservations: entry.nativeMarketObservations.filter((item) =>
-          nativeIds.has(`${item.providerMarketId}|${item.nativeType}`)) };
+      return trimRoster(entry, detail);
     });
     const retainedEntries = [...rosterEntries, ...state.detailRecords.values(),
       ...state.socketRecords.values()];
     retainedEntries.sort((left, right) => left.sequence - right.sequence ||
       left.receivedMonotonicMs - right.receivedMonotonicMs || left.seenAtMs - right.seenAtMs);
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
-      observedAtMs: envelope.observedAtMs, parts: retainedEntries.map(normalizeEntry) });
+      observedAtMs: envelope.observedAtMs, parts: retainedEntries.map(normalizeReceipt) });
     const authoritativeEmptyMarkets = catalog.events.length > 0 && catalog.markets.length === 0 &&
       catalog.quotes.length === 0 && catalog.events.every((event) => {
         const detail = state.detailRecords.get(event.providerEventId);
@@ -928,18 +948,10 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     stream: TsportStreamGeneration,
     evidenceMode: "BASELINE" | "DELTA"
   ): DecodedCatalogUpdate | null {
-    const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => ({
-      ...normalizeSbobetCatalog([entry.record], {
-        observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
-        sequence: entry.sequence, provider: "APSPORT",
-        settlementProfile: "football-regulation-including-added-time"
-      }),
-      nativeMarketObservations: entry.nativeMarketObservations
-    });
     const retainedEntries = [...stream.records.values()];
     retainedEntries.sort((left, right) => left.sequence - right.sequence ||
       left.receivedMonotonicMs - right.receivedMonotonicMs || left.seenAtMs - right.seenAtMs);
-    const parts: NormalizedCatalogPart[] = retainedEntries.map(normalizeEntry);
+    const parts: NormalizedCatalogPart[] = retainedEntries.map(normalizeReceipt);
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
       observedAtMs: envelope.observedAtMs, parts });
     const explicitEmpty = evidenceMode === "BASELINE" && stream.explicitEmptyProof &&

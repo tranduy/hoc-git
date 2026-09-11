@@ -461,6 +461,21 @@ describe("TsportWsCatalogAdapter", () => {
     expect(update.value.quotes.every((quote) => quote.sequence === 3 && quote.receivedMonotonicMs === 70)).toBe(true);
   });
 
+  it("reuses untouched normalized offers while renewing only the re-observed event", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const first = event(190, "First"), other = event(191, "Other");
+    adapter.decode(apiEnvelope([first, other]));
+    const initial = adapter.decode(apiEnvelope([first, other], 2, "DETAIL"))[0] as AuthorityUpdate;
+    const next = adapter.decode(apiEnvelope([first], 3, "DETAIL", false, "apsport:7:1", 24,
+      "EVENT_CHANGE"))[0] as AuthorityUpdate;
+    const untouched = initial.value.quotes.filter(quote => quote.providerEventId === "191");
+    expect(untouched.length).toBeGreaterThan(0);
+    expect(next.value.quotes.filter(quote => quote.providerEventId === "191")).toEqual(untouched);
+    for (const quote of untouched) expect(next.value.quotes).toContain(quote);
+    expect(next.value.quotes.filter(quote => quote.providerEventId === "190")
+      .every(quote => quote.sequence === 3 && quote.receivedMonotonicMs === 70)).toBe(true);
+  });
+
   it.each(["SWEEP", "WS"] as const)("publishes bounded %s re-observations without renewing unrelated quote clocks", (kind) => {
     const adapter = new TsportWsCatalogAdapter();
     const first = event(180, "Confirmed First"), other = event(181, "Unchanged Other");
