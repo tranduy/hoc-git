@@ -36,6 +36,53 @@ giết phiên BTI ngày 2026-09-12.
 Ba lớp hãm: 1 lời xin/phút mỗi sàn, `MIN_SOURCE_RELOAD_INTERVAL_MS` 5 phút,
 và chỉ khi adapter thực sự khai đói baseline quá 8 giây.
 
+## SABA: bản sửa ăn rồi phản, đã hoàn nguyên — 2026-09-13 03:10
+
+Cho `transportStarved` đi qua chốt "đang sống" **có tác dụng thật** ở lần đo
+đầu: SABA 55 → 140 trận, đúng dải trang nó liệt kê, rồi 441. Nhưng lần đo
+xác nhận 35 phút sau cho thấy cái giá:
+
+```
+02:44  SABA 441 tran
+02:49  SABA -437          <- feed roi LIVE
+03:09  SABA -437  recoveryAttempt=125
+       catalog dung im 21 phut, quoteChanges60s = 0
+```
+
+Từ "sống yếu, 55 trận, 1.500 lần đổi giá/phút" thành "437 trận toàn giá
+chết". **Tệ hơn lúc chưa sửa.** Đã revert ở `9a3288b`; sau khi hoàn nguyên
+SABA về LIVE, `recoveryAttempt` 0, catalog tươi 3 giây, 805 lần đổi giá/phút,
+giữ quanh 98–110 trận.
+
+Nguyên nhân nằm đúng trong comment của `MIN_SOURCE_RELOAD_INTERVAL_MS`:
+socket đói baseline thì **khung nào cũng xin reload**, cho chúng qua chốt
+"đang sống" nghĩa là xin không bao giờ dứt. Năm phút giữa hai lần reload
+không đủ để SABA đăng nhập lại, đăng ký lại và dựng xong baseline — nó bị
+reload ra khỏi mọi lần đang hồi phục dở, y hệt APSPORT hai ngày liền năm
+2026-08-27.
+
+Và `recoveryAttempt` lên 125 **không phải vì reload 125 lần** (cooldown chặn
+rồi) mà vì mỗi lời xin vẫn khởi động một lượt phục hồi, kéo feed vào trạng
+thái `SOFT_RECOVERY` và giữ nó ở đó.
+
+**Thiết kế đúng phải có thứ mà bản vừa rồi thiếu: lý do để ngừng xin.**
+- reload phải được **cho thời gian tự chứng minh** — đủ để trang xác thực,
+  đăng ký và dựng xong baseline, không phải 5 phút
+- phải **bỏ cuộc** sau vài lần reload liên tiếp không dựng lại được socket,
+  và khai ra là đã bỏ cuộc, thay vì xin mãi
+- và phải **không được kéo feed vào trạng thái phục hồi** khi sàn vẫn đang
+  đọc được — mất giá còn tệ hơn thiếu trận
+
+Ba commit nền vẫn giữ và vẫn đúng: lời xin phục hồi đã có nơi đến
+(`5da0325`), xin đúng nấc có thể dựng lại socket (`3bb6960`), và extension
+phân biệt được *trang cần huých* với *trang cần thay* (`f13987e`). Chỉ thiếu
+điều kiện dừng.
+
+**Bẫy quy trình:** đã báo "SABA sống lại" sau **một** lần đo 20 phút. Chính
+lần đo xác nhận thứ hai mới bắt được lỗi. Một lần đo không đủ để tuyên bố
+một thay đổi ở tầng phục hồi là thành công.
+
+
 ## Chẩn đoán từng nói dối — đã sửa
 
 `contentRefusals` của APSPORT được dùng làm hàng thay thế cho mọi sàn chưa
