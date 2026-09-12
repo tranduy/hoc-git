@@ -1,6 +1,7 @@
 import type { CatalogSourceStatus, ChromeBridgeEnvelope, ProviderQuote } from "@tool-chenh/contracts";
 import type { StoredCatalogRevision } from "../catalog/catalog-revision-store.js";
 import { imContentRefusals } from "../chrome-bridge/im-http-adapter.js";
+import { btiContentRefusals } from "../chrome-bridge/bti-http-adapter.js";
 import { tsportContentRefusals } from "../chrome-bridge/tsport-ws-adapter.js";
 import {
   CHROME_BRIDGE_PROVIDER_ACCOUNT_IDS,
@@ -485,8 +486,9 @@ export class PipelineTelemetry {
         // provider's records. Shape names only; no frame value is kept.
         // Each map is provider-owned; APSPORT's is the fallback for the
         // providers that have no counter of their own yet, so this cell is
-        // only trustworthy for IM and APSPORT.
+        // only trustworthy for IM, BTI and APSPORT.
         contentRefusals: [...(accountId === "catalog-source:IM:FOOTBALL" ? imContentRefusals
+          : accountId === "catalog-source:BTI:FOOTBALL" ? btiContentRefusals
           : tsportContentRefusals).entries()]
           .map(([reason, count]) => `${reason}:${count}`).join(" "),
         lastDecodedAgeMs: age(nowMs, state.lastDecodedAtMs), forcedUnlocks: state.forcedUnlocks,

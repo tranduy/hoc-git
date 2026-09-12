@@ -409,7 +409,7 @@ function receiptPublicationDue(state: ApsportApiState, envelope: ChromeBridgeEnv
 export const tsportContentRefusals = new Map<string, number>();
 
 function noteRefusal(reason: string): null {
-  if (tsportContentRefusals.size < 12 || tsportContentRefusals.has(reason)) {
+  if (tsportContentRefusals.size < 40 || tsportContentRefusals.has(reason)) {
     tsportContentRefusals.set(reason, (tsportContentRefusals.get(reason) ?? 0) + 1);
   }
   return null;
@@ -777,21 +777,44 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (event["5"] !== undefined && event["22"] !== undefined && event["53"] !== undefined) return event;
     // Native eu price updates omit display identity. Only the authoritative
     // roster in this exact source epoch may supply it; never inherit prices.
+    // Every rejection below used to return null unnamed, so a whole market
+    // group could die here and show only as ADAPTER_FINGERPRINT_UNMATCHED.
+    // Naming each gate costs one counter and makes the loss readable.
     const state = this.#apiSources.get(envelope.sourceId);
     const eventId = scalar(event["2"]);
-    if (state?.sourceEpoch !== sourceEpoch(envelope) || eventId === null ||
-      !state.rosterEventIds.has(eventId) || !Array.isArray(event["50"])) return null;
+    if (state === undefined) return noteRefusal("resolve-no-source-state");
+    if (state.sourceEpoch !== sourceEpoch(envelope)) return noteRefusal("resolve-epoch-stale");
+    if (eventId === null) {
+      // 57,575 frames died here unexplained. Record the SHAPE of the record -
+      // its top-level field names only, never a value - so the next reader can
+      // tell provider noise apart from price updates worth recovering.
+      const shape = Object.keys(event).filter((key) => /^[0-9]{1,3}$/u.test(key))
+        .sort((left, right) => Number(left) - Number(right)).slice(0, 10).join(".");
+      noteRefusal(`noid-keys-${shape.length === 0 ? "none" : shape}`);
+      return noteRefusal("resolve-no-event-id");
+    }
+    if (!state.rosterEventIds.has(eventId)) return noteRefusal("resolve-not-in-roster");
+    if (!Array.isArray(event["50"])) return noteRefusal("resolve-no-market-array");
     const retained = state.detailRecords.get(eventId) ?? state.rosterRecords.get(eventId);
     const identity = retained?.identity;
-    if (identity === undefined) return null;
-    if (event["6"] !== undefined && (typeof event["6"] !== "boolean" || event["6"] !== identity["6"])) return null;
+    if (identity === undefined) return noteRefusal("resolve-no-identity");
+    if (event["6"] !== undefined && (typeof event["6"] !== "boolean" || event["6"] !== identity["6"])) {
+      return noteRefusal("resolve-live-flag-mismatch");
+    }
     for (const key of ["1", "2", "5", "6", "11", "22", "53"]) {
-      if (event[key] !== undefined && String(event[key]) !== String(identity[key])) return null;
+      if (event[key] !== undefined && String(event[key]) !== String(identity[key])) {
+        return noteRefusal(`resolve-key-${key}-mismatch`);
+      }
     }
     for (const value of event["50"]) {
       const group = record(value);
-      if (group === null || (group["2"] !== undefined && scalar(group["2"]) !== eventId) ||
-        (group["1"] !== undefined && scalar(group["1"]) !== scalar(identity["1"]))) return null;
+      if (group === null) return noteRefusal("resolve-group-not-record");
+      if (group["2"] !== undefined && scalar(group["2"]) !== eventId) {
+        return noteRefusal("resolve-group-event-mismatch");
+      }
+      if (group["1"] !== undefined && scalar(group["1"]) !== scalar(identity["1"])) {
+        return noteRefusal("resolve-group-league-mismatch");
+      }
     }
     return { ...identity, ...event };
   }

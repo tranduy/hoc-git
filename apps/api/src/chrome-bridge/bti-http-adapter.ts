@@ -137,13 +137,15 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
       const isBatch = /^__fieldline_batch_\d+__$/u.test(eventId);
       const detailEntries: Array<readonly [string, BtiPart]> = [];
       if (root?.fieldlineBtiDetails !== undefined) {
-        if (!Array.isArray(root.fieldlineBtiDetails)) return [];
+        if (!Array.isArray(root.fieldlineBtiDetails)) return noteBtiRefusal("detail-metadata-not-array");
         const seen = new Set<string>();
         for (const value of root.fieldlineBtiDetails) {
           const clock = parseClock(value, envelope, generation.order);
           const id = typeof value === "object" && value !== null ? (value as Record<string, unknown>).eventId : null;
-          if (clock === null || typeof id !== "string" || id.trim() === "" || seen.has(id) ||
-            (!isBatch && id !== eventId)) return [];
+          if (clock === null) return noteBtiRefusal("detail-no-clock");
+          if (typeof id !== "string" || id.trim() === "") return noteBtiRefusal("detail-no-event-id");
+          if (seen.has(id)) return noteBtiRefusal("detail-duplicate-event");
+          if (!isBatch && id !== eventId) return noteBtiRefusal("detail-event-mismatch");
           seen.add(id);
           const detail = catalogForEvent(part, id, closedEventIds.has(id));
           // Missing rows only mean an authoritative empty when the successful
@@ -156,20 +158,24 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
               // authoritative empty detail. It must not block its valid peers.
               if (rows.every((row) => Array.isArray(row[20]) && row[20].length === 0 &&
                 (row[33] === null || row[33] === undefined || (Array.isArray(row[33]) && row[33].length === 0)))) continue;
-              return [];
+              return noteBtiRefusal("detail-rows-unresolved");
             }
           }
           const { unresolvedDetail: _unresolved, ...withoutUnresolved } = part;
           detailEntries.push([id, { ...withClock(detail ?? { ...withoutUnresolved, events: [], markets: [], quotes: [],
             nativeMarketObservations: [], nativeMarketIds: [], closedEventIds: new Set() }, clock, envelope) }]);
         }
-        if ((root.data as unknown[]).some((row) => !Array.isArray(row) || !seen.has(String(row[0])))) return [];
+        // All-or-nothing: one row whose event is not in the batch metadata
+        // discards every event in that 1.5 MiB batch alongside it.
+        if ((root.data as unknown[]).some((row) => !Array.isArray(row) || !seen.has(String(row[0])))) {
+          return noteBtiRefusal("detail-row-outside-batch");
+        }
       } else {
         const ids = isBatch ? [...new Set([...part.events.map((event) => event.providerEventId), ...closedEventIds,
           ...(part.nativeMarketObservations ?? []).map((observation) => observation.providerEventId)])] : [eventId];
         for (const id of ids) {
           const detail = catalogForEvent(part, id, closedEventIds.has(id));
-          if (detail === null && records.length > 0) return [];
+          if (detail === null && records.length > 0) return noteBtiRefusal("detail-no-catalog-for-event");
           detailEntries.push([id, detail ?? part]);
         }
       }
@@ -278,6 +284,21 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
   }
 }
 
+/**
+ * Detail payloads carry the corner and card books, and every way this decoder
+ * can produce nothing looked identical from outside: ADAPTER_DECODE_EMPTY with
+ * no reason. Measured 2026-09-12, BTI had 280 events of detail cached in the
+ * page (52 MB) and three in the catalog, with 135 of 145 complete bodies
+ * decoding empty. Names only, no payload value is ever kept.
+ */
+export const btiContentRefusals = new Map<string, number>();
+
+function noteBtiRefusal(reason: string): readonly [] {
+  if (btiContentRefusals.size < 24 || btiContentRefusals.has(reason)) {
+    btiContentRefusals.set(reason, (btiContentRefusals.get(reason) ?? 0) + 1);
+  }
+  return [];
+}
 function placeholderParticipants(event: { readonly participantA: string; readonly participantB: string }): boolean {
   const normalized = (value: string): string => value.normalize("NFD").replace(/[\u0300-\u036f]/gu, "")
     .toLocaleLowerCase("en").replace(/[^a-z0-9]+/gu, " ").trim();
