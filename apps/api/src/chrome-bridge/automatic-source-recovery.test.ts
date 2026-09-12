@@ -124,31 +124,6 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.restoreLobby).not.toHaveBeenCalled();
   });
 
-  it("lets a starved transport past the already-live refusal, and nothing else", async () => {
-    // Every other fault on a readable book needs no recovery, and acting on one
-    // would replace a working document for nothing. A socket that reconnects
-    // without resending reset is the exception: the page answers perfectly
-    // while its coverage drains, and nothing inside that document can rebuild
-    // the socket. Measured 2026-09-13, SABA read LIVE with 1,324 quote changes
-    // a minute while carrying 55 fixtures against the 141 its page listed.
-    const readable = { accountId: SABA } as never;
-    const live = setup(() => 2_000, false);
-    live.feedRegistry.read.mockReturnValue(readable);
-    live.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { state: "LIVE", reason: null,
-      sourceId: "chrome:SABA:7", sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
-
-    await live.recovery.recover(request(SABA, "HARD"));
-    expect(live.reloadSource).not.toHaveBeenCalled();
-
-    const starved = setup(() => 2_000, false);
-    starved.feedRegistry.read.mockReturnValue(readable);
-    starved.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { state: "LIVE", reason: null,
-      sourceId: "chrome:SABA:7", sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
-
-    await starved.recovery.recover({ ...request(SABA, "HARD"), transportStarved: true });
-    expect(starved.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7", true);
-  });
-
   it("tells the worker when a reload is the only thing left, and stays quiet otherwise", async () => {
     // A page whose socket reconnects without resending its reset frame keeps
     // answering normally, so the worker cannot see the difference from inside

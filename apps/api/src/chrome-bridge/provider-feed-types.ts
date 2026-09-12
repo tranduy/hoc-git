@@ -44,16 +44,6 @@ export interface ProviderRecoveryRequest {
   readonly stage: "SOFT" | "HARD";
   readonly attempt: number;
   readonly requestedAtMs: number;
-  /**
-   * The provider transport stopped producing a baseline while the book kept
-   * reading. Recovery is refused outright for a readable book, which is right
-   * for every other fault. A socket that reconnects without resending reset is
-   * the exception: the page answers perfectly while its coverage drains, and
-   * nothing inside that document can rebuild the socket. Measured 2026-09-13,
-   * SABA read LIVE at 1,324 quote changes a minute while carrying 55 fixtures
-   * against the 141 its own page listed. Liveness was never the question.
-   */
-  readonly transportStarved?: boolean;
 }
 
 export interface ProviderFeedSnapshot {

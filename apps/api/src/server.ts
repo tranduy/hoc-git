@@ -727,11 +727,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       askedAtMs.set(accountId, nowMs);
       try {
         void automaticSourceRecovery.recover({ accountId, stage, attempt: 1,
-          requestedAtMs: nowMs,
-          // The hard stage is only ever asked for here by a shadowed socket
-          // gap, which is precisely the fault a readable book can suffer.
-          ...(stage === "HARD" ? { transportStarved: true } : {})
-        }).catch(() => undefined);
+          requestedAtMs: nowMs }).catch(() => undefined);
       } catch { /* an event-driven request is best-effort, like the sweep */ }
     };
   }

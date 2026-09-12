@@ -130,8 +130,6 @@ export class AutomaticSourceRecovery {
   readonly #now: () => number;
   readonly #inflight = new Map<string, Promise<RecoveryResult>>();
   readonly #backoff = new Map<string, RecoveryBackoffState>();
-  /** Books whose transport is starved, for the life of one request. */
-  readonly #starvedTransports = new Set<string>();
   readonly #lastReloadAtMs = new Map<string, number>();
   readonly #lastImPortalAtMs = new Map<string, number>();
   readonly #disposeSignal: Promise<typeof DISPOSED>;
@@ -165,11 +163,7 @@ export class AutomaticSourceRecovery {
   recover(request: ProviderRecoveryRequest): Promise<RecoveryResult> {
     const existing = this.#inflight.get(request.accountId);
     if (existing !== undefined) return existing;
-    // A readable book needs no recovery, except when what it lost is the
-    // transport rather than the reading. Nothing inside the current document
-    // rebuilds a socket, so this one fault has to be allowed past.
-    if (!this.#disposed && !this.#suppressed(request.accountId) &&
-      request.transportStarved !== true && this.#readable(request.accountId)) {
+    if (!this.#disposed && !this.#suppressed(request.accountId) && this.#readable(request.accountId)) {
       const result = recovered(request.accountId, request.stage);
       this.#recordResult(result);
       return Promise.resolve(result);
@@ -179,9 +173,6 @@ export class AutomaticSourceRecovery {
       return Promise.resolve({ accountId: request.accountId, stage: request.stage,
         outcome: "ACTION_REQUIRED", reason: "RECOVERY_BACKOFF" });
     }
-    // Armed for this request only: two books can recover at once, so the
-    // exemption cannot be a flag on the instance.
-    if (request.transportStarved === true) this.#starvedTransports.add(request.accountId);
     const operation = this.#recover(request).then((result) => {
       // A valid delta can recover without completing a newer baseline.
       const current = !this.#disposed && !this.#suppressed(request.accountId) && this.#readable(request.accountId)
@@ -192,7 +183,6 @@ export class AutomaticSourceRecovery {
       this.#recordFailure(request.accountId, recoveryFailureCode(recoveryReason(error)));
       throw error;
     }).finally(() => {
-      this.#starvedTransports.delete(request.accountId);
       if (this.#inflight.get(request.accountId) === operation) this.#inflight.delete(request.accountId);
     });
     this.#inflight.set(request.accountId, operation);
@@ -310,12 +300,7 @@ export class AutomaticSourceRecovery {
             // repaired from inside its own document, and some providers only
             // ever act inside it. Pass the fact along so the worker can tell a
             // document that needs a nudge from one that needs replacing.
-            // The caller knows too: an event-driven request carries the fact
-            // that the transport is starved, and the feed snapshot may still
-            // read perfectly while it is - which is the whole reason this
-            // request was allowed past the already-live refusal.
-            const starved = request.transportStarved === true ||
-              prior.reason === "PROVIDER_STREAM_GAP" || prior.reason === "BASELINE_TIMEOUT";
+            const starved = prior.reason === "PROVIDER_STREAM_GAP" || prior.reason === "BASELINE_TIMEOUT";
             delivered = starved
               ? this.#options.controlPlane.reloadSource(prior.sourceId, true)
               : this.#options.controlPlane.reloadSource(prior.sourceId);
@@ -615,7 +600,6 @@ export class AutomaticSourceRecovery {
   #requireRecovery(accountId: string): void {
     // read() revalidates authority, cadence, semantic silence and baseline
     // expiry. A cached LIVE snapshot cannot stop a necessary recovery.
-    if (this.#starvedTransports.has(accountId)) return;
     if (this.#readable(accountId)) throw RECOVERY_ALREADY_LIVE;
   }
 
