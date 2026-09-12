@@ -1792,7 +1792,7 @@ describe("ChromeCatalogDataPlane", () => {
   });
 
   it("asks for the stage that can actually rebuild a socket the DOM is hiding", async () => {
-    const recoveries: { accountId: string; stage?: "SOFT" | "HARD" }[] = [];
+    const recoveries: { accountId: string; stage: "SOFT" | "HARD" | undefined }[] = [];
     let now = 100_002;
     const plane = new ChromeCatalogDataPlane({ now: () => now,
       onSourceRecoveryNeeded: (accountId, stage) => { recoveries.push({ accountId, stage }); } });
