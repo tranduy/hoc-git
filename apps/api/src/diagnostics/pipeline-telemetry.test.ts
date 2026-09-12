@@ -5,6 +5,7 @@ import type { ChromeBridgeSourceSnapshot } from "../chrome-bridge/chrome-bridge-
 import type { AuthoritySlotSnapshot } from "../chrome-bridge/provider-authority-types.js";
 import type { ProviderFeedSnapshot } from "../chrome-bridge/provider-feed-types.js";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
+import { tsportContentRefusals } from "../chrome-bridge/tsport-ws-adapter.js";
 import { PipelineTelemetry, PIPELINE_TELEMETRY_LIMITS, type PipelineTelemetryReaders } from "./pipeline-telemetry.js";
 
 const accountId = "catalog-source:CMD:FOOTBALL" as const;
@@ -56,6 +57,26 @@ function readers(revision: StoredCatalogRevision, feed: ProviderFeedSnapshot): P
 }
 
 describe("PipelineTelemetry", () => {
+  it("never reports one book’s content refusals under another book", async () => {
+    const telemetry = new PipelineTelemetry({ now: () => 1_000 });
+    const readers = { listSources: () => [], listAuthorities: () => [], listFeeds: () => [],
+      listCatalogStatuses: async () => [], catalogRevision: () => undefined,
+      networkBodyAssembly: () => ({ active: null, candidate: null }) };
+    tsportContentRefusals.set("resolve-not-in-roster", 3150);
+    try {
+      const apsport = await telemetry.diagnostic(readers, "catalog-source:APSPORT:FOOTBALL");
+      expect(apsport?.hops.find(hop => hop.hop === "HOP4_ADAPTER")?.detail.contentRefusals)
+        .toContain("resolve-not-in-roster:3150");
+      // APSPORT’s map used to stand in for every book without one, so CMD,
+      // SABA and SBOBET all published APSPORT’s refusals as their own.
+      for (const other of ["catalog-source:CMD:FOOTBALL", "catalog-source:SABA:FOOTBALL",
+        "catalog-source:SBOBET:FOOTBALL"]) {
+        const result = await telemetry.diagnostic(readers, other);
+        expect(result?.hops.find(hop => hop.hop === "HOP4_ADAPTER")?.detail.contentRefusals).toBe("");
+      }
+    } finally { tsportContentRefusals.delete("resolve-not-in-roster"); }
+  });
+
   it("reports active and candidate body assembly counters without native payload fields", async () => {
     const telemetry = new PipelineTelemetry({ now: () => 1_000 });
     const assembly = { active: { pendingBodies: 2, pendingBytes: 48, blockedSourceEpochs: 1 },

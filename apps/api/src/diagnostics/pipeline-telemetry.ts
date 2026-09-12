@@ -484,12 +484,18 @@ export class PipelineTelemetry {
         ...(current.networkBodyAssembly === null ? {} : { networkBodyAssembly: current.networkBodyAssembly }),
         // Why frames that reached an adapter were not recognised as its
         // provider's records. Shape names only; no frame value is kept.
-        // Each map is provider-owned; APSPORT's is the fallback for the
-        // providers that have no counter of their own yet, so this cell is
-        // only trustworthy for IM, BTI and APSPORT.
+        //
+        // Each map is provider-owned. APSPORT's used to stand in for every
+        // provider without one, so CMD, SABA and SBOBET all reported
+        // APSPORT's refusals as their own - four books carrying the same
+        // string on 2026-09-12, and a SABA investigation was started on
+        // numbers that belonged to APSPORT. A book with no counter of its
+        // own now says nothing, because nothing is true and a neighbour’s
+        // tally is not.
         contentRefusals: [...(accountId === "catalog-source:IM:FOOTBALL" ? imContentRefusals
           : accountId === "catalog-source:BTI:FOOTBALL" ? btiContentRefusals
-          : tsportContentRefusals).entries()]
+          : accountId === "catalog-source:APSPORT:FOOTBALL" ? tsportContentRefusals
+          : new Map<string, number>()).entries()]
           .map(([reason, count]) => `${reason}:${count}`).join(" "),
         lastDecodedAgeMs: age(nowMs, state.lastDecodedAtMs), forcedUnlocks: state.forcedUnlocks,
         ingestRejections: [...state.ingestRejections.entries()]
