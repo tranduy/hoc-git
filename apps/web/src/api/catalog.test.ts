@@ -161,12 +161,12 @@ describe("CatalogApi", () => {
 
     expect(calls).toEqual([
       "/api/catalog/accounts/account-1?nativeDetail=counts&markets=none",
-      "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-a%2Cevent-b"
+      "/api/catalog/accounts/account-1?nativeDetail=counts&marketTypes=paired&events=event-a%2Cevent-b"
     ]);
     expect(roster.revision).toBe("catalog-100|roster");
     expect(roster.sourceRevision).toBe("catalog-100");
     expect(selected.sourceRevision).toBe("catalog-100");
-    expect(selected.revision).toBe("catalog-100|events:event-a,event-b");
+    expect(selected.revision).toBe("catalog-100|events:event-a,event-b|paired");
   });
   it("loads large event selections in a bounded request without losing any IDs", async () => {
     const ids = Array.from({ length: 900 }, (_, index) => String(884467107155537920n + BigInt(index)));
@@ -182,7 +182,8 @@ describe("CatalogApi", () => {
     expect(calls[0]!.url).toBe("/api/catalog/accounts/account-1");
     expect(calls[0]!.init?.method).toBe("POST");
     expect(new Headers(calls[0]!.init?.headers).get("content-type")).toBe("application/json");
-    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ nativeDetail: "counts", events: ids.join(",") });
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ nativeDetail: "counts",
+      marketTypes: "paired", events: ids.join(",") });
   });
 
   it("loads a live account catalog through a path parameter", async () => {
@@ -461,9 +462,9 @@ describe("CatalogApi", () => {
 
     expect(requests.map((request) => request.etag)).toEqual([null, null, null]);
     expect(requests.map((request) => request.url)).toEqual([
-      "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-a",
-      "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-b",
-      "/api/catalog/accounts/account-1?nativeDetail=counts&events=event-a"
+      "/api/catalog/accounts/account-1?nativeDetail=counts&marketTypes=paired&events=event-a",
+      "/api/catalog/accounts/account-1?nativeDetail=counts&marketTypes=paired&events=event-b",
+      "/api/catalog/accounts/account-1?nativeDetail=counts&marketTypes=paired&events=event-a"
     ]);
   });
 });

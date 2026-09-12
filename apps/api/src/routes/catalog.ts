@@ -79,6 +79,37 @@ export function registerCatalogRoutes(
     readonly response: Promise<ObservedProviderCatalog>;
     readonly underlying: Promise<ObservedProviderCatalog>;
   }>();
+  /**
+   * Which market types each book carries, kept beside the read cache so a
+   * request never has to walk every catalog to find out. Measured 2026-09-12:
+   * 89,986 of BTI's 143,346 markets are player props, APSPORT carries 311 of
+   * those and the other three books carry none, so nearly all of them have no
+   * second book to be priced against and can never appear in a two-book pair.
+   */
+  const marketTypesByProvider = new Map<string, { provider: string; types: ReadonlySet<string> }>();
+  const noteMarketTypes = (sourceKey: string, catalog: ObservedProviderCatalog): void => {
+    marketTypesByProvider.set(sourceKey, { provider: catalog.provider,
+      types: new Set(catalog.markets.map((market) => market.marketType)) });
+  };
+  /**
+   * Types some other book also carries. Empty means "not known yet", which
+   * filters nothing. The two-provider floor is what makes that safe: measured
+   * 2026-09-12, twenty-five seconds after a restart the other books had not
+   * finished loading and APSPORT lost 64.6% of its markets to a union that was
+   * merely incomplete; once every book had been read the same request dropped
+   * 652 of 58,283, which is 1.1%. A thin moment must not decide what pairs.
+   */
+  const typesPairableWith = (provider: string): ReadonlySet<string> => {
+    const shared = new Set<string>();
+    let providers = 0;
+    for (const entry of marketTypesByProvider.values()) {
+      if (entry.provider === provider || entry.types.size === 0) continue;
+      providers += 1;
+      for (const type of entry.types) shared.add(type);
+    }
+    return providers >= 2 ? shared : new Set<string>();
+  };
+
   const recentReads = new Map<string, {
     readonly catalog: ObservedProviderCatalog;
     readonly completedAtMs: number;
@@ -111,7 +142,8 @@ export function registerCatalogRoutes(
 
   const forAccount = (
     catalog: ObservedProviderCatalog, accountId: string, snapshotState: "FRESH" | "STALE",
-    withoutMarkets = false, wantedEvents: ReadonlySet<string> | null = null
+    withoutMarkets = false, wantedEvents: ReadonlySet<string> | null = null,
+    narrowToPairableTypes = false
   ): ObservedProviderCatalog & { readonly snapshotState: "FRESH" | "STALE" } => {
     const horizon = withinComparisonHorizon(catalog);
     const wanted = (row: { readonly providerEventId?: unknown }): boolean =>
@@ -127,7 +159,18 @@ export function registerCatalogRoutes(
       : { ...horizon, markets: horizon.markets.filter(wanted), quotes: horizon.quotes.filter(wanted),
         ...(horizon.nativeMarketObservations === undefined ? {}
           : { nativeMarketObservations: horizon.nativeMarketObservations.filter(wanted) }) };
-    return { ...projected, accountId, snapshotState };
+    // A market type no other book prices has no second side and cannot become
+    // an exact two-book pair, so sending it costs transfer and parse time for
+    // a row the comparison will never look at. This narrows what is sent, not
+    // what is collected: the catalog still holds every market, the roster's
+    // coverage counters still report the whole book, and a type another book
+    // starts carrying is simply included on the next round. An empty set means
+    // no other catalog has been read yet, which filters nothing.
+    const pairableTypes = narrowToPairableTypes ? typesPairableWith(catalog.provider) : null;
+    const narrowed = pairableTypes === null || pairableTypes.size === 0 || withoutMarkets ? projected
+      : { ...projected, markets: projected.markets.filter((market) => pairableTypes.has(market.marketType)),
+        quotes: projected.quotes.filter((quote) => pairableTypes.has(quote.marketType)) };
+    return { ...narrowed, accountId, snapshotState };
   };
 
   const publishInBackground = (catalog: ObservedProviderCatalog): void => {
@@ -155,6 +198,7 @@ export function registerCatalogRoutes(
         coverageGuard.accept(sourceKey, { generation: sourceKey, authoritativeBaseline: false,
           providerEventIds: catalog.events.map((event) => event.providerEventId) });
         recentReads.set(sourceKey, { catalog, completedAtMs: performance.now(), restored: true });
+        noteMarketTypes(sourceKey, catalog);
       }
     }).catch(() => undefined).finally(() => {
       restoredSources.add(sourceKey);
@@ -195,6 +239,7 @@ export function registerCatalogRoutes(
       }
       await telemetry.recordSuccess(accountId, catalog, telemetry.complete(started));
       recentReads.set(sourceKey, { catalog, completedAtMs: performance.now(), restored: false });
+      noteMarketTypes(sourceKey, catalog);
       sourceFailures.delete(sourceKey);
       if (store !== undefined) void store.save(sourceKey, catalog).catch(() => undefined);
       publishInBackground(catalog);
@@ -242,6 +287,7 @@ export function registerCatalogRoutes(
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     const query = z.object({ nativeDetail: z.enum(["full", "summary", "counts"]).optional(),
       markets: z.enum(["none"]).optional(),
+      marketTypes: z.enum(["paired"]).optional(),
       events: z.string().max(65_536).optional() }).strict()
       .safeParse(request.method === "POST" ? request.body : request.query);
     if (!query.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
@@ -260,6 +306,7 @@ export function registerCatalogRoutes(
     // rest cannot form a cross-book pair and are the bulk of the transfer.
     // Every event still travels either way, so a fixture that becomes pairable
     // later is simply asked for on the next round.
+    const narrowToPairableTypes = query.data.marketTypes === "paired";
     const wantedEvents = query.data.events === undefined ? null
       : new Set(query.data.events.split(",").map((id) => id.trim()).filter((id) => id.length > 0));
     if (wantedEvents !== null && (wantedEvents.size === 0 || wantedEvents.size > 5_000 ||
@@ -278,7 +325,8 @@ export function registerCatalogRoutes(
     const eventsTag = wantedEvents === null ? ""
       : `-events:${wantedEvents.size}:${fnv1a([...wantedEvents].sort().join(","))}`;
     const etagSuffix = `${counts ? "-native-counts" : summary ? "-native-summary" : ""}` +
-      `${query.data.markets === "none" ? "-no-markets" : ""}${eventsTag}`;
+      `${query.data.markets === "none" ? "-no-markets" : ""}` +
+      `${narrowToPairableTypes ? "-paired-types" : ""}${eventsTag}`;
     try {
       const accountId = parsed.data.accountId;
       const accountSnapshotFreshnessMaxAgeMs = reader.snapshotFreshnessMaxAgeMsFor?.(accountId) ??
@@ -291,7 +339,7 @@ export function registerCatalogRoutes(
         const etag = `"${entry.revision}${etagSuffix}"`;
         reply.header("etag", etag).header("x-catalog-revision", entry.revision);
         if (request.method === "GET" && request.headers["if-none-match"] === etag) return reply.code(304).send();
-        return sendView(forAccount(entry.catalog, accountId, entry.snapshotState, withoutMarkets, wantedEvents));
+        return sendView(forAccount(entry.catalog, accountId, entry.snapshotState, withoutMarkets, wantedEvents, narrowToPairableTypes));
       };
       const sendCatalog = (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => {
         if (revisions !== undefined) return sendRevision(revisions.publish(accountId, catalog, {
@@ -300,7 +348,7 @@ export function registerCatalogRoutes(
         const etag = `"${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${snapshotState}${etagSuffix}"`;
         reply.header("etag", etag);
         if (request.method === "GET" && request.headers["if-none-match"] === etag) return reply.code(304).send();
-        return sendView(forAccount(catalog, accountId, snapshotState, withoutMarkets, wantedEvents));
+        return sendView(forAccount(catalog, accountId, snapshotState, withoutMarkets, wantedEvents, narrowToPairableTypes));
       };
       const deadlineMs = performance.now() + requestTimeoutMs;
       const sourceKey = await within(
