@@ -117,6 +117,25 @@ interface PendingCollectorRetention {
   readonly originalObservedAtMs: number;
 }
 
+/**
+ * Why SABA frames were not turned into records, and how large the page said
+ * its own roster was. SABA kept only the last refusal, so a book stuck at 59
+ * fixtures while five others carried 570 to 1,390 could not be told apart
+ * from a page that genuinely lists 59 - and the shared APSPORT tally that
+ * stood in for it was another book's numbers. Shape names and counts only.
+ */
+export const sabaContentRefusals = new Map<string, number>();
+
+function noteSaba(reason: string): void {
+  if (sabaContentRefusals.size > 60 && !sabaContentRefusals.has(reason)) return;
+  sabaContentRefusals.set(reason, (sabaContentRefusals.get(reason) ?? 0) + 1);
+}
+
+/** A measurement, not a tally: the latest value replaces the previous one. */
+function gaugeSaba(key: string, value: number): void {
+  sabaContentRefusals.set(key, value);
+}
+
 export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #quoteClockMapper: SabaQuoteClockMapper | undefined;
   readonly #requireSocketBaseline: boolean;
@@ -150,6 +169,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
 
   #ignore(reason: string): [] {
     this.#lastIgnoreReason = reason;
+    noteSaba(reason);
     return [];
   }
 
@@ -426,6 +446,13 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
               .filter(([key]) => candidate.captures.some(capture => key === `${capture.period}\u0000${capture.ownerMatchId}`))),
             rosters: new Map(candidate.captures.filter(capture => capture.captureKind === "ROSTER")
               .map(capture => [`${capture.period}\u0000${capture.ownerMatchId}`, capture])) });
+          // What the page itself listed in the sweep we just accepted. If this
+          // tracks the catalog, the book really is that small; if it is far
+          // larger, the sweep is landing and something after it drops
+          // fixtures. Those two faults have nothing in common to fix.
+          gaugeSaba("dom-sweep-roster-captures",
+            candidate.captures.filter(capture => capture.captureKind === "ROSTER").length);
+          gaugeSaba("dom-sweep-captures-total", candidate.captures.length);
         }
         return updates;
       }
@@ -479,9 +506,18 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         const previous = this.#domCandidates.get(envelope.sourceId);
         if (!this.#domReadySources.has(envelope.sourceId)) {
           this.#domCandidates.set(envelope.sourceId, identities);
-          if (previous === undefined && (this.#requireSocketBaseline || usable.length < SINGLE_GENERATION_DOM_EVENTS)) {
+          // Two different gates shared one message. It read
+          // "dom-first-generation-151-under-50", which is not a fact about
+          // anything: 151 is not under 50, and the gate that actually closed
+          // was the wait for a socket baseline. The distinction matters
+          // because the two are fixed in opposite places - one by moving a
+          // threshold, the other by getting the socket to re-baseline.
+          const awaitingSocketBaseline = this.#requireSocketBaseline;
+          if (previous === undefined && (awaitingSocketBaseline || usable.length < SINGLE_GENERATION_DOM_EVENTS)) {
             if (!socketReady && !collectorReady) {
-              return this.#ignore(`dom-first-generation-${usable.length}-under-${SINGLE_GENERATION_DOM_EVENTS}`);
+              return this.#ignore(awaitingSocketBaseline
+                ? `dom-first-generation-${usable.length}-awaiting-socket-baseline`
+                : `dom-first-generation-${usable.length}-under-${SINGLE_GENERATION_DOM_EVENTS}`);
             }
           }
           if (previous !== undefined && !stableDomCoverage(previous, identities)) {

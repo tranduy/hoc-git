@@ -2,6 +2,7 @@ import type { CatalogSourceStatus, ChromeBridgeEnvelope, ProviderQuote } from "@
 import type { StoredCatalogRevision } from "../catalog/catalog-revision-store.js";
 import { imContentRefusals } from "../chrome-bridge/im-http-adapter.js";
 import { btiContentRefusals } from "../chrome-bridge/bti-http-adapter.js";
+import { sabaContentRefusals } from "../chrome-bridge/saba-ws-adapter.js";
 import { tsportContentRefusals } from "../chrome-bridge/tsport-ws-adapter.js";
 import {
   CHROME_BRIDGE_PROVIDER_ACCOUNT_IDS,
@@ -494,6 +495,7 @@ export class PipelineTelemetry {
         // tally is not.
         contentRefusals: [...(accountId === "catalog-source:IM:FOOTBALL" ? imContentRefusals
           : accountId === "catalog-source:BTI:FOOTBALL" ? btiContentRefusals
+          : accountId === "catalog-source:SABA:FOOTBALL" ? sabaContentRefusals
           : accountId === "catalog-source:APSPORT:FOOTBALL" ? tsportContentRefusals
           : new Map<string, number>()).entries()]
           .map(([reason, count]) => `${reason}:${count}`).join(" "),
