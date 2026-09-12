@@ -334,10 +334,24 @@ export class ChromeBridgeControlPlane {
     return requested;
   }
 
+  // Every other control here speaks to whichever source currently feeds the
+  // catalog, so it reads the active slot only. Sending a tab somewhere is not
+  // that kind of control: a candidate source owns a real tab too, and measured
+  // 2026-09-12 only two of six lobbies were active, so the active-only lookup
+  // would have silently skipped four of them. Address every attached source.
+  #navigableSources(): readonly { readonly sourceId: string; readonly lobby: ChromeLobbyId;
+    readonly socket: AttachedSource["socket"] }[] {
+    if (this.#authorityCoordinator === null) return [...this.#sourcesByAccount.values()];
+    return [...this.#authoritySourcesByAccount.values()]
+      .flatMap((slot) => [slot.active, slot.candidate].filter((source) => source !== null));
+  }
+
   navigateLobby(lobby: string, url: string): number {
     let requested = 0;
-    for (const { sourceId, lobby: attachedLobby, socket } of this.#attachedSources()) {
-      if (socket.readyState !== 1 || attachedLobby !== lobby) continue;
+    const seen = new Set<string>();
+    for (const { sourceId, lobby: attachedLobby, socket } of this.#navigableSources()) {
+      if (socket.readyState !== 1 || attachedLobby !== lobby || seen.has(sourceId)) continue;
+      seen.add(sourceId);
       const control: ChromeBridgeControlMessage = { version: 1, kind: "NAVIGATE_SOURCE", sourceId, url };
       socket.send(JSON.stringify(control));
       requested += 1;

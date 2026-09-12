@@ -116,7 +116,16 @@ export function registerCatalogRoutes(
     const horizon = withinComparisonHorizon(catalog);
     const wanted = (row: { readonly providerEventId?: unknown }): boolean =>
       wantedEvents === null || wantedEvents.has(String(row.providerEventId));
-    const projected = withoutMarkets ? { ...horizon, markets: [], quotes: [] }
+    // markets=none exists so a client can learn which fixtures a book has
+    // before asking for any prices. Leaving the native observations in
+    // defeated that: measured 2026-09-12, BTI answered markets=none with
+    // 226 MB because the observations, not the markets, are its bulk - and
+    // the full catalog was 686 MB, past the point Node can hold it as one
+    // string. They are decode diagnostics, never a comparison input, so the
+    // projection that drops prices drops them too.
+    const projected = withoutMarkets
+      ? { ...horizon, markets: [], quotes: [],
+        ...(horizon.nativeMarketObservations === undefined ? {} : { nativeMarketObservations: [] }) }
       : wantedEvents === null ? horizon
       : { ...horizon, markets: horizon.markets.filter(wanted), quotes: horizon.quotes.filter(wanted),
         ...(horizon.nativeMarketObservations === undefined ? {}

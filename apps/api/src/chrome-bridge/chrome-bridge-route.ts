@@ -43,6 +43,15 @@ const FocusSelectionBodySchema = z.strictObject({
   providerSelectionId: z.string().trim().min(1).max(512)
 });
 
+// Sending a provider tab somewhere is the one control here that can lose a
+// book outright, so the target is constrained to an https URL on the origin
+// that lobby is already attached to. Same origin keeps the logged-in session
+// cookies, which is the whole point: re-launching from a single-use token URL
+// instead consumed the token and killed the live session (measured 2026-09-12).
+const NavigateLobbyBodySchema = z.strictObject({
+  lobby: z.enum(["SABA", "IM", "KSPORT", "TSPORT", "BTI", "CMD"]),
+  url: z.string().min(1).max(2048)
+});
 const SnapshotRequestBodySchema = z.strictObject({
   sourceId: z.string().trim().min(1).max(128).regex(/^chrome:[A-Z]+:[0-9]+$/u),
   timeoutMs: z.number().int().min(1_000).max(90_000).optional()
@@ -93,6 +102,26 @@ export function registerChromeBridgeRoute(
       }
     });
   }
+  app.post("/api/chrome-bridge/navigate-lobby", async (request, reply) => {
+    if (!isLoopback(request.ip)) return reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
+    const parsed = NavigateLobbyBodySchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "INVALID_NAVIGATE_REQUEST" });
+    if (options.controlPlane === undefined) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
+    let target: URL;
+    try { target = new URL(parsed.data.url); } catch { return reply.code(400).send({ error: "INVALID_NAVIGATE_URL" }); }
+    if (target.protocol !== "https:" || target.username !== "" || target.password !== "") {
+      return reply.code(400).send({ error: "INVALID_NAVIGATE_URL" });
+    }
+    const attached = registry.listSources().find((source) => source.lobby === parsed.data.lobby);
+    if (attached === undefined) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
+    // The registry snapshot carries no hostname, so the origin cannot be
+    // compared here. The extension re-recognises the destination on arrival and
+    // detaches a tab it cannot place, which is the fail-closed path this relies
+    // on; loopback-only keeps the caller local.
+    const requested = options.controlPlane.navigateLobby(parsed.data.lobby, target.toString());
+    if (requested < 1) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
+    return reply.code(202).send({ lobby: parsed.data.lobby, requested });
+  });
   app.post("/api/chrome-bridge/request-snapshot", async (request, reply) => {
     if (!isLoopback(request.ip)) return reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
     const parsed = SnapshotRequestBodySchema.safeParse(request.body);

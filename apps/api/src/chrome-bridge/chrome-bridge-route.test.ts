@@ -474,6 +474,42 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
+  it("navigates an attached lobby in place and refuses a non-https target", async () => {
+    const { app } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const initialControls = new Promise<void>((resolve) => {
+      let count = 0;
+      socket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "KSPORT", sourceId: "chrome:KSPORT:7" }));
+    await initialControls;
+
+    const control = nextMessage(socket);
+    const ok = await app.inject({ method: "POST", url: "/api/chrome-bridge/navigate-lobby",
+      payload: { lobby: "KSPORT", url: "https://zenandfe.com/?lng=en" } });
+    expect(ok.statusCode).toBe(202);
+    expect(ok.json()).toEqual({ lobby: "KSPORT", requested: 1 });
+    await expect(control).resolves.toEqual({ version: 1, kind: "NAVIGATE_SOURCE",
+      sourceId: "chrome:KSPORT:7", url: "https://zenandfe.com/?lng=en" });
+
+    // A provider tab is the one thing this can lose, so anything that is not a
+    // plain https URL is refused before it reaches the extension.
+    for (const url of ["http://zenandfe.com/", "javascript:alert(1)", "https://u:p@zenandfe.com/"]) {
+      const bad = await app.inject({ method: "POST", url: "/api/chrome-bridge/navigate-lobby",
+        payload: { lobby: "KSPORT", url } });
+      expect(bad.statusCode).toBe(400);
+    }
+    const detached = await app.inject({ method: "POST", url: "/api/chrome-bridge/navigate-lobby",
+      payload: { lobby: "SABA", url: "https://zenandfe.com/?lng=en" } });
+    expect(detached.statusCode).toBe(409);
+    socket.terminate();
+    await app.close();
+  });
+
+
   it("requests recovery from an exact listed LIVE candidate source", async () => {
     const { app, registry } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
