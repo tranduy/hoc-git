@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CatalogSourceStatus, ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
-import { ChromeCatalogDataPlane } from "./chrome-catalog-data-plane.js";
+import { ChromeCatalogDataPlane, STATUS_NON_LIVE_GRACE_MS } from "./chrome-catalog-data-plane.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
 import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
@@ -1410,8 +1410,58 @@ describe("ChromeCatalogDataPlane", () => {
     now = 65_003;
 
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    // A book whose feed cannot be read this instant has not been shown to be
+    // broken, so the first unreadable sample leaves the status alone.
+    await expect(plane.overlayStatuses([activeSbobet])).resolves.toMatchObject([{
+      sessionState: "ACTIVE", reason: null
+    }]);
+    now = 65_003 + 3_000;
+    await expect(plane.overlayStatuses([activeSbobet])).resolves.toMatchObject([{
+      sessionState: "ACTIVE", reason: null
+    }]);
+
+    now = 65_003 + STATUS_NON_LIVE_GRACE_MS;
     await expect(plane.overlayStatuses([activeSbobet])).resolves.toMatchObject([{
       sessionState: "ACTION_REQUIRED", acquiredAtMs: 1_002, reason: "PROVIDER_VALIDATION_FAILED"
+    }]);
+  });
+
+  it("clears the non-live grace once the provider feed reads again", async () => {
+    let now = 100_002;
+    const plane = new ChromeCatalogDataPlane({ now: () => now });
+    expect(plane.ingest(sabaCompleteCollector(0))).toBe(true);
+    plane.ingest(sabaPushOpen(1, "1"));
+    expect(plane.ingest(sabaPushBaseline(2, "1"))).toBe(true);
+    await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA" });
+
+    // Two dips separated by a reading that succeeded must not add up into a
+    // demotion: the successful read in between proves the book was serving.
+    now = 250_003;
+    await expect(plane.read(SABA)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    await expect(plane.overlayStatuses([activeSaba])).resolves.toMatchObject([{
+      sessionState: "ACTIVE"
+    }]);
+
+    now = 260_000;
+    plane.ingest({ ...sabaPushOpen(3, "2"), observedAtMs: now - 1 });
+    expect(plane.ingest({ ...sabaPushBaseline(4, "2"), observedAtMs: now })).toBe(true);
+    await expect(plane.read(SABA)).resolves.toMatchObject({ observedAtMs: now });
+    await expect(plane.overlayStatuses([activeSaba])).resolves.toMatchObject([{
+      sessionState: "ACTIVE", reason: null
+    }]);
+
+    now = 410_001;
+    await expect(plane.read(SABA)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    await expect(plane.overlayStatuses([activeSaba])).resolves.toMatchObject([{
+      sessionState: "ACTIVE"
+    }]);
+    now = 410_001 + STATUS_NON_LIVE_GRACE_MS - 1;
+    await expect(plane.overlayStatuses([activeSaba])).resolves.toMatchObject([{
+      sessionState: "ACTIVE"
+    }]);
+    now = 410_001 + STATUS_NON_LIVE_GRACE_MS;
+    await expect(plane.overlayStatuses([activeSaba])).resolves.toMatchObject([{
+      sessionState: "ACTION_REQUIRED", reason: "PROVIDER_VALIDATION_FAILED"
     }]);
   });
 
@@ -1421,11 +1471,14 @@ describe("ChromeCatalogDataPlane", () => {
     seed.ingest(sabaPushOpen(1, "1"));
     expect(seed.ingest(sabaPushBaseline(2, "1"))).toBe(true);
     const restored = await seed.read(SABA);
-    const plane = new ChromeCatalogDataPlane({ now: () => 200_000 });
+    let now = 200_000;
+    const plane = new ChromeCatalogDataPlane({ now: () => now });
     plane.restore({ ...restored, accountId: SABA, provider: "SABA", observedAtMs: 100 });
-    plane.ingest(tabHeartbeat(sabaPushOpen(3, "1"), 200_000, 3));
+    plane.ingest(tabHeartbeat(sabaPushOpen(3, "1"), now, 3));
 
     await expect(plane.read(SABA)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    await plane.overlayStatuses([activeSaba]);
+    now += STATUS_NON_LIVE_GRACE_MS;
     await expect(plane.overlayStatuses([activeSaba])).resolves.toMatchObject([{
       sessionState: "ACTION_REQUIRED", reason: "PROVIDER_VALIDATION_FAILED"
     }]);

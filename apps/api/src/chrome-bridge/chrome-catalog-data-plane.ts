@@ -90,7 +90,16 @@ const DEFAULT_RECOVERABLE_ACCOUNTS: ReadonlySet<string> = new Set([
   "catalog-source:BTI:FOOTBALL"
 ]);
 
+/**
+ * How long a feed has to stay unreadable before the source is called broken.
+ * Measured dips on a healthy book run two to three seconds; a real outage ran
+ * fifty-three. Twenty seconds sits between the two.
+ */
+export const STATUS_NON_LIVE_GRACE_MS = 20_000;
+
 export class ChromeCatalogDataPlane {
+  /** When a source's feed first failed to read, cleared the moment it reads again. */
+  readonly #nonLiveSinceMs = new Map<string, number>();
   readonly #now: () => number;
   readonly #sabaQuoteClocks: SabaQuoteClockMapper;
   readonly #freshnessMs: number;
@@ -582,10 +591,25 @@ export class ChromeCatalogDataPlane {
         live = true;
       } catch { /* a non-live provider must fail closed */ }
       if (live && catalog !== undefined) {
+        this.#nonLiveSinceMs.delete(status.id);
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTIVE",
           acquiredAtMs: catalog.observedAtMs, reason: null });
       }
       if (status.sessionState === "ACTIVE") {
+        // A feed that cannot be read right now is not the same as a book that
+        // is gone, and this used to treat them identically: one unreadable
+        // sample dropped the whole source to ACTION_REQUIRED, which greys the
+        // book out and takes it out of the comparison. Measured 2026-09-12 over
+        // two minutes, CMD flipped four times, SBOBET four and BTI three, with
+        // outages of two and three seconds - the provider was fine throughout.
+        // Requiring the condition to persist keeps a genuinely dead book failing
+        // closed (IM has been unreadable for hours) while a momentary dip no
+        // longer removes a healthy one. This says nothing about price validity:
+        // quote freshness is judged per quote, separately, and still applies.
+        const nowMs = this.#now();
+        const since = this.#nonLiveSinceMs.get(status.id) ?? nowMs;
+        this.#nonLiveSinceMs.set(status.id, since);
+        if (nowMs - since < STATUS_NON_LIVE_GRACE_MS) return status;
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTION_REQUIRED",
           acquiredAtMs: catalog?.observedAtMs ?? status.acquiredAtMs,
           reason: "PROVIDER_VALIDATION_FAILED" });
