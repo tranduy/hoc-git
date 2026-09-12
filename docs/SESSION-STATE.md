@@ -1667,6 +1667,179 @@ Chuyển sang server thì **không làm chậm realtime, còn nhanh hơn ở cli
 - Client **lọc trên kết quả** khi tích/bỏ tích sàn (không thể tính sẵn 64 tổ hợp)
 - Kết quả phải **mang theo tuổi dữ liệu của từng sàn**, không gộp thành một mốc chung
 
+## APSPORT — vì sao thiếu kèo góc (2026-09-11, đã đo)
+
+**Không phải nhà cái không bán góc.** `APSPORT_DETAIL_MARKET_GROUPS = [1, 4, 9]` đã
+hỏi `mg=4` (góc) và `mg=9` (thẻ) cho mọi trận từ lâu. Khi vòng đi bộ chạm tới một
+trận, AP trả về **đủ 16 loại góc**, gồm `CORNER_FT_AH` và `CORNER_FT_TOTAL` — đúng
+hai loại BetBurger ăn arb.
+
+Vấn đề là **vòng đi bộ quá chậm**: đo được `successfulEvents 8 / rosterEvents 764`,
+`queued 0 inFlight 0 failed 0` — 1,3 trận/phút, ~9,8 giờ một vòng. Kèo chính vẫn đủ
+64k markets vì nó đến từ WebSocket `/ln/en/s/1/mg/1/tr/0`, không qua đi bộ. Chỉ góc
+và thẻ phụ thuộc đi bộ → 21/764 trận có góc.
+
+Bốn lớp bóp cổ, đã gỡ:
+1. `#pumpApsportCollection` bơm cứng 4 trận/nhịp → lấp đầy tới `APSPORT_DETAIL_MAX_JOBS`
+2. Trần job 6 → `APSPORT_DETAIL_MAX_JOBS`
+3. `#apsportEventDetailTails` nối mọi job vào **một** promise → `APSPORT_DETAIL_LANES` làn
+4. `#requestApsportPage` là **mutex toàn cục theo source** → semaphore `APSPORT_PAGE_REQUEST_LANES` làn
+
+Cộng hai sửa nữa, mỗi cái quan trọng ngang bốn lớp trên:
+- `setCollectionPlan` xoá sạch hàng đợi **mỗi lần API đẩy plan** (mỗi chu kỳ) → chỉ xoá
+  khi tập eventId của plan thật sự đổi
+- `#pumpApsportCollection` đứng im suốt thời gian roster refresh → bỏ chặn, vì làn đã độc lập
+
+**Ngưỡng nhà cái — đo, đừng đoán.** 6 làn kéo về `APSPORT_ROSTER_HTTP_429` liên tục
+(14 lần/60s) rơi vào **roster path** tức đường kèo chính, và backoff 15s làm walk đứng
+(`q=6 f=0`); rate thật chỉ 2,2 trận/phút. **3 làn: 7,8 trận/phút, 0 lỗi, 0 lần 429**,
+một vòng 92 phút. Ba tốt hơn cả sáu lẫn một. Đừng nâng lại lên 6.
+
+Bẫy đã mắc: đo rate trên cửa sổ 150s ngay sau reload cho ra 10,4 trận/phút — đó là đợt
+bùng, không phải trạng thái ổn định. **Đo rate APSPORT tối thiểu 6 phút.**
+
+**Việc còn mở.** 92 phút/vòng đủ cho kèo góc prematch, **vô dụng cho live**, và nhà cái
+chặn nên không nhanh hơn được bằng cách tăng song song. Hướng thật sự: socket. Trang
+stream `mg=1` cho *toàn bộ* trận cùng lúc, không bị rate limit — `ignoredEndpoints` chỉ
+thấy `/ln/en/s/1/mg/1/tr/0`, chưa bao giờ thấy `mg/4`. Nếu ép trang subscribe `mg=4`
+thì góc chảy về cho mọi trận, khỏi đi bộ. Cần mở tab AP, bấm vào mục Corners của một
+trận và đọc subscription nó tạo ra — bị auto-mode classifier chặn navigate tới domain
+nhà cái, chưa làm được.
+
+**Extension tự reload được, không cần người.** API quét `apps/chrome-extension/dist/build-identity.json`
+mỗi 30s (`startExtensionReloadSweep`, server.ts:90) rồi phát `RELOAD_EXTENSION`; worker
+so với identity nướng trong bundle và tự gọi `chrome.runtime.reload()` (background.ts:653).
+Chỉ cần `node scripts/build.mjs` trong `apps/chrome-extension`. Dấu hiệu đã reload:
+`wsAttach` về null rồi `attachedForMs` reset.
+
+### APSPORT — ba sửa ngày 2026-09-11 (tiếp)
+
+1. **`isTsportEventSocket` khoá cứng `tr/0` → `tr/[01]`.** Đo được: có lúc socket bóng
+   đá duy nhất của tab là `/ln/en/s/1/mg/1/tr/1`. Regex cũ không nhận → `#hasApsportFootballSocket`
+   trả false → `#recoverApsportSocket` → `renewNow` kéo tab về trang chủ. Màn góc cũng mở
+   `mg/4` trên **cả** tr/0 lẫn tr/1; nhánh tr/1 trước đây bị vứt sạch.
+
+2. **Bộ đếm socket nhóm-kèo-khác**, phát qua `catalogShape` dạng `AP_MG[sockets:N;frames:N;parsed:N]`.
+   Cố ý **không** thêm trường typed vào `pipeline-telemetry.ts`: API không có watcher, thêm
+   trường typed thì phải restart stack và rụng cả 6 sàn ~10 phút. `catalogShape` vốn đã
+   được truyền thẳng qua. Chỉ đếm, không ghi giá trị.
+
+3. **Hoãn renew định kỳ khi socket nhóm khác đang mở.** `providerPageLeaseCoordinator`
+   navigate lại tab TSPORT mỗi **20 phút** (`DEFAULT_INTERVAL_MS`), xoá mọi màn hình người
+   dùng đang mở. Thêm `deferPeriodicRenewal`, chặn trên `DEFAULT_DEFER_PERIODIC_MS = 15`
+   phút để một predicate kẹt không thể tắt renew vĩnh viễn.
+
+**Chưa xong:** kèo góc vào catalog vẫn 15–21 trận. Socket `mg/4` mở thật nhưng chưa
+chứng minh được frame góc có tới và có parse được hay không — đó là việc của `AP_MG[...]`.
+Mở màn "Phạt góc" rồi đọc bộ đếm đó: `frames:0` = socket không đẩy gì; `frames>0 parsed:0`
+= sai hình dạng ở extension; `parsed>0` mà catalog không tăng = mất ở adapter phía API.
+
+### APSPORT — sáu cửa câm trong adapter đã khai tên (2026-09-11)
+
+`#resolveSocketEvent` (`tsport-ws-adapter.ts`) có sáu nhánh `return null` **không ghi lý do**,
+nên một nhóm kèo có thể chết sạch ở đó mà chẩn đoán chỉ hiện
+`ADAPTER_FINGERPRINT_UNMATCHED` (đo được 274.211). Giờ mỗi cửa có tên riêng:
+`resolve-no-source-state`, `resolve-epoch-stale`, `resolve-no-event-id`,
+`resolve-not-in-roster`, `resolve-no-market-array`, `resolve-no-identity`,
+`resolve-live-flag-mismatch`, `resolve-key-<k>-mismatch`, `resolve-group-not-record`,
+`resolve-group-event-mismatch`, `resolve-group-league-mismatch`.
+
+Trần `noteRefusal` nâng 12 → 24: mười tên `outer-*` đã lấp kín trần cũ, thêm cửa mới
+sẽ bị nuốt im lặng.
+
+**Restart API không cần tắt stack.** `scripts/start-live-stack.mjs` có supervisor
+(`child-respawn.mjs`). Build `npx tsc -p apps/api/tsconfig.json` rồi kết thúc đúng tiến
+trình con `apps/api/dist/server.js`; supervisor dựng lại trong ~4 giây với dist mới.
+
+**Đo sau 10 phút ổn định:** `resolve-no-source-state:52` đứng yên (chỉ là nhiễu ngay sau
+restart), `resolve-not-in-roster:28` đang tăng. Kèo góc vẫn 16 trận.
+
+**Bẫy của chính bộ đếm `AP_MG`:** nó chỉ đếm frame có socket nằm trong `#webSockets`.
+Sau khi worker MV3 khởi động lại, socket có sẵn không được phát lại `webSocketCreated`,
+nên frame của nó thành orphan và bộ đếm đọc 0 dù socket vẫn sống. Muốn đo đúng phải mở
+màn Phạt góc **sau** khi worker đã ổn định, để socket được tạo mới.
+
+### APSPORT — kèo góc: cái gì chạy, cái gì không (2026-09-11/12, đã đo)
+
+**Chạy: thu hẹp vòng đi bộ về cửa sổ 6 giờ.** `APSPORT_WALK_TIERS` chỉ nhận
+LIVE/URGENT/NEAR/3_6H/UNKNOWN. Trước đó vòng đi bộ rải đều 660 trận ở 3,3 trận/phút
+nên một trận sắp đá mang giá góc cũ hàng giờ. Sau khi thu hẹp: cửa sổ có 72–74 trận,
+đi bộ **phủ hết** rồi quay vòng làm mới.
+
+Bằng chứng — tuổi giá: **kèo góc p50 = 64s, kèo chính p50 = 240s.** Góc tươi gấp ~4 lần
+kèo chính. Đủ cho arb góc prematch, **chưa đủ cho live**.
+
+Tác dụng phụ có chủ ý: `pendingEvents` không bao giờ về 0 và `complete` không bao giờ
+`true`, vì trận xa cố ý không đi bộ. Đã kiểm tra `apsportDetail` chỉ dùng để báo cáo,
+không chặn luồng nào.
+
+**Không chạy: tự mở và giữ socket `mg/4`.** Ý tưởng đúng — socket góc có thật, mở được,
+frame chảy về (15.814 frame parse được) mà không cần người ngồi canh. Nhưng **mở socket
+không có nghĩa là đăng ký toàn bộ trận**: nhà cái chỉ đẩy cho nhóm nhỏ đang được quan tâm,
+nên số trận có góc chỉ nhích 25–29 → 29–33 rồi dao động chứ không cộng dồn.
+
+Và nó đắt. Với mg/4 + mg/9 (5 socket): APSPORT tụt SOFT_RECOVERY, `baselineAgeMs` 263s
+vượt trần 240s. Bỏ mg/9 còn 2 socket thì baseline hồi về 65–120s, LIVE — **nhưng worker
+vẫn khởi động lại mỗi 2–3 phút**, và mỗi lần restart là coverage đi bộ về 0:
+
+| | keeper TẮT | keeper BẬT (mg/4) |
+|---|---|---|
+| trận đi bộ được | **72–74** | 3–12 |
+| worker liền mạch | **29,8 phút** | 1,6–3,0 phút |
+| trận có góc | 25–29 | 29–33 |
+
+Keeper đã **tắt** bằng `APSPORT_HELD_MARKET_GROUPS: readonly number[] = []`. Mã, test và
+bảo đảm chỉ-đọc giữ nguyên; thêm `4` vào mảng là bật lại. Test
+"opens no extra APSPORT group sockets" **cố tình đỏ** khi ai đó bật lại, để buộc họ khôi
+phục các assertion về suy-ra-URL và không-được-`.send(`.
+
+**Bẫy đã mắc hai lần trong cùng một phiên:** đặt tiêu chí nghiệm thu quá hẹp. Lần này tôi
+lấy "baseline < 240s" làm đích, nó đạt, nhưng `attachedForMs` và coverage đi bộ thì tệ đi —
+hai thứ tôi không đưa vào tiêu chí. Khi đổi thứ gì dùng chung phiên debugger, phải đo
+**cả** sức khoẻ feed **lẫn** độ liền mạch của worker.
+
+### Thước đo thật: 16.327 dòng ghép chéo, và cái gì đang chặn (2026-09-12, 02:00)
+
+**Cách đo — dùng lại module thật, đừng viết lại logic ghép.** Gọi
+`buildComparisonEvents` (`apps/web/src/catalog/comparison.ts`) rồi `rankedEvent` +
+`sortRankedEvents` (`apps/web/src/watch/ranked-tickets.ts`) trên 6 catalog lấy từ
+`/api/catalog/accounts/catalog-source:<SÀN>:FOOTBALL`. Chạy qua vitest với
+`--root apps/web` để có TypeScript. Viết lại matcher bằng tay sẽ ra số lệch với web.
+
+```
+SABA khoẻ (1.007 trận):  16.327 dòng · 2.280 nhóm · 2sàn:304 3sàn:276 4sàn:150 5sàn:275 6sàn:164
+SABA sập  (  107 trận):  14.836 dòng · 2.105 nhóm · 6sàn:0
+```
+
+**SABA một mình quyết định có hay không nhóm đủ 6 sàn.** Khoẻ → 164 nhóm; sập → 0.
+
+**Gần nửa số vé bị chặn bởi độ tươi, không phải bởi giá.** 16.054 vé: 8.104 tính được
+giá (2h sáng: tất cả âm, tốt nhất −0,54%), **7.838 vé chờ với đúng một lý do
+"Football quote freshness not confirmed"**. Vé cần ≥2 sàn có giá tươi.
+
+Tuổi giá p50/p90 theo sàn (giây) và tuổi catalog:
+
+```
+IM        0 /   2      12s   ← chỉ mình IM thực sự tươi
+SABA      0 /   0      41s   ← tươi nhưng chỉ 72 trận
+BTI      31 /  79      16s
+APSPORT  79 /  79      84s   ← quá ngưỡng prematch 15s
+CMD      23 /  23     694s   ← catalog chết, phiên hết hạn
+SBOBET  225 / 233     482s   ← catalog chết
+```
+
+**Không nới ngưỡng tươi.** Trạng thái "ĐÃ GHÉP · CHỜ GIÁ" là hệ thống **đang làm đúng** —
+từ chối định giá trên dữ liệu không chứng minh được là tươi. Sửa bằng cách làm sàn tươi
+lên, không phải bằng cách hạ ngưỡng.
+
+**Ba sàn suy giảm vì phiên/trang, không vì code** (2026-09-12): CMD `HTTP_RESPONSE: 0` +
+`FABET_LOGIN` → **cần người đăng nhập lại**; SBOBET `targetsTotal: 0`, 30/30 frame orphan,
+`SBO_PAUSE[status:400]`, hard recovery bị chặn có chủ ý bởi `browserRefreshEnabled: false`;
+SABA rữa 1.007 → 90 trận rồi kẹt. Bằng chứng mở lại tab ăn thua: **SABA đạt 1.007 trận ngay
+sau khi gắn lại tab** rồi rữa dần.
+
+Bản bàn giao gọn cho buổi sáng: `docs/BAN-GIAO-2026-09-12.md`.
+
 ## Tài liệu liên quan
 
 - `docs/apsport-handoff-codex.md` — nguyên nhân gốc APSPORT (adapter xoá record socket
