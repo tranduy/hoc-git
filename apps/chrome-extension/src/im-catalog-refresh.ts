@@ -129,6 +129,11 @@ export function buildImCatalogRefreshExpression(generation: string,
     // whole set in about five seconds, so only Market 1 is bounded here.
     // Five types already yield more markets than the pipeline published when
     // it was last healthy, and leave the request at half the provider budget.
+    // Tried at 3 on 2026-09-12 and reverted the same hour: it changed nothing.
+    // The provider refused 3+10 types at headAtMs 15065 and 5+40 at 15084 -
+    // a refusal whose timing does not move with the size of the ask is a fixed
+    // server-side deadline, not this budget. Do not cut these again on that
+    // symptom; measure head time against ask size first, as the table did.
     const MARKET_1_BET_TYPE_LIMIT = 5;
     // Proven native GetSE has DateFrom only: it mixes near and far events in
     // each bulk market. A far-only plan cannot prove newly listed near events
@@ -156,7 +161,13 @@ export function buildImCatalogRefreshExpression(generation: string,
       const requestStartedAtMs = Date.now();
       let respondedAtMs = null;
       const requestStage = () => ['SIGNATURE', 'NETWORK', 'BODY_READ'].includes(errorCategory) ? errorCategory : null;
-      const timer = setTimeout(() => { timeoutStage = requestStage(); controller.abort(); }, allowDetails ? 8000 : 15000);
+      // 15000 raced the provider and lost by 98 milliseconds. Measured
+      // 2026-09-12 while the book had been dark 95 minutes: headAtMs 15098,
+      // elapsedMs 15143 - the response head was arriving and this deadline
+      // aborted it. Eighteen seconds clears that and still fits inside the
+      // observer round budget of 20s, which is the real ceiling here.
+      const timer = setTimeout(() => { timeoutStage = requestStage(); controller.abort(); },
+        allowDetails ? 8000 : 18000);
       try {
         // Public main-9992f20.js w() (121671/125309) reads session storage
         // per request and signs authenticated catalog paths with mode2. Its

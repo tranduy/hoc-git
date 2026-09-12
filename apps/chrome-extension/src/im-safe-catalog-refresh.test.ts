@@ -67,10 +67,12 @@ describe("IM safe roster collection", () => {
     expect((await running).responses).toHaveLength(2);
   });
 
-  it("still aborts stalled roster requests at fifteen seconds and enters backoff", async () => {
+  it("still aborts stalled roster requests at eighteen seconds and enters backoff", async () => {
     const h = harness(); await h.tick(); vi.setSystemTime(START + 30_000);
     const running = h.tick(); await h.settle();
-    await vi.advanceTimersByTimeAsync(15_000);
+    // 18s, not 15s: the provider was measured answering at 15098ms on
+    // 2026-09-12 and the old deadline aborted the response as it arrived.
+    await vi.advanceTimersByTimeAsync(18_000);
     expect([...h.globals.__fieldlineImNativeCatalogV1.state.controllers]
       .every((controller: AbortController) => controller.signal.aborted)).toBe(true);
     for (const request of h.requests) request.fail();
@@ -83,11 +85,11 @@ describe("IM safe roster collection", () => {
   it("separates a roster that never answered from one whose body was slow", async () => {
     const stalled = harness(); await stalled.tick(); vi.setSystemTime(START + 30_000);
     const running = stalled.tick(); await stalled.settle();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(18_000);
     for (const request of stalled.requests) request.fail();
     // No response head ever arrived, so the whole deadline is unexplained time.
     expect(await running).toMatchObject({ coverage: { failureStage: "NETWORK",
-      elapsedMs: 15_000, headAtMs: null, localFailureCount: 1 } });
+      elapsedMs: 18_000, headAtMs: null, localFailureCount: 1 } });
 
     const slow = harness(); await slow.tick(); vi.setSystemTime(Date.now() + 30_000);
     slow.globals.fetch = async () => ({ status: 200, ok: true, headers: { get: () => null },
@@ -97,6 +99,39 @@ describe("IM safe roster collection", () => {
     expect(await slowRunning).toMatchObject({ coverage: { failureStage: "BODY_READ",
       elapsedMs: 0, headAtMs: 0, localFailureCount: 1 } });
   });
+
+  it("caps a long escalation at one minute for a new document without clearing the run", async () => {
+    const origin = shared(), h = harness(origin); await h.tick(); vi.setSystemTime(START + 30_000);
+    const key = "__fieldlineImSafeCatalogGateV1";
+    const failRound = async () => {
+      const running = h.tick("round"); await h.settle();
+      await vi.advanceTimersByTimeAsync(15_000);
+      for (const request of h.requests.slice(-2)) request.fail();
+      return running;
+    };
+    const openGate = () => {
+      const gate = JSON.parse(origin.storage.getItem(key)!);
+      origin.storage.setItem(key, JSON.stringify({ ...gate, armedAtMs: 0, nextAtMs: 0 }));
+    };
+    // Escalate past a minute so the cap is what the next document observes.
+    for (let round = 0; round < 5; round += 1) { await failRound(); openGate(); }
+    const escalated = await failRound();
+    expect(escalated).toMatchObject({ coverage: { localFailureCount: 6, retryInMs: 240_000 } });
+
+    // The same document keeps the full escalated wait: reloading is not a
+    // remedy the lane earned, and a page refresh must not restart the run.
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(await h.tick("same-document")).toMatchObject({ status: "rate-limited" });
+
+    // A new document caps only what is left, and the run is preserved so a
+    // lane that is still dead re-escalates on its very next round.
+    const reopened = harness(origin);
+    expect(await reopened.tick("new-document")).toMatchObject({ status: "rate-limited" });
+    const gate = JSON.parse(origin.storage.getItem(key)!);
+    expect(gate.localFailures).toBe(6);
+    expect(gate.nextAtMs - Date.now()).toBeLessThanOrEqual(60_000);
+  });
+
 
   it("keeps the first local rounds prompt then escalates the wait to a 15-minute cap", async () => {
     const origin = shared(), h = harness(origin); await h.tick(); vi.setSystemTime(START + 30_000);
@@ -155,9 +190,9 @@ describe("IM safe roster collection", () => {
     h.globals.fetch = async () => ({ status: 200, ok: true, headers: { get: () => null },
       text: () => new Promise((_resolve, reject) => rejectBodies.push(reject)) });
     const running = h.tick(); await h.settle();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(18_000);
     for (const reject of rejectBodies) reject(new Error("aborted"));
-    expect(await running).toMatchObject({ coverage: { lastFailureAtMs: START + 45_000,
+    expect(await running).toMatchObject({ coverage: { lastFailureAtMs: START + 48_000,
       failureStage: "BODY_READ", lastFailure: { status: 200, errorCategory: "REQUEST_TIMEOUT" } } });
   });
 
@@ -250,7 +285,9 @@ describe("IM safe roster collection", () => {
       for (const request of a.requests.slice(-2)) request.respond({ StatusCode: 500 }, 429);
       expect((await running).responses).toEqual([]);
       vi.setSystemTime(START + 59_999 + round * 30_000);
-      expect((await harness(origin).tick()).status).toBe("rate-limited");
+      // A provider-refused round now reports the provider's own code instead
+      // of the generic pause, so the pause itself is asserted by retryInMs.
+      expect((await harness(origin).tick()).status).toBe("native-status-500");
     }
     const b = harness(origin);
     vi.setSystemTime(START + 90_000 + 899_999);
@@ -309,7 +346,9 @@ describe("IM safe roster collection", () => {
       await vi.advanceTimersByTimeAsync(30_000);
     }
     const replacement = harness(origin);
-    expect(await replacement.tick()).toMatchObject({ status: "rate-limited" });
+    // The last round was a provider refusal, so the pause now reports the
+    // provider's own StatusCode rather than hiding it behind a generic status.
+    expect(await replacement.tick()).toMatchObject({ status: "native-status-500" });
     expect(replacement.requests).toHaveLength(0);
   });
 

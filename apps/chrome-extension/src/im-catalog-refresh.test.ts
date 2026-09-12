@@ -139,10 +139,12 @@ describe("IM native detail acquisition", () => {
     const pair = h.mains().slice(-2);
     const live = pair.find(r => r.body.Market === 1)!;
     const other = pair.find(r => r.body.Market === 2)!;
-    // Measured 2026-09-10 against the live account: this market answers five bet
-    // types in under six seconds and refuses twenty or forty with StatusCode
-    // 9999 and an empty body, which is what took the book dark. The other market
-    // carries far fewer events and answers the whole set in about five seconds.
+    // Measured 2026-09-10 against the live account: this market answers five
+    // bet types in under six seconds and refuses twenty or forty with
+    // StatusCode 9999 and an empty body, which is what took the book dark.
+    // Cutting these further was tried on 2026-09-12 and reverted: the provider
+    // refused 3+10 types at headAtMs 15065 and 5+40 at 15084, and a refusal that
+    // does not move with the size of the ask is a fixed server deadline.
     expect(live.body.BetTypeIds).toEqual([1, 2, 3, 4, 5]);
     expect(other.body.BetTypeIds).toHaveLength(40);
     expect(live.body.GamePeriods).toEqual([1, 2, 3]);

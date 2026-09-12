@@ -14,6 +14,16 @@ export function buildImSafeCatalogRefreshExpression(generation: string): string 
       localFailureCount: gate?.localFailures ?? null,
       elapsedMs: Number.isSafeInteger(gate?.lastFailure?.elapsedMs) ? gate.lastFailure.elapsedMs : null,
       headAtMs: Number.isSafeInteger(gate?.lastFailure?.headAtMs) ? gate.lastFailure.headAtMs : null });
+    // The pipeline's status vocabulary already carries native-status-<code>,
+    // and nothing was ever emitting it: a refused round reported the generic
+    // 'rate-limited', so the provider's own code never left the page. Measured
+    // 2026-09-12, IM spent two hours refused with the code invisible, which is
+    // the difference between a query over budget and a dead session.
+    const nativeStatus = failure => {
+      const code = failure?.nativeStatusCode;
+      return Number.isSafeInteger(code) && code !== 100 && code >= 0 && code <= 999999
+        ? 'native-status-' + code : null;
+    };
     const empty = (status = 'collector-paused', lastFailure = null, gateReason = null, gate = null) => ({ status, responses: [],
       coverage: { lastFailure, gateReason, ...gateDiagnostic(gate) } });
     if (location.hostname !== 'imsports.directsb.net') return empty();
@@ -60,8 +70,29 @@ export function buildImSafeCatalogRefreshExpression(generation: string): string 
           if (gate.localFailures === undefined) gate.localFailures = gate.failures - gate.providerFailures;
           if (!Number.isSafeInteger(gate.localFailures) || gate.localFailures < 0 ||
             gate.localFailures > gate.failures) return empty();
+          // The escalating wait below exists to stop a dead lane retrying
+          // forever (548 unanswered requests over 11.7 hours, measured
+          // 2026-09-10) and it must survive a reload, or a page refresh would
+          // restart that run at full rate. But it reached fifteen minutes and
+          // lives in the provider origin's localStorage, so on 2026-09-12 a
+          // reopened IM tab - the one remedy for a lane that answers nothing -
+          // sat idle under an escalation earned by the lane it replaced.
+          // A new document therefore does not clear the run, it only caps what
+          // is left of the wait: a lane that is still dead re-escalates on its
+          // very next round, at the cost of one request per document.
+          window.__fieldlineImDocumentIdV1 = window.__fieldlineImDocumentIdV1 ||
+            (Date.now() + ':' + Math.random().toString(36).slice(2, 10));
+          if (gate.documentId !== window.__fieldlineImDocumentIdV1) {
+            gate.documentId = window.__fieldlineImDocumentIdV1;
+            if (gate.localFailures > 0 && !gate.hardBlocked) {
+              gate.nextAtMs = Math.min(gate.nextAtMs, now + 60_000);
+            }
+            save(gate);
+          }
           if (gate.hardBlocked) return empty('collector-paused', gate.lastFailure, null, gate);
-          if (now < Math.max(gate.armedAtMs, gate.nextAtMs)) return empty('rate-limited', gate.lastFailure, 'COOLDOWN', gate);
+          if (now < Math.max(gate.armedAtMs, gate.nextAtMs)) {
+            return empty(nativeStatus(gate.lastFailure) || 'rate-limited', gate.lastFailure, 'COOLDOWN', gate);
+          }
           // Persist before signing or fetching. A crash consumes this admission.
           // This spacing is the whole book's update rhythm: the provider sends
           // no delta, so nothing refreshes between admissions. Halving it to ten
@@ -117,7 +148,8 @@ export function buildImSafeCatalogRefreshExpression(generation: string): string 
           if (failure || gate.hardBlocked || result.status === 'request-failed' || result.status === 'retired') {
             if (!roundFailed) fieldlineImSafeRecordFailure(failure || { status: null, nativeStatusCode: null,
               errorCategory: 'REQUEST_FAILED', observedAtMs: Date.now() });
-            return empty(gate.hardBlocked ? 'collector-paused' : 'rate-limited', gate.lastFailure, null, gate);
+            return empty(gate.hardBlocked ? 'collector-paused'
+              : nativeStatus(failure) || 'rate-limited', gate.lastFailure, null, gate);
           }
           if (result.status === 'catalog-requested' && result.responses?.length === 2) {
             gate.failures = 0;
