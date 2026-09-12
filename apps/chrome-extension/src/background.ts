@@ -81,6 +81,22 @@ const sourceTabKeepAlive = new SourceTabKeepAlive({
   }
 });
 
+/**
+ * Both keep-alive commands used to have their rejections dropped on the
+ * floor, which made a tab Chrome had throttled indistinguishable from one
+ * that was awake with nothing to report. The pulse still must not throw -
+ * a tab that will not answer cannot be allowed to stop the heartbeat that
+ * drives every other source - so the outcome is recorded instead.
+ */
+async function pulseSourceTab(tabId: number): Promise<void> {
+  try {
+    await sourceTabKeepAlive.pulse(tabId);
+    observer.noteTabKeepAlive(tabId, "OK");
+  } catch (error) {
+    observer.noteTabKeepAlive(tabId, error instanceof Error ? error.message : "UNKNOWN");
+  }
+}
+
 const registry = new TabRegistry({
   attach: async (tabId) => sourceTabKeepAlive.attach(tabId),
   detach: async (tabId) => sourceTabKeepAlive.detach(tabId)
@@ -282,7 +298,7 @@ async function startAttachedSource(attached: { readonly lobby: ChromeLobbyId; re
   // the restored navigation and can make the provider close the tab again.
   // The current extension worker already owns the observer, so attach it
   // directly and reserve bootstrap reloads for normal startup restoration.
-  await sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
+  await pulseSourceTab(attached.tabId);
 }
 
 function rememberRecognizedUrl(tab: TabDescriptor): void {
@@ -552,7 +568,7 @@ setInterval(() => {
   snapshotPoller.pollNow();
   void cmdPageKeepalive.tick().catch(() => undefined).then(() => providerPageLeaseCoordinator.tick());
   for (const attached of registry.list()) {
-    void sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
+    void pulseSourceTab(attached.tabId);
     void observer.heartbeat({
       lobby: attached.lobby,
       tabId: attached.tabId,
@@ -891,7 +907,7 @@ async function reattachPreferredTabs(): Promise<readonly string[]> {
     try {
       await observer.start(source);
       await tabBootstrapper.ensure(attached);
-      await sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
+      await pulseSourceTab(attached.tabId);
       sourceIds.push(source.sourceId);
     } catch { /* one unavailable tab must not block the other preferred lobbies */ }
   }

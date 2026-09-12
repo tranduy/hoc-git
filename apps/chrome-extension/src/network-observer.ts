@@ -1157,6 +1157,8 @@ export class NetworkObserver {
   // labels are the whole point of the report, so keep the last ones per source.
   readonly #lastTabLabels = new Map<string, string>();
   readonly #lastCatalogShape = new Map<string, string>();
+  /** Keep-alive pulse outcomes per tab, keyed by tab id. */
+  readonly #keepAlive = new Map<number, { ok: number; err: number; last: string }>();
   readonly #lastCaptureExit = new Map<string, string>();
   readonly #cmdRecoveryOutcomes = new Map<string, { readonly code: string; readonly observedAtMs: number }>();
   // Only a target reported as an iframe is observed, while the attach counter
@@ -6932,8 +6934,29 @@ export class NetworkObserver {
       shapes.has(key) ? [shapes.get(key)!] : []).join(";").slice(0, 740)}] `;
   }
 
+  /**
+   * The two keep-alive commands were sent with their rejections swallowed, so
+   * a tab Chrome had throttled looked identical to a tab that was awake and
+   * simply had nothing to say. Measured 2026-09-12: three books sat at zero
+   * data envelopes for an hour while their heartbeats kept arriving, and
+   * nothing recorded whether the pulse that should have woken them worked.
+   */
+  noteTabKeepAlive(tabId: number, outcome: string): void {
+    const entry = this.#keepAlive.get(tabId) ?? { ok: 0, err: 0, last: "NONE" };
+    if (outcome === "OK") entry.ok += 1;
+    else { entry.err += 1; entry.last = outcome.slice(0, 40).replace(/[^A-Za-z0-9_.-]/gu, "_"); }
+    this.#keepAlive.set(tabId, entry);
+  }
+
+  #keepAliveDiagnostic(tabId: number): string {
+    const entry = this.#keepAlive.get(tabId);
+    if (entry === undefined) return "KEEP[none] ";
+    return `KEEP[ok:${entry.ok};err:${entry.err};last:${entry.last}] `;
+  }
+
   #catalogShapeDiagnostic(source: ObservedSource): string {
-    const existing = `${this.#lastCaptureExit.get(source.sourceId) ?? "NONE"} ` +
+    const existing = this.#keepAliveDiagnostic(source.tabId) +
+      `${this.#lastCaptureExit.get(source.sourceId) ?? "NONE"} ` +
       `targets[${[...(this.#targetTypesSeen.get(source.sourceId) ?? new Map())]
         .map(([type, count]) => `${type}:${count}`).join(",")}] ` +
       `sockets[${[...(this.#socketPathsSeen.get(source.sourceId) ?? new Map())]
