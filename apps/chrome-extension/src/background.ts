@@ -411,6 +411,9 @@ providerPageLeaseCoordinator = new ProviderPageLeaseCoordinator({
   listAttached: () => registry.list().flatMap((entry) => isRenewableLobby(entry.lobby)
     ? [{ lobby: entry.lobby, sourceId: `chrome:${entry.lobby}:${entry.tabId}`, tabId: entry.tabId }]
     : []),
+  deferPeriodicRenewal: (lobby) => lobby === "TSPORT" &&
+    registry.list().some((entry) => entry.lobby === "TSPORT" &&
+      observer.hasApsportNonMainGroupSocket(`chrome:TSPORT:${entry.tabId}`)),
   isLoading: async (tabId) => (await chrome.tabs.get(tabId)).status === "loading",
   loadState: async () => {
     const stored = await chrome.storage.local.get(providerPageLeaseStorageKey);

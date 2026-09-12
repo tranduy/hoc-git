@@ -43,14 +43,16 @@ describe("collection plan observer ownership", () => {
       await observer.refreshCatalog(source);
       expect(sweepContinued).toBe(false);
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(detail.mock.calls.map(c => c[0].eventId)).toEqual(["1", "2"]);
+      // The walk now spends its lanes inside the six-hour window, so the
+      // +30h and +80h fixtures are left to the mg/1 socket for main markets.
+      expect(detail.mock.calls.map(c => c[0].eventId)).toEqual(["1"]);
       await observer.maintain(source);
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(detail).toHaveBeenCalledTimes(2);
+      expect(detail).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(10_000);
       await observer.maintain(source);
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(detail.mock.calls.map(c => c[0].eventId)).toEqual(["1", "2", "1"]);
+      expect(detail.mock.calls.map(c => c[0].eventId)).toEqual(["1", "1"]);
     } finally { await observer.stop(source); vi.useRealTimers(); }
   });
   it("installs only into attached source contexts and rejects older plans without source recovery", async () => {
@@ -120,8 +122,10 @@ describe("collection plan observer ownership", () => {
 
       await vi.advanceTimersByTimeAsync(20_000);
 
+      // Fixtures inside the six-hour walk window all complete; the +7h one is
+      // deliberately left out so near kick-off corner books stay fresh.
       expect(new Set(detail.mock.calls.map(call => call[0].eventId))).toEqual(
-        new Set(records.map(record => record["2"])));
+        new Set(records.slice(0, 6).map(record => record["2"])));
     } finally { await observer.stop(source); vi.useRealTimers(); }
   });
 });

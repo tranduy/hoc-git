@@ -29,6 +29,15 @@ interface ProviderPageLeaseCoordinatorOptions {
   readonly loadState: () => Promise<ProviderPageLeaseState | null>;
   readonly saveState: (state: ProviderPageLeaseState) => Promise<void>;
   readonly renew: (source: RenewableSource) => Promise<void>;
+  /**
+   * Periodic renewal navigates the tab, which discards any view the page is
+   * currently showing. A lobby streaming a market group it only opens on
+   * demand (APSPORT corners) would lose that stream every interval, so the
+   * lobby may defer its own periodic slot. Bounded by deferPeriodicRenewalMs
+   * so a stuck predicate can never suppress renewal indefinitely.
+   */
+  readonly deferPeriodicRenewal?: (lobby: RenewableLobby) => boolean;
+  readonly deferPeriodicRenewalMs?: number;
   readonly now?: () => number;
   readonly intervalMs?: number;
   readonly initialStaggerMs?: number;
@@ -52,6 +61,7 @@ const SABA_HOST = /^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/iu;
 const SBO_HOST = /^c0z0o[a-z0-9]+\.(?:bpb7jrm5|bpf7t7s9)\.com$/iu;
 const RENEWABLE_LOBBIES = ["BTI", "IM", "TSPORT", "KSPORT", "SABA"] as const;
 const DEFAULT_INTERVAL_MS = 20 * 60_000;
+const DEFAULT_DEFER_PERIODIC_MS = 15 * 60_000;
 const DEFAULT_INITIAL_STAGGER_MS = 2 * 60_000;
 const DEFAULT_LOADING_RETRY_MS = 30_000;
 const DEFAULT_FAILURE_RETRY_MS = 5 * 60_000;
@@ -102,6 +112,8 @@ export class ProviderPageLeaseCoordinator {
   readonly #initialStaggerMs: number;
   readonly #loadingRetryMs: number;
   readonly #failureRetryMs: number;
+  readonly #deferPeriodicRenewalMs: number;
+  readonly #deferredSinceMs = new Map<string, number>();
   readonly #renewSerial = new Map<string, number>();
   #state: ProviderPageLeaseState | null | undefined;
   #inflight: { readonly sourceId: string | null; readonly operation: Promise<void> } | null = null;
@@ -113,6 +125,7 @@ export class ProviderPageLeaseCoordinator {
     this.#initialStaggerMs = options.initialStaggerMs ?? DEFAULT_INITIAL_STAGGER_MS;
     this.#loadingRetryMs = options.loadingRetryMs ?? DEFAULT_LOADING_RETRY_MS;
     this.#failureRetryMs = options.failureRetryMs ?? DEFAULT_FAILURE_RETRY_MS;
+    this.#deferPeriodicRenewalMs = options.deferPeriodicRenewalMs ?? DEFAULT_DEFER_PERIODIC_MS;
   }
 
   tick(): Promise<void> {
@@ -167,6 +180,17 @@ export class ProviderPageLeaseCoordinator {
       state[lobby].nextAttemptAtMs <= nowMs)
       .sort((left, right) => state[left].nextAttemptAtMs - state[right].nextAttemptAtMs)[0];
     if (dueLobby === undefined) return;
+    if (this.#options.deferPeriodicRenewal?.(dueLobby) === true) {
+      const since = this.#deferredSinceMs.get(dueLobby) ?? nowMs;
+      this.#deferredSinceMs.set(dueLobby, since);
+      if (nowMs - since < this.#deferPeriodicRenewalMs) {
+        state[dueLobby].nextAttemptAtMs = nowMs + this.#loadingRetryMs;
+        await this.#remember(state);
+        return;
+      }
+    } else {
+      this.#deferredSinceMs.delete(dueLobby);
+    }
     const schedule = state[dueLobby];
     const source = this.#options.listAttached().find((candidate) => candidate.lobby === dueLobby);
     if (source === undefined) {

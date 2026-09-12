@@ -439,10 +439,13 @@ describe("NetworkObserver", () => {
 
       const heartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
         .reverse().find((body) => body.kind === "WS_ATTACH");
-      expect(heartbeat?.apsportDetail).toMatchObject({
-        rosterEvents: 2, successfulEvents: 1, pendingEvents: 1,
-        failedEvents: 0, queuedEvents: 1, inFlightEvents: 0
-      });
+      // The guarantee is that the failed roster refresh neither fails an event
+      // nor discards work already done; how many lanes had settled by now is
+      // a concurrency detail, not the contract.
+      expect(heartbeat?.apsportDetail).toMatchObject({ rosterEvents: 2, failedEvents: 0 });
+      const detail = heartbeat?.apsportDetail as Record<string, number>;
+      expect(Number(detail.successfulEvents)).toBeGreaterThanOrEqual(1);
+      expect(Number(detail.successfulEvents) + Number(detail.pendingEvents)).toBe(2);
       expect(heartbeat?.catalogShape).toContain("APSPORT_REFRESH_FAILED");
       expect(heartbeat?.catalogShape).not.toContain("periodic roster request failed");
       observer.beginSourceEpoch(apsport.sourceId);
@@ -621,9 +624,14 @@ describe("NetworkObserver", () => {
       const bodies = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>);
       expect(bodies.filter((body) => body.phase === "ROSTER")
         .map((body) => (body.records as unknown[]).length)).toEqual([451, 451]);
-      expect(bodies.reverse().find((body) => body.kind === "WS_ATTACH")?.apsportDetail).toMatchObject({
-        rosterEvents: 451, successfulEvents: 1, pendingEvents: 450, queuedEvents: 450
-      });
+      const held = bodies.reverse().find((body) => body.kind === "WS_ATTACH")
+        ?.apsportDetail as Record<string, number>;
+      // Progress survives the rejected collapse and every event still owed a
+      // detail is still queued; the completed/pending split moves with lane count.
+      expect(held).toMatchObject({ rosterEvents: 451 });
+      expect(Number(held.successfulEvents)).toBeGreaterThanOrEqual(1);
+      expect(Number(held.successfulEvents) + Number(held.pendingEvents)).toBe(451);
+      expect(held.queuedEvents).toBe(held.pendingEvents);
       observer.beginSourceEpoch(apsport.sourceId);
     } finally {
       vi.useRealTimers();
@@ -838,11 +846,9 @@ describe("NetworkObserver", () => {
       });
 
       await observer.refreshCatalog(apsport, { rosterOnly: true });
-      await vi.advanceTimersByTimeAsync(500);
-      expect(collectDetail).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(500);
-      expect(collectDetail).toHaveBeenCalledTimes(2);
-      await vi.advanceTimersByTimeAsync(500);
+      // Detail lanes run prematch events concurrently, so assert which events
+      // the walk claims rather than the order their lanes happen to settle in.
+      await vi.advanceTimersByTimeAsync(1_500);
 
       expect(collectDetail).toHaveBeenCalledTimes(2);
       expect(requested.sort()).toEqual(["event-far", "event-soon"]);
@@ -3596,7 +3602,41 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.evaluate")).toBe(false);
   });
 
-  it("serializes concurrent APSPORT detail probes in the authenticated provider page", async () => {
+  it("holds APSPORT corner and card group sockets open without sending on them", async () => {
+    const evaluated: string[] = [];
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string") {
+        evaluated.push(params.expression);
+      }
+      return method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+        : { result: { value: 0 } };
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: async () => undefined });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+    await observer.handleEvent(apsport, "Network.webSocketCreated", {
+      requestId: "ws-main", url: "wss://spws.agenate.com/ln/en/s/1/mg/1/tr/1"
+    });
+
+    await observer.maintain(apsport);
+
+    const keeper = evaluated.find((expression) => expression.includes("__fieldline_ap_group_sockets__"));
+    // APSPORT_HELD_MARKET_GROUPS is empty: measured, the held sockets cost more
+    // worker stability than the corners they returned. Re-adding a group must
+    // fail this test on purpose, so whoever does it restores the URL-derivation
+    // and no-send assertions this replaced.
+    expect(keeper).toBeUndefined();
+  });
+
+  it("bounds concurrent APSPORT detail probes in the authenticated provider page", async () => {
     const detailed = { "1": "league-1", "2": "event-hidden", "5": "Alpha", "6": true,
       "10": "Active", "11": null, "22": "Beta", "53": "League", "50": [{
         "3": 80, "10": "Active", "9": [{ "0": "hidden-over", "2": "hidden-under",
@@ -3632,13 +3672,15 @@ describe("NetworkObserver", () => {
       providerSelectionId: "hidden-under", eventLabel: "Alpha vs Beta", participantA: "Alpha",
       participantB: "Beta", marketType: "SH_TOTAL", scope: "SECOND_HALF", selection: "UNDER", line: "1.5" };
 
-    await Promise.all([
-      observer.probeSelectionPrice(apsport, { ...identity, requestId: "price-one" }),
-      observer.probeSelectionPrice(apsport, { ...identity, requestId: "price-two" })
-    ]);
+    // Ten simultaneous probes must not open ten provider requests. The lane
+    // semaphore replaced a single-file queue that walked the hidden-detail
+    // roster at ~1.3 events per minute; it still has to cap in-flight work.
+    await Promise.all(Array.from({ length: 10 }, (_, index) =>
+      observer.probeSelectionPrice(apsport, { ...identity, requestId: `price-${index}` })));
 
-    expect(collectDetail).toHaveBeenCalledTimes(2);
-    expect(maximumActive).toBe(1);
+    expect(collectDetail).toHaveBeenCalledTimes(10);
+    expect(maximumActive).toBeGreaterThan(1);
+    expect(maximumActive).toBeLessThanOrEqual(6);
   });
 
   it("reports TSPORT's fresh same-tab resolver method instead of labelling it as DOM", async () => {
@@ -4225,11 +4267,18 @@ describe("NetworkObserver", () => {
       pathname: "/sports", hostname: "bti.test", origin: "https://bti.test"
     }, fetcher, { getItem: () => null });
 
+    // The first entry is the hydration probe live now runs, the same one early
+    // has always run: the initial response opens only ten leagues, so a probe
+    // asks the hydration endpoint for the full inventory. Here it answers with
+    // no more leagues than the initial list, so it is rejected and every one of
+    // the advertised leagues is still batched below.
     expect(requested.filter((path) => path.includes("/live?leagueIds="))).toEqual([
+      `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(0, 10).join(",")}`,
       `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(0, 10).join(",")}`,
       `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(10).join(",")}`
     ]);
     expect(requested.filter((path) => path.includes("/prematch?leagueIds="))).toEqual([
+      `/api/eventlist/asia/leagues/v2/1/prematch?leagueIds=${prematchLeagueIds.join(",")}`,
       `/api/eventlist/asia/leagues/v2/1/prematch?leagueIds=${prematchLeagueIds.join(",")}`
     ]);
     const live = result.responses.find(({ url }) =>
@@ -7764,6 +7813,7 @@ describe("NetworkObserver", () => {
       .map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>);
     expect(diagnostics).toEqual([
       { kind: "WS_ATTACH", sourceGeneration: 0, webSocketCreated: 1, webSockets: 1,
+        apCornerSockets: 0, apCornerFramesReceived: 0, apCornerFramesParsed: 0,
         ksportTargets: 2, attachedTargets: 2,
         framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
         framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
@@ -7782,6 +7832,7 @@ describe("NetworkObserver", () => {
         baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0, baselineTabLabels: "",
         catalogShape: expect.stringContaining("targets[") as unknown as string },
       { kind: "WS_ATTACH", sourceGeneration: 0, webSocketCreated: 0, webSockets: 0,
+        apCornerSockets: 0, apCornerFramesReceived: 0, apCornerFramesParsed: 0,
         ksportTargets: 0, attachedTargets: 0,
         framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
         framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,

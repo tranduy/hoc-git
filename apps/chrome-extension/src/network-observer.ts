@@ -144,11 +144,46 @@ type SabaPublicDiscoveryFailureCounts = Record<SabaPublicDiscoveryFailureCategor
 const APSPORT_PAGE_REQUEST_TIMEOUT_MS = 30_000;
 const APSPORT_DETAIL_DELAY_MS = 500;
 const APSPORT_DETAIL_MARKET_GROUPS = [1, 4, 9] as const;
+// The corner (mg/4) and card (mg/9) books stream on their own sockets, which
+// the page opens only while a human is looking at those tabs. Measured
+// 2026-09-11: 79 corner frames arrived and 71 parsed in the minute one was
+// open, then the stream died with the view. Holding them open ourselves is
+// the same traffic the provider UI makes; nothing is ever sent on them.
+// mg/9 (cards) was dropped after measurement: it produced markets on one or
+// two events while doubling the sockets, and the keeper's 15,814 frames share
+// the debugger session the roster fetch needs. APSPORT had slipped to
+// SOFT_RECOVERY on BASELINE_TIMEOUT, so the cheap half goes first.
+// Held open for measurement, now empty. Keeping the mg/4 sockets alive fixed
+// nothing the walk did not already do better: corners moved 25-29 -> 29-33
+// events, while the worker restarted every 2-3 minutes instead of running 30,
+// and each restart reset detail coverage from 72 walked events back to single
+// digits. Add 4 (corners) or 9 (cards) to switch it back on; the derivation,
+// reconnect and read-only guarantees below still hold.
+const APSPORT_HELD_MARKET_GROUPS: readonly number[] = [];
+const APSPORT_HELD_SOCKET_KEY = "__fieldline_ap_group_sockets__";
+// The detail walk is the only source of corner/card books, and it moves at a
+// measured 3.3 events per minute against a provider that answers 429 when
+// pushed harder. Spread over every roster event that is one pass every ~3.2
+// hours, so a fixture kicking off in twenty minutes carried corner prices
+// hours stale. Spending the lanes on fixtures near kick-off instead keeps the
+// window where a price actually moves. Far fixtures keep their main markets:
+// those arrive on the mg/1 socket for every event regardless of this walk.
+const APSPORT_WALK_TIERS: ReadonlySet<string> =
+  new Set(["LIVE", "URGENT", "NEAR", "3_6H", "UNKNOWN"]);
 const APSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
 const APSPORT_ROSTER_COLLAPSE_FLOOR = 20;
 const APSPORT_MIN_RETAINED_ROSTER_SHARE = 0.9;
 const APSPORT_EVENT_DETAIL_DEBOUNCE_MS = 400;
 const APSPORT_EVENT_DETAIL_MIN_INTERVAL_MS = 2_000;
+// A single-file request lane walked the hidden-detail roster at ~1.3 events per
+// minute, so a 764-event roster needed ~10 hours for one pass and corner/card
+// groups (mg=4/mg=9) only ever landed for the handful of events the walk
+// reached. Concurrency alone does not close that gap:
+// Six lanes drew a sustained APSPORT_ROSTER_HTTP_429 from the provider and
+// starved the walk behind its own 15s backoff, so the ceiling is three.
+const APSPORT_PAGE_REQUEST_LANES = 3;
+const APSPORT_DETAIL_LANES = 3;
+const APSPORT_DETAIL_MAX_JOBS = 6;
 // Long enough that two captures never overlap, short enough that one which will
 // never settle cannot silence the sweep for the rest of the worker's life.
 const CAPTURE_IN_FLIGHT_LIMIT_MS = 60_000;
@@ -223,8 +258,17 @@ function isTsportEventSocket(url: URL): boolean {
   // The provider's live football view streams on p/2 with market group mg/1;
   // only the sport segment (s/1 = football) is identity. Locking p/1 + mg/0
   // silently discarded every frame from a tab opened on the live view.
+  // Measured 2026-09-11: the corners view opens mg/4 sockets on BOTH tr/0
+  // and tr/1. Pinning tr/0 dropped every frame of the tr/1 half outright.
   return url.protocol === "wss:" && /^spws\.(?:agenate|racern)\.com$/iu.test(url.hostname) &&
-    /^\/ln\/[^/]+\/(?:p\/\d+\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/\d+\/tr\/0$/u.test(url.pathname);
+    /^\/ln\/[^/]+\/(?:p\/\d+\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/\d+\/tr\/[01]$/u.test(url.pathname);
+}
+
+function isApsportNonMainGroupSocket(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return isTsportEventSocket(url) && !url.pathname.includes('/mg/1/');
+  } catch { return false; }
 }
 
 export interface ObservedSource {
@@ -518,6 +562,12 @@ interface WsAttachDiagnosticState {
   framesReceived: number;
   framesOrphan: number;
   framesForwarded: number;
+  // Corner/card market groups arrive on their own APSPORT sockets (mg/4,
+  // mg/9). Counting them apart from mg/1 separates "the corner stream never
+  // opens" from "it opens and its frames die before the adapter". Shape only.
+  apCornerSockets: number;
+  apCornerFramesReceived: number;
+  apCornerFramesParsed: number;
   ignoredSockets: number;
   // A frame can reach its socket and still never be forwarded. These name the
   // exact gate that consumed it, so the fault does not have to be guessed.
@@ -1159,8 +1209,9 @@ export class NetworkObserver {
   readonly #apsportPhysicalDetailKeys = new Set<string>();
   readonly #apsportScheduledRetryAtMs = new Map<string, number>();
   readonly #apsportEventDetailLastAtMs = new Map<string, number>();
-  readonly #apsportEventDetailTails = new Map<string, Promise<void>>();
-  readonly #apsportPageRequestTails = new Map<string, Promise<void>>();
+  readonly #apsportEventDetailTails = new Map<string, Promise<void>[]>();
+  readonly #apsportPageRequestTails = new Map<string, Promise<void>[]>();
+  readonly #apsportLaneCursors = new Map<string, number>();
   readonly #apsportDetailCoverage = new Map<string, ApsportDetailCoverage>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
@@ -2356,6 +2407,56 @@ export class NetworkObserver {
       `${this.#sourceGenerations.get(source.sourceId) ?? 0}:${this.#captureBridgeGeneration(source.sourceId)}`;
   }
 
+  /** True while this APSPORT tab streams a market group other than mg/1 —
+   * the corner/card groups the page only opens while that view is shown.
+   * Navigating the tab would close it, so periodic renewal defers on it. */
+  hasApsportNonMainGroupSocket(sourceId: string): boolean {
+    return [...this.#webSockets.values()].some(socket => socket.source.sourceId === sourceId &&
+      socket.closing !== true &&
+      this.#isSourceGenerationCurrent(sourceId, socket.sourceGeneration) &&
+      isApsportNonMainGroupSocket(socket.url));
+  }
+
+  /** Opens and re-opens the corner/card group sockets in the provider page.
+   * Read-only: it constructs receive-side WebSockets and never sends a frame.
+   * URLs are derived from a live mg/1 socket so host, language and any
+   * p/u prefix follow the provider instead of being pinned here. */
+  #holdApsportGroupSockets(source: ObservedSource): void {
+    const template = this.#apsportRequestTemplates.get(source.sourceId);
+    if (template === undefined || !this.#apsportTemplateIsCurrent(source, template)) return;
+    const main = [...this.#webSockets.values()].find((socket) =>
+      socket.source.sourceId === source.sourceId && socket.closing !== true &&
+      this.#isSourceGenerationCurrent(source.sourceId, socket.sourceGeneration) &&
+      socket.url.includes("/mg/1/"));
+    if (main === undefined) return;
+    let base: URL;
+    try { base = new URL(main.url); } catch { return; }
+    const targets: string[] = [];
+    for (const group of APSPORT_HELD_MARKET_GROUPS) {
+      for (const tranche of ["0", "1"]) {
+        const pathname = base.pathname.replace("/mg/1/", `/mg/${group}/`)
+          .replace(/[/]tr[/][01]$/u, `/tr/${tranche}`);
+        if (pathname !== base.pathname) targets.push(`${base.origin}${pathname}`);
+      }
+    }
+    if (targets.length === 0) return;
+    const binding = this.#mainWorldContexts.get(source.tabId)?.get(template.frameId);
+    if (binding === undefined || binding.sessionId !== template.sessionId) return;
+    const expression = `(() => { const w = window; const k = ${JSON.stringify(APSPORT_HELD_SOCKET_KEY)};`
+      + ` w[k] = w[k] || {}; let opened = 0;`
+      + ` for (const url of ${JSON.stringify(targets)}) {`
+      + `   const held = w[k][url];`
+      + `   if (held && (held.readyState === 0 || held.readyState === 1)) continue;`
+      + `   try { w[k][url] = new WebSocket(url); opened += 1; } catch (e) { }`
+      + ` } return opened; })()`;
+    void this.#withFrameCommandTimeout(binding.sessionId === undefined
+      ? this.#sendCommand(source.tabId, "Runtime.evaluate",
+        { expression, contextId: binding.contextId, returnByValue: true })
+      : this.#sendCommand(source.tabId, "Runtime.evaluate",
+        { expression, contextId: binding.contextId, returnByValue: true }, binding.sessionId))
+      .catch(() => undefined);
+  }
+
   #hasApsportFootballSocket(source: ObservedSource): boolean {
     return [...this.#webSockets.values()].some(socket => socket.source.sourceId === source.sourceId &&
       socket.source.tabId === source.tabId && socket.closing !== true &&
@@ -2408,7 +2509,14 @@ export class NetworkObserver {
       this.#collectionSchedulers.set(source.sourceId, scheduler);
     }
     scheduler.setPlan(plan);
-    if (source.lobby === "TSPORT") {
+    // Discarding the queued walk belongs to a plan whose event set actually
+    // moved. The API republishes a plan every cycle, so cancelling on each one
+    // wiped the queue roughly as fast as the pump could fill it and left the
+    // hidden-detail roster advancing about one event per roster cycle.
+    const planEventsChanged = prior === undefined ||
+      JSON.stringify(prior.events.map((event) => event.eventId).sort()) !==
+      JSON.stringify(plan.events.map((event) => event.eventId).sort());
+    if (source.lobby === "TSPORT" && planEventsChanged) {
       this.#apsportCoverage(source.sourceId).cancelQueued();
       for (const key of this.#apsportEventDetailJobs.keys()) {
         if (!key.startsWith(`${source.sourceId}\u0000`) || this.#apsportPhysicalDetailKeys.has(key)) continue;
@@ -2456,10 +2564,18 @@ export class NetworkObserver {
   #pumpApsportCollection(source: ObservedSource): void {
     const scheduler = this.#collectionSchedulers.get(source.sourceId);
     const active = this.#apsportActiveCatalogs.get(source.sourceId);
-    if (scheduler === undefined || active === undefined || this.#apsportRefreshesInFlight.has(source.sourceId) ||
+    // A roster refresh no longer owns the whole provider lane, so the walk does
+    // not have to stand down for the tens of seconds one takes. Detail work that
+    // loses its event in the incoming roster is still dropped by isCurrent().
+    if (scheduler === undefined || active === undefined ||
       (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) > this.#now()) return;
-    const due = [...active.hiddenDetailEventIds].filter(id => scheduler.due(id, null));
-    for (const id of scheduler.sort(due).slice(0, 4)) {
+    const outstanding = [...this.#apsportEventDetailJobs.keys()]
+      .filter(id => id.startsWith(`${source.sourceId}\u0000`)).length;
+    const room = APSPORT_DETAIL_MAX_JOBS - outstanding;
+    if (room <= 0) return;
+    const due = [...active.hiddenDetailEventIds].filter(id =>
+      scheduler.due(id, null) && APSPORT_WALK_TIERS.has(scheduler.policy(id).tier));
+    for (const id of scheduler.sort(due).slice(0, room)) {
       this.#scheduleApsportEventDetail(source, id, active.rosterLeagueIds.get(id));
     }
   }
@@ -2482,6 +2598,7 @@ export class NetworkObserver {
       if (this.#apsportRecoveryIdentity(source) !== identity) return;
       if (this.#hasApsportFootballSocket(source)) {
         this.#apsportSocketAbsence.delete(source.sourceId);
+        this.#holdApsportGroupSockets(source);
         return;
       }
       const nowMs = this.#now();
@@ -4399,17 +4516,38 @@ export class NetworkObserver {
       this.#captureTabGeneration(source.tabId) === template.tabGeneration;
   }
 
+  /** Round-robin one of `lanes` single-file queues. Each lane preserves the
+   * prior strict ordering; together they bound in-flight work at `lanes`. */
+  #apsportLanes(tails: Map<string, Promise<void>[]>, sourceId: string, lanes: number): Promise<void>[] {
+    let queues = tails.get(sourceId);
+    if (queues === undefined || queues.length !== lanes) {
+      queues = Array.from({ length: lanes }, () => Promise.resolve());
+      tails.set(sourceId, queues);
+    }
+    return queues;
+  }
+
+  #apsportLaneIndex(sourceId: string, lane: string, lanes: number): number {
+    const key = `${sourceId}\u0000${lane}`;
+    const index = (this.#apsportLaneCursors.get(key) ?? 0) % lanes;
+    this.#apsportLaneCursors.set(key, (index + 1) % lanes);
+    return index;
+  }
+
   async #requestApsportPage(source: ObservedSource, template: BoundApsportRequestTemplate,
     input: ApsportCatalogPageRequest) {
     if (!this.#apsportTemplateIsCurrent(source, template)) return { status: 0, data: null };
     const scheduled = this.#collectionSchedulers.has(source.sourceId);
     const retryInMs = () => Math.max(0, (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) - this.#now());
     if (scheduled && retryInMs() > 0) return { status: 429, data: null, retryAfterMs: retryInMs() };
-    const prior = this.#apsportPageRequestTails.get(source.sourceId) ?? Promise.resolve();
+    const queues = this.#apsportLanes(this.#apsportPageRequestTails, source.sourceId,
+      APSPORT_PAGE_REQUEST_LANES);
+    const laneIndex = this.#apsportLaneIndex(source.sourceId, "page", APSPORT_PAGE_REQUEST_LANES);
+    const prior = queues[laneIndex] ?? Promise.resolve();
     let release!: () => void;
     const turn = new Promise<void>((resolve) => { release = resolve; });
     const tail = prior.catch(() => undefined).then(() => turn);
-    this.#apsportPageRequestTails.set(source.sourceId, tail);
+    queues[laneIndex] = tail;
     await prior.catch(() => undefined);
     try {
       if (!this.#apsportTemplateIsCurrent(source, template)) return { status: 0, data: null };
@@ -4440,9 +4578,7 @@ export class NetworkObserver {
       return response;
     } finally {
       release();
-      if (this.#apsportPageRequestTails.get(source.sourceId) === tail) {
-        this.#apsportPageRequestTails.delete(source.sourceId);
-      }
+      if (queues[laneIndex] === tail) queues[laneIndex] = Promise.resolve();
     }
   }
 
@@ -4456,7 +4592,7 @@ export class NetworkObserver {
     const scheduler = this.#collectionSchedulers.get(source.sourceId);
     if (scheduler !== undefined && (!scheduler.due(eventId, null) ||
       (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) > this.#now() ||
-      [...this.#apsportEventDetailJobs.keys()].filter(id => id.startsWith(`${source.sourceId}\u0000`)).length >= 6)) return;
+      [...this.#apsportEventDetailJobs.keys()].filter(id => id.startsWith(`${source.sourceId}\u0000`)).length >= APSPORT_DETAIL_MAX_JOBS)) return;
     const token = Symbol(eventId);
     this.#apsportEventDetailJobs.set(key, token);
     this.#apsportCoverage(source.sourceId).markQueued(eventId);
@@ -4470,7 +4606,10 @@ export class NetworkObserver {
       if (this.#apsportEventDetailJobs.get(key) !== token) return;
       this.#apsportEventDetailTimers.delete(key);
       this.#apsportEventDetailLastAtMs.set(key, this.#now());
-      const prior = this.#apsportEventDetailTails.get(source.sourceId) ?? Promise.resolve();
+      const detailQueues = this.#apsportLanes(this.#apsportEventDetailTails, source.sourceId,
+        APSPORT_DETAIL_LANES);
+      const detailLane = this.#apsportLaneIndex(source.sourceId, "detail", APSPORT_DETAIL_LANES);
+      const prior = detailQueues[detailLane] ?? Promise.resolve();
       const operation = prior.catch(() => undefined).then(async () => {
         if (this.#apsportEventDetailJobs.get(key) !== token) return;
         if (scheduler !== undefined && !scheduler.due(eventId, null)) return;
@@ -4483,12 +4622,10 @@ export class NetworkObserver {
         // independent queue works through every roster event.
         await new Promise<void>((resolve) => setTimeout(resolve, APSPORT_DETAIL_DELAY_MS));
       });
-      this.#apsportEventDetailTails.set(source.sourceId, operation);
+      detailQueues[detailLane] = operation;
       const cleanup = (): void => {
         if (this.#apsportEventDetailJobs.get(key) === token) this.#apsportEventDetailJobs.delete(key);
-        if (this.#apsportEventDetailTails.get(source.sourceId) === operation) {
-          this.#apsportEventDetailTails.delete(source.sourceId);
-        }
+        if (detailQueues[detailLane] === operation) detailQueues[detailLane] = Promise.resolve();
         this.#pumpApsportCollection(source);
       };
       void operation.then(cleanup, cleanup);
@@ -5259,6 +5396,7 @@ export class NetworkObserver {
       sourceGeneration, webSocketCreated: 0, ksportTargets: 0, attachedTargets: 0,
       reconnectAttempts: 0, reconnectOutcomes: "",
       framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
+      apCornerSockets: 0, apCornerFramesReceived: 0, apCornerFramesParsed: 0,
       framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
       framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
       sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
@@ -6806,6 +6944,13 @@ export class NetworkObserver {
       return (outcome === undefined ? existing :
         `CMD_LAST[code:${outcome.code};atMs:${outcome.observedAtMs}] ${existing}`).slice(0, 900);
     }
+    if (source.lobby === "TSPORT") {
+      // Corner/card groups ride their own sockets. Reported here rather than
+      // as typed counters so the running API needs no restart to show them.
+      const d = this.#wsAttachDiagnostic(source);
+      return (`AP_MG[sockets:${d.apCornerSockets};frames:${d.apCornerFramesReceived};` +
+        `parsed:${d.apCornerFramesParsed}] ` + existing).slice(0, 900);
+    }
     return source.lobby === "KSPORT" ? (`SBO_PAUSE[${this.#sbobetLastFailureLane};` +
       `status:${this.#sbobetRequestBackoff.lastStatus()};waitMs:${this.#sbobetRequestBackoff.retryInMs()}] ` +
       this.#sbobetDiscoveryText(source.sourceId) + existing).slice(0, 900) : existing;
@@ -6902,6 +7047,9 @@ export class NetworkObserver {
         webSockets, ksportTargets: diagnostic.ksportTargets, attachedTargets: diagnostic.attachedTargets,
         framesReceived: diagnostic.framesReceived, framesOrphan: diagnostic.framesOrphan,
         framesForwarded: diagnostic.framesForwarded, ignoredSockets: diagnostic.ignoredSockets,
+        apCornerSockets: diagnostic.apCornerSockets,
+        apCornerFramesReceived: diagnostic.apCornerFramesReceived,
+        apCornerFramesParsed: diagnostic.apCornerFramesParsed,
         framesBinary: diagnostic.framesBinary, framesNotOwner: diagnostic.framesNotOwner,
         framesUnattributed: diagnostic.framesUnattributed,
         framesNotActiveStream: diagnostic.framesNotActiveStream,
@@ -7001,6 +7149,9 @@ export class NetworkObserver {
     const params = isRecord(rawParams) ? rawParams : {};
     if (method === "Network.webSocketCreated" && (source.lobby === "KSPORT" || source.lobby === "TSPORT")) {
       this.#wsAttachDiagnostic(source).webSocketCreated += 1;
+      if (source.lobby === "TSPORT" && isApsportNonMainGroupSocket(String(params.url ?? ""))) {
+        this.#wsAttachDiagnostic(source).apCornerSockets += 1;
+      }
       // APSPORT forwards every frame it receives and all of them are heartbeats,
       // so either the football socket was never opened or it was opened and
       // stays silent. Those need opposite fixes and the frame counts cannot
@@ -7492,6 +7643,9 @@ export class NetworkObserver {
         (requestId === null ? undefined : this.#sabaSocketAcrossSession(source, requestId)?.[1]);
       const response = isRecord(params.response) ? params.response : null;
       this.#wsAttachDiagnostic(source).framesReceived += 1;
+      if (socket !== undefined && isApsportNonMainGroupSocket(socket.url)) {
+        this.#wsAttachDiagnostic(source).apCornerFramesReceived += 1;
+      }
       // A period/More action can make the provider publish a reset..done view
       // that is complete only for the temporary probe screen. Drop catalog
       // traffic attributed at receipt; do not adopt, cache, ready, or forward
@@ -9217,6 +9371,9 @@ export class NetworkObserver {
       if (!isRecord(outer) || outer.s !== 1 || outer.t !== "eu" || typeof outer.d !== "string") return;
       const event: unknown = JSON.parse(outer.d);
       if (!isRecord(event) || (typeof event["2"] !== "number" && typeof event["2"] !== "string")) return;
+      if (isApsportNonMainGroupSocket(url)) {
+        this.#wsAttachDiagnostic(source).apCornerFramesParsed += 1;
+      }
       const eventId = String(event["2"]);
       const retained = this.#tsportSnapshots.get(source.sourceId) ?? new Map<string, ReplayableWsEvent>();
       retained.set(eventId, { source, url, body, streamId, ...clocks });
