@@ -1,3 +1,80 @@
+# Trạng thái làm việc — 2026-09-12
+
+## Sàn chết vì tab treo, không vì code — 2026-09-12 checkpoint
+
+Sáu sàn tụt xuống ACTION_REQUIRED và không bao giờ tự dậy. Nguyên nhân đã
+khai tên, không còn đoán:
+
+- Đường tự phục hồi cuối cùng là reload tab nhà cái. Cái đó bị tắt cứng
+  (`browserRefreshEnabled === false` trong `automatic-source-recovery.ts`),
+  nên feed chỉ lặp `BROWSER_REFRESH_DISABLED` vô hạn — SABA 22 lần liên tiếp.
+  Đường dự phòng `requestLobbySnapshot` không cứu được tab đã treo vì tab treo
+  thì không trả lời.
+- Chẩn đoán mới `KEEP[ok;err;last]` trong `catalogShape` trả lời ngay phút đầu:
+  SBOBET `ok:13;err:0` trong khi SABA và APSPORT là `KEEP[none]` — lệnh giữ tab
+  tỉnh chưa từng chạy cho hai tab đó. Trước đây hai lệnh keep-alive bị nuốt lỗi
+  nên tab treo trông y hệt tab tỉnh mà không có gì để nói.
+- APSPORT khai rõ: `probe[tab=loading discarded=false frozen=false navigating=true]`
+  — kẹt giữa chừng khi tải, KHÔNG phải Chrome đóng băng.
+
+Cách chữa duy nhất hiện có: **người F5 tab**. Bấm vào tab không đủ cho tab đã
+treo (CMD/BTI tỉnh khi bấm; SABA/APSPORT chỉ lên sau khi F5). Sau khi F5 hai
+tab lúc 20:36: SABA 262 trận / 2.235 market / 2.085 đổi giá 60s; APSPORT 1.204
+trận / 60.638 market / tới 31.381 đổi giá 60s; cả hai `KEEP[ok:10..12;err:0]`.
+Năm sàn LIVE. Chỉ IM còn chết — 336 lần gọi đều nhận `unavailable`, lỗi phía
+nhà cái, không liên quan tab.
+
+Ghép chéo theo giờ cùng ngày: 17.277 → 33.455 → **64.647 cặp market giữa hai
+sàn** (15.652 nhóm kèo, 36.639 market nguồn). Kèo góc và thẻ lần đầu lên bảng
+so sánh hai sàn: `CORNER_FH_TOTAL Line 4`, `CORNER_FT_AH Line -0.5`,
+`CARD_FT_TOTAL Line 3`.
+
+## Nhấp nháy trạng thái — đã vá và đã đo
+
+`overlayStatuses` hạ sàn xuống ACTION_REQUIRED ngay lần đọc feed hỏng đầu
+tiên, web hiện thành sàn không khả dụng và sàn rơi khỏi so sánh. Đo 2 phút
+trước khi vá: CMD 4 lần, SBOBET 4, BTI 3, hố 2–3 giây.
+
+Đã thêm độ trễ 20 giây (`STATUS_NON_LIVE_GRACE_MS`), đọc được một lần là reset
+đồng hồ. Đo lại 5 phút / 256 mẫu sau khi vá: CMD 0 lần, SBOBET 0, BTI 0.
+IM 2 lần — lên thật rồi xuống thật, đúng như mong muốn.
+
+## Rò file tạm ăn hết ổ C — đã vá
+
+`DurableCatalogStore.save` ghi ra `<hash>.json.<uuid>.tmp` rồi đổi tên. Cả hai
+bước đều mất được: tiến trình chết giữa chừng, và trên Windows `rename` lỗi thì
+lệnh xóa ngay sau đó cũng lỗi vì cùng thứ đang giữ file. Đo được **4.187 file
+mồ côi / 10.519 MB** so với **36 file cache thật / 516 MB**. Ổ C còn 0,2 GB.
+
+`save` giờ quét file tạm cũ hơn 10 phút, tối đa 5 phút một lần. Đo lại sau khi
+vá: 1 file tạm, 0 MB. Thư mục `tool-chenh` 11.488 MB → 932 MB.
+
+Ổ C trong phiên: 0,2 GB → **19,2 GB** (file tạm 10,5 GB + cache Chrome 3,2 GB +
+tắt hibernate 13 GB). Cache Chrome xóa được an toàn ở `Cache\Cache_Data`,
+`Code Cache`, `GPUCache`, shader cache — **không đụng** `Storage\ext` (extension
+lưu trạng thái tab ở đó), Cookies, Login Data; không sàn nào bị đăng xuất.
+
+## Lag: do khối lượng, không do API
+
+Đo 2026-09-12 20:50. API không nghẽn: endpoint 2 KB trả trong **1,2–3,4 ms**
+qua curl. Tải catalog một lần:
+
+| sàn | thô | trong trang |
+|---|---|---|
+| BTI | 12,8 MB | 7.254 ms |
+| APSPORT | 6,0 MB | 7.306 ms |
+| SBOBET | 2,2 MB | 3.934 ms |
+
+Trạng thái nghỉ **không tải lại catalog** (0 lần trong 40 giây). Nên lag đến
+theo từng đợt, đúng lúc một sàn quay lại và trang phải nuốt lại ~21 MB JSON —
+hôm nay sàn rơi rồi lên liên tục nên đợt nào cũng gặp. Phép so sánh đã chạy
+trong Web Worker (`comparison.worker.ts`), nên chỗ nghẽn còn lại là JSON.parse
+và bàn giao dữ liệu sang worker trên luồng chính.
+
+Việc đáng làm tiếp, theo thứ tự ăn tiền: cắt payload BTI (136.794 market cho
+một lần tải, trong khi chỉ một phần ghép được — hai pha `markets=none` +
+`?events=` đã có sẵn ở `live-catalog-page.tsx:722`).
+
 # Trạng thái làm việc — 2026-09-10
 
 ## SABA / IM / CMD normalization — 2026-09-10 latest checkpoint
