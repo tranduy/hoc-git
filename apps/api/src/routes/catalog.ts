@@ -159,17 +159,30 @@ export function registerCatalogRoutes(
       : { ...horizon, markets: horizon.markets.filter(wanted), quotes: horizon.quotes.filter(wanted),
         ...(horizon.nativeMarketObservations === undefined ? {}
           : { nativeMarketObservations: horizon.nativeMarketObservations.filter(wanted) }) };
-    // A market type no other book prices has no second side and cannot become
-    // an exact two-book pair, so sending it costs transfer and parse time for
-    // a row the comparison will never look at. This narrows what is sent, not
-    // what is collected: the catalog still holds every market, the roster's
-    // coverage counters still report the whole book, and a type another book
-    // starts carrying is simply included on the next round. An empty set means
-    // no other catalog has been read yet, which filters nothing.
+    // A player market whose type no other book prices has no second side and
+    // cannot become an exact two-book pair, so sending it costs transfer and
+    // parse time for a row the comparison will never look at.
+    //
+    // Player markets only. The comparison also pairs a market against a
+    // DIFFERENT type through footballComparisonEquivalents - FT_CORRECT_SCORE
+    // and FT_GOAL_RANGE both project onto FT_TOTAL, FT_EUROPEAN_HANDICAP onto
+    // FT_AH - so for those "no other book carries this type" does not mean
+    // "cannot pair", and dropping them would silently cost pairs. That
+    // projection refuses player markets outright, which is what makes this
+    // subset safe to narrow, and it is also where the whole measured saving
+    // is: 89,986 of BTI's 143,346 markets are player props, and no other book
+    // carries the types of all but 311 of them.
+    //
+    // This narrows what is sent, not what is collected: the catalog still holds
+    // every market, the roster still reports coverage across the whole book,
+    // and a type another book starts carrying returns on the next round. An
+    // empty set means no other catalog has been read yet, which filters nothing.
     const pairableTypes = narrowToPairableTypes ? typesPairableWith(catalog.provider) : null;
+    const droppable = (row: { readonly marketType: string; readonly player?: unknown }): boolean =>
+      row.player !== undefined && pairableTypes !== null && !pairableTypes.has(row.marketType);
     const narrowed = pairableTypes === null || pairableTypes.size === 0 || withoutMarkets ? projected
-      : { ...projected, markets: projected.markets.filter((market) => pairableTypes.has(market.marketType)),
-        quotes: projected.quotes.filter((quote) => pairableTypes.has(quote.marketType)) };
+      : { ...projected, markets: projected.markets.filter((market) => !droppable(market)),
+        quotes: projected.quotes.filter((quote) => !droppable(quote)) };
     return { ...narrowed, accountId, snapshotState };
   };
 

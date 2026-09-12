@@ -3,16 +3,21 @@ import Fastify from "fastify";
 import { registerCatalogRoutes } from "./catalog.js";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 
+const player = { providerPlayerId: "p1", displayName: "Alpha Nine", teamSide: "HOME" } as const;
+const isProp = (marketType: string) => marketType.startsWith("PLAYER_");
+
 const market = (provider: string, marketType: string, providerMarketId: string) => ({
   provider, category: "FOOTBALL", providerEventId: "e1", providerMarketId, marketType,
-  scope: "FULL_TIME", line: "0", settlementProfile: "p", status: "OPEN"
+  scope: "FULL_TIME", line: "0", settlementProfile: "p", status: "OPEN",
+  ...(isProp(marketType) ? { player } : {})
 });
 
 const quote = (provider: string, marketType: string, providerMarketId: string) => ({
   provider, category: "FOOTBALL", providerEventId: "e1", providerMarketId,
   providerSelectionId: `${providerMarketId}:HOME`, selection: "HOME", marketType, scope: "FULL_TIME",
   line: "0", rawOdds: "0.9", rawFormat: "MALAY", status: "OPEN", isLive: false, sequence: 1,
-  sourceTimestampMs: Date.now(), receivedMonotonicMs: 1
+  sourceTimestampMs: Date.now(), receivedMonotonicMs: 1,
+  ...(isProp(marketType) ? { player } : {})
 });
 
 const book = (provider: "BTI" | "CMD" | "SBOBET", marketTypes: readonly string[]): ObservedProviderCatalog => ({
@@ -32,7 +37,7 @@ const serve = async () => {
     read: async (accountId: string) => accountId.includes("CMD")
       ? book("CMD", ["FT_AH", "FT_TOTAL"])
       : accountId.includes("SBOBET") ? book("SBOBET", ["FT_AH"])
-      : book("BTI", ["FT_AH", "PLAYER_FT_SHOTS_TOTAL", "PLAYER_FT_ANYTIME_SCORER"]),
+      : book("BTI", ["FT_AH", "FT_CORRECT_SCORE", "PLAYER_FT_SHOTS_TOTAL", "PLAYER_FT_ANYTIME_SCORER"]),
     snapshotFreshnessMaxAgeMs: 600_000
   });
   await app.ready();
@@ -54,10 +59,12 @@ describe("catalog marketTypes=paired", () => {
         "/api/catalog/accounts/catalog-source:BTI:FOOTBALL?marketTypes=paired&events=e1");
       expect(narrowed.statusCode).toBe(200);
       // FT_AH exists at CMD, so it survives; the player props exist nowhere else
-      // and could never have formed an exact two-book pair.
-      expect(types(narrowed)).toEqual(["FT_AH"]);
+      // and could never have formed an exact two-book pair. FT_CORRECT_SCORE is
+      // carried by no other book either, but the comparison projects it onto
+      // FT_TOTAL, so cutting it here would silently cost the pairs it forms.
+      expect(types(narrowed)).toEqual(["FT_AH", "FT_CORRECT_SCORE"]);
       const body = narrowed.json() as { quotes: { marketType: string }[]; events: unknown[] };
-      expect(body.quotes.map((row) => row.marketType)).toEqual(["FT_AH"]);
+      expect(body.quotes.map((row) => row.marketType)).toEqual(["FT_AH", "FT_CORRECT_SCORE"]);
       // Narrowing prices never hides a fixture.
       expect(body.events).toHaveLength(1);
     } finally { await app.close(); }
@@ -68,7 +75,8 @@ describe("catalog marketTypes=paired", () => {
     try {
       await get(app, "/api/catalog/accounts/catalog-source:CMD:FOOTBALL");
       const full = await get(app, "/api/catalog/accounts/catalog-source:BTI:FOOTBALL?events=e1");
-      expect(types(full)).toEqual(["FT_AH", "PLAYER_FT_SHOTS_TOTAL", "PLAYER_FT_ANYTIME_SCORER"]);
+      expect(types(full)).toEqual(["FT_AH", "FT_CORRECT_SCORE",
+        "PLAYER_FT_SHOTS_TOTAL", "PLAYER_FT_ANYTIME_SCORER"]);
     } finally { await app.close(); }
   });
 
@@ -79,7 +87,8 @@ describe("catalog marketTypes=paired", () => {
       // which is exactly when nothing else has been read yet.
       const narrowed = await get(app,
         "/api/catalog/accounts/catalog-source:BTI:FOOTBALL?marketTypes=paired&events=e1");
-      expect(types(narrowed)).toEqual(["FT_AH", "PLAYER_FT_SHOTS_TOTAL", "PLAYER_FT_ANYTIME_SCORER"]);
+      expect(types(narrowed)).toEqual(["FT_AH", "FT_CORRECT_SCORE",
+        "PLAYER_FT_SHOTS_TOTAL", "PLAYER_FT_ANYTIME_SCORER"]);
     } finally { await app.close(); }
   });
 
@@ -97,7 +106,7 @@ describe("catalog marketTypes=paired", () => {
         url: "/api/catalog/accounts/catalog-source:BTI:FOOTBALL?events=e1",
         headers: { "if-none-match": String(narrowed.headers.etag) } });
       expect(reused.statusCode).toBe(200);
-      expect(types(reused)).toHaveLength(3);
+      expect(types(reused)).toHaveLength(4);
     } finally { await app.close(); }
   });
 
