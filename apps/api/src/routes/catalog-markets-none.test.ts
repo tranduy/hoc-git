@@ -76,21 +76,18 @@ describe("catalog markets=none", () => {
     await app.close();
   });
 
-  it("drops the native observations too, which are the bulk of a large book", async () => {
+  it("keeps the native observations, because the counts are derived from them", async () => {
     const app = await serve();
     const full = await app.inject({ method: "GET", url: "/api/catalog/accounts/catalog-source:BTI:FOOTBALL" });
     const lean = await app.inject({ method: "GET",
       url: "/api/catalog/accounts/catalog-source:BTI:FOOTBALL?markets=none" });
     const fullBody = full.json() as { nativeMarketObservations?: unknown[] };
     const leanBody = lean.json() as { nativeMarketObservations?: unknown[] };
-    // Measured 2026-09-12: BTI answered markets=none with 226 MB because the
-    // observations stayed. They are decode diagnostics, never a comparison
-    // input, so the view that drops prices has to drop them as well or it
-    // does not buy the caller anything.
-    if (fullBody.nativeMarketObservations !== undefined) {
-      expect(fullBody.nativeMarketObservations.length).toBeGreaterThan(0);
-      expect(leanBody.nativeMarketObservations).toEqual([]);
-    }
+    // Emptying these here was tried on 2026-09-12 and reverted the same hour.
+    // nativeDetail=counts, which is what the dashboard asks for, computes its
+    // per-event coverage from these rows after this projection runs, so an
+    // empty array here showed every book with zero markets on screen.
+    expect(leanBody.nativeMarketObservations).toEqual(fullBody.nativeMarketObservations);
     await app.close();
   });
 
