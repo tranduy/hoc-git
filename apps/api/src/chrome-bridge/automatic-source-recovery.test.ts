@@ -124,6 +124,36 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.restoreLobby).not.toHaveBeenCalled();
   });
 
+  it("tells the worker when a reload is the only thing left, and stays quiet otherwise", async () => {
+    // A page whose socket reconnects without resending its reset frame keeps
+    // answering normally, so the worker cannot see the difference from inside
+    // the document and refreshes in place forever. Measured 2026-09-12: SABA
+    // refused 333 frames in ten minutes for want of that baseline while its
+    // catalog held 56 fixtures against the 117 to 141 the page listed.
+    const starved = setup(() => 2_000, false);
+    starved.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1",
+      reason: "PROVIDER_STREAM_GAP" }));
+    starved.waitForFreshBaseline.mockResolvedValueOnce(snapshot(SABA, {
+      state: "LIVE", reason: null, sourceId: "chrome:SABA:8", sourceEpoch: "observer-b:0",
+      activeGeneration: "generation-2", lastCompleteBaselineAtMs: 2_001
+    }));
+    await starved.recovery.recover(request(SABA, "HARD"));
+    expect(starved.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7", true);
+
+    // Every other fault is still repairable inside the page, and replacing a
+    // working document costs minutes of re-authentication and subscription.
+    const ordinary = setup(() => 2_000, false);
+    ordinary.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    ordinary.waitForFreshBaseline.mockResolvedValueOnce(snapshot(SABA, {
+      state: "LIVE", reason: null, sourceId: "chrome:SABA:8", sourceEpoch: "observer-b:0",
+      activeGeneration: "generation-2", lastCompleteBaselineAtMs: 2_001
+    }));
+    await ordinary.recovery.recover(request(SABA, "HARD"));
+    expect(ordinary.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+  });
+
   it("waits for an attaching KSPORT baseline before refreshing its launch portal", async () => {
     const context = setup();
     context.feedRegistry.snapshot.mockReturnValue(snapshot(SBOBET));

@@ -248,7 +248,15 @@ const ReloadExtensionMessageSchema = z.strictObject({
 const ReloadSourceMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("RELOAD_SOURCE"),
-  sourceId: SourceIdSchema
+  sourceId: SourceIdSchema,
+  /**
+   * The provider transport has stopped producing a baseline, so recovery
+   * inside the current document cannot repair it. A page whose socket
+   * reconnects without ever resending its reset frame looks entirely healthy
+   * from the document side, which is why the document’s own responsiveness
+   * cannot be the only thing the worker decides on.
+   */
+  transportStarved: z.boolean().optional()
 });
 
 const FreshLaunchUrlSchema = z.string().trim().min(1).max(8192).url().superRefine((value, context) => {

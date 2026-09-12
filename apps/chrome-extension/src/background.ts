@@ -89,11 +89,18 @@ const sourceTabKeepAlive = new SourceTabKeepAlive({
  * drives every other source - so the outcome is recorded instead.
  */
 async function pulseSourceTab(tabId: number): Promise<void> {
+  // Recording the outcome must never be able to stop the pulse. This is the
+  // heartbeat every source rides on, and on 2026-09-12 a counter added to it
+  // threw for want of one method and took the whole loop down.
+  const note = (outcome: string): void => {
+    try { observer.noteTabKeepAlive?.(tabId, outcome); }
+    catch { /* a counter is not worth a heartbeat */ }
+  };
   try {
     await sourceTabKeepAlive.pulse(tabId);
-    observer.noteTabKeepAlive(tabId, "OK");
+    note("OK");
   } catch (error) {
-    observer.noteTabKeepAlive(tabId, error instanceof Error ? error.message : "UNKNOWN");
+    note(error instanceof Error ? error.message : "UNKNOWN");
   }
 }
 
@@ -670,7 +677,7 @@ async function configureBridgeOnce(): Promise<boolean> {
       // are neither navigated nor closed, which is exactly what a manual
       // "reload extension" does, so a deployment no longer needs a human.
       onExtensionReload: () => { chrome.runtime.reload(); },
-      onSourceReload: async (sourceId) => {
+      onSourceReload: async (sourceId, transportStarved) => {
         if (sourceId.startsWith("chrome:KSPORT:") && await observer.sbobetRequestsPaused()) return;
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
         if (attached) {
@@ -699,7 +706,17 @@ async function configureBridgeOnce(): Promise<boolean> {
             await observer.refreshCatalog(source).catch(() => undefined);
           } else if (attached.lobby === "SABA") {
             const hasResponsiveDocument = observer.hasResponsiveSabaDocument(sourceId);
-            if (sabaSourceControlAction("RELOAD", hasResponsiveDocument) === "REFRESH_CURRENT") {
+            const action = sabaSourceControlAction("RELOAD", hasResponsiveDocument, transportStarved);
+            if (action === "RELOAD_DOCUMENT") {
+              // The document answers and the socket is dead: SABA reconnects
+              // without resending reset, so nothing done inside this page can
+              // produce the baseline every later frame is refused for want of.
+              // Only a new document opens a new socket. The backend asks for
+              // this at its hard stage and no more than once every five
+              // minutes, and the tab keeps its session because it is the same
+              // tab reloading, not a second one taking the page's place.
+              await chrome.tabs.reload(attached.tabId);
+            } else if (action === "REFRESH_CURRENT") {
               // Keep a responsive current document. A fresh low-row football
               // receipt is liveness only, but reloading it would interrupt the
               // bounded hidden-market collector before coverage can complete.

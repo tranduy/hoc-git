@@ -53,7 +53,7 @@ export interface LocalBridgeOptions {
   readonly onSnapshotRequest?: (request: Omit<Extract<ChromeBridgeControlMessage,
     { readonly kind: "REQUEST_SNAPSHOT" }>, "version" | "kind">) => void | Promise<void>;
   readonly onSourceResync?: (sourceId: string) => void | Promise<void>;
-  readonly onSourceReload?: (sourceId: string) => void | Promise<void>;
+  readonly onSourceReload?: (sourceId: string, transportStarved: boolean) => void | Promise<void>;
   /** Identity of the bundle this worker is running, injected at build time. */
   readonly buildIdentity?: string;
   readonly onExtensionReload?: (buildIdentity: string) => void;
@@ -81,7 +81,7 @@ export class LocalBridge {
   readonly #onCollectionPlan: NonNullable<LocalBridgeOptions["onCollectionPlan"]>;
   readonly #onSnapshotRequest: NonNullable<LocalBridgeOptions["onSnapshotRequest"]>;
   readonly #onSourceResync: (sourceId: string) => void | Promise<void>;
-  readonly #onSourceReload: (sourceId: string) => void | Promise<void>;
+  readonly #onSourceReload: (sourceId: string, transportStarved: boolean) => void | Promise<void>;
   readonly #buildIdentity: string | null;
   readonly #onExtensionReload: ((buildIdentity: string) => void) | null;
   readonly #onSourceNavigate: NonNullable<LocalBridgeOptions["onSourceNavigate"]>;
@@ -421,7 +421,7 @@ export class LocalBridge {
         return;
       }
       if (parsed.data.kind === "RELOAD_SOURCE") {
-        try { void Promise.resolve(this.#onSourceReload(parsed.data.sourceId)).catch(() => undefined); }
+        try { void Promise.resolve(this.#onSourceReload(parsed.data.sourceId, parsed.data.transportStarved === true)).catch(() => undefined); }
         catch { /* tab recovery must not disrupt the bridge */ }
         return;
       }

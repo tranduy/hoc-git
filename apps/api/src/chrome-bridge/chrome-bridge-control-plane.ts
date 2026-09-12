@@ -226,11 +226,11 @@ export class ChromeBridgeControlPlane {
     return 0;
   }
 
-  reloadSource(sourceId: string): number {
-    if (this.#sendReload(sourceId, this.#exactSocket(sourceId)) === 1) return 1;
+  reloadSource(sourceId: string, transportStarved = false): number {
+    if (this.#sendReload(sourceId, this.#exactSocket(sourceId), transportStarved) === 1) return 1;
     // Re-resolve only after the active attempt. Its synchronous send can close
     // or replace the candidate as a side effect.
-    if (this.#sendReload(sourceId, this.#exactCandidateSocket(sourceId)) === 1) return 1;
+    if (this.#sendReload(sourceId, this.#exactCandidateSocket(sourceId), transportStarved) === 1) return 1;
     return 0;
   }
 
@@ -275,9 +275,11 @@ export class ChromeBridgeControlPlane {
       sameAuthorityIdentity(attached.identity, authority.candidate) ? attached : null;
   }
 
-  #sendReload(sourceId: string, socket: BridgeControlSocket | undefined): number {
+  #sendReload(sourceId: string, socket: BridgeControlSocket | undefined,
+    transportStarved = false): number {
     if (socket === undefined || socket.readyState !== 1) return 0;
-    const control: ChromeBridgeControlMessage = { version: 1, kind: "RELOAD_SOURCE", sourceId };
+    const control: ChromeBridgeControlMessage = { version: 1, kind: "RELOAD_SOURCE", sourceId,
+      ...(transportStarved ? { transportStarved: true } : {}) };
     try {
       socket.send(JSON.stringify(control));
       return 1;

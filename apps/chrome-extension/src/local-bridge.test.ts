@@ -675,7 +675,14 @@ describe("LocalBridge", () => {
       version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:7"
     }) });
 
-    expect(onSourceReload).toHaveBeenCalledWith("chrome:SABA:7");
+    expect(onSourceReload).toHaveBeenCalledWith("chrome:SABA:7", false);
+
+    // A starved transport cannot be repaired inside the page, so the request
+    // carries that fact and the worker decides what to do with the document.
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:7", transportStarved: true
+    }) });
+    expect(onSourceReload).toHaveBeenLastCalledWith("chrome:SABA:7", true);
   });
 
   it("forwards a fresh launch navigation to the attached-tab controller", () => {

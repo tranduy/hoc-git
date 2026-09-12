@@ -11,7 +11,7 @@ type RecoveryFeedRegistry = Pick<ProviderFeedRegistry,
 
 interface RecoveryControlPlane {
   requestLobbySnapshot(lobby: ChromeLobbyId): number;
-  reloadSource?(sourceId: string): number;
+  reloadSource?(sourceId: string, transportStarved?: boolean): number;
   reloadRecoverySource?(accountId: string, lobby: ChromeLobbyId): number;
   recoverySourceKey?(accountId: string, lobby: ChromeLobbyId): string | null;
   ensureLobby(lobby: ChromeLobbyId, url: string): number;
@@ -296,7 +296,14 @@ export class AutomaticSourceRecovery {
           matchesRecoverySource(prior.sourceId, request.accountId, source.hardLobby)) {
           this.#requireRecovery(request.accountId);
           try {
-            delivered = this.#options.controlPlane.reloadSource(prior.sourceId);
+            // A page whose transport stopped producing a baseline cannot be
+            // repaired from inside its own document, and some providers only
+            // ever act inside it. Pass the fact along so the worker can tell a
+            // document that needs a nudge from one that needs replacing.
+            const starved = prior.reason === "PROVIDER_STREAM_GAP" || prior.reason === "BASELINE_TIMEOUT";
+            delivered = starved
+              ? this.#options.controlPlane.reloadSource(prior.sourceId, true)
+              : this.#options.controlPlane.reloadSource(prior.sourceId);
             if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, reloadStartedAtMs);
           } catch { /* send failure is undelivered; fall through to a fresh launch */ }
         }
