@@ -1,3 +1,147 @@
+# Trạng thái làm việc — 2026-09-13
+
+## Phục hồi: "đọc được" không có nghĩa là "khỏe" — 2026-09-13 checkpoint
+
+Cả máy phục hồi hỏi đúng một câu: *sàn còn sống không*. SABA sống — feed
+LIVE, 1.324 lần đổi giá mỗi phút — nhưng chỉ mang 55 trận trong khi trang
+của nó liệt kê 117–141. Bệnh của nó là **thiếu hàng**, không phải chết, nên
+không cửa nào mở ra cho nó.
+
+Chuỗi từ lúc adapter phát hiện tới lúc tab được tải lại đứt ở **bốn** chỗ,
+gỡ được chỗ nào thì lộ chỗ sau:
+
+1. `server.ts` không truyền `onSourceRecoveryNeeded` — tham số tuỳ chọn,
+   mặc định `null`. **157 lời xin phục hồi gọi vào `null`**, không log, không
+   đếm, không lỗi. Toàn bộ đường phục hồi theo sự kiện chưa từng được nối
+   dây trong production, không riêng SABA.
+2. Data plane xin nấc **SOFT**, mà SOFT với SABA là lệnh xin ảnh chụp —
+   không tạo được socket mới. Đổi sang **HARD**.
+3. `recover()` chặn ngay đầu: `#readable()` → trả `recovered` mà không làm
+   gì. Cho `transportStarved` đi qua.
+4. `#requireRecovery()` ném `RECOVERY_ALREADY_LIVE` trong lòng nấc HARD.
+   Miễn trừ theo **từng yêu cầu** (`Set` per-request, không phải cờ trên
+   instance — hai sàn có thể phục hồi cùng lúc).
+
+Và cờ `transportStarved` gửi xuống extension phải lấy **từ yêu cầu**, không
+chỉ từ ảnh feed: sàn đói socket đọc vẫn ngon nên ảnh feed của nó không mang
+lý do nào cả — đúng cái làm nó được cho đi qua ở bước 3.
+
+Phía extension: `RELOAD_SOURCE` mang thêm `transportStarved`. Trước đây SABA
+hỏi đúng một câu *tài liệu còn phản hồi không* — còn, nên luôn chọn
+`REFRESH_CURRENT`, gửi lại request trong trang cũ, mà trong trang cũ thì
+không bao giờ mở được socket mới. Giờ đói socket thì `chrome.tabs.reload`.
+**Cùng tab đó tải lại, không mở tab thứ hai** — mở tab thứ hai là thứ đã
+giết phiên BTI ngày 2026-09-12.
+
+Ba lớp hãm: 1 lời xin/phút mỗi sàn, `MIN_SOURCE_RELOAD_INTERVAL_MS` 5 phút,
+và chỉ khi adapter thực sự khai đói baseline quá 8 giây.
+
+## Chẩn đoán từng nói dối — đã sửa
+
+`contentRefusals` của APSPORT được dùng làm hàng thay thế cho mọi sàn chưa
+có bảng riêng, nên CMD, SABA, SBOBET **in ra số của APSPORT như của mình** —
+bốn sàn cùng một chuỗi. Một cuộc điều tra SABA đã chạy mấy phút trên số của
+APSPORT trước khi trùng lặp làm lộ ra. Sàn nào chưa có bảng riêng giờ để
+trống. Một chẩn đoán sai địa chỉ nguy hiểm hơn chẩn đoán im lặng, vì nó
+được tin.
+
+SABA giờ có bảng đếm riêng (trước chỉ giữ đúng **một** lý do từ chối cuối
+cùng) cộng hai thước đo `dom-sweep-roster-captures` / `dom-sweep-captures-total`
+— số trận chính trang liệt kê, để tách "trang chỉ có 59 trận" khỏi "quét
+được nhưng khâu sau làm rơi".
+
+## CMD: 6.100 dòng tưởng mất, phần lớn không phải lỗi mình
+
+Tách `INVALID_TWO_WAY_SHAPE` (2.951) thành ba cửa có tên thì lộ: **2.555
+dòng mang `-999`**, là cách CMD đóng kèo. Code đã biết điều đó ở chỗ khác
+(`cmd-more-native.ts`) nhưng nhánh này báo là "hình dạng sai" — đọc lên như
+lỗi giải mã và che mất chỗ thủng thật. Giờ khai `NATIVE_MARKET_CLOSED`.
+
+Còn lại **411 dòng là kèo thật**: CMD bị áp luật chặt hơn SABA cho kèo chấp
+0 (`allowZero = provider === "SABA"`), không ghi chép lý do. Cả 411 nhóm đều
+có 2 giá Malay hợp lệ và số `0` ở đúng một bên — hình dạng SABA đang được
+tin. Kiểm chứng chéo 263 trận: SBOBET có kèo chấp 0 ở 75 trận, APSPORT 80,
+BTI 51. Đã mở, đo lại: `chap-0` **0 → 418**, `UNSUPPORTED_TWO_WAY_LINE`
+1.544 → **7**, `INVALID_SELECTION_PRICES` 1.455 → **0**.
+
+## Tải: cắt kèo không có đối ứng
+
+62,8% market của BTI là `PLAYER_*`; APSPORT có 311, ba sàn kia có **0**.
+Gói chi tiết BTI **5.859 → 1.493 KB**, cắt 51,8% market.
+
+Chỉ cắt **kèo cầu thủ**. Bảng so sánh còn ghép chéo tên loại qua
+`footballComparisonEquivalents` — `FT_CORRECT_SCORE` và `FT_GOAL_RANGE` đều
+chiếu thành `FT_TOTAL`, `FT_EUROPEAN_HANDICAP` thành `FT_AH` — nên với
+những loại đó, "sàn khác không có" **không** đồng nghĩa "không ghép được".
+Hàm chiếu đó từ chối kèo cầu thủ ngay từ đầu, nên riêng nhóm này an toàn.
+
+Danh sách loại chung cần **ít nhất hai sàn khác** đã đọc xong mới được tin:
+25 giây sau một lần restart, khi các sàn còn đang nạp, cùng phép cắt đó bỏ
+mất 64,6% của APSPORT chỉ vì danh sách còn thiếu; khi đủ thì đúng 1,1%.
+
+## Chuẩn hóa: phần lỗi thật còn 1,2%
+
+Đo 01:43 trên 128.408 quan sát, 89.709 chuẩn hóa (69,9%). Bóc phần mất ra:
+
+| lý do | dòng | lỗi mình? |
+|---|---|---|
+| `EVENT_NOT_COMPARABLE` | 29.633 | không — ngoài cửa sổ so sánh |
+| `NATIVE_MARKET_CLOSED` | 3.867 | không — nhà cái tự đóng |
+| `NATIVE_MARKET_HIDDEN` | 2.323 | không — nhà cái tự ẩn |
+| `OTHER_SCORE_DOMAIN_REQUIRED` | 999 | có |
+| `NON_BINARY_OUTCOME_DOMAIN` | 373 | có |
+| còn lại | ~170 | có |
+
+`OTHER_SCORE_DOMAIN_REQUIRED` là ô `9:9` = **"tỉ số khác"**, không phải tỉ
+số 9-9. Hợp đồng chỉ có `SCORE_<h>_<a>`. **Không ghép hai ô "khác" của hai
+sàn**: "khác" của A nghĩa là ngoài lưới tỉ số của A, của B là ngoài lưới
+của B — hai lưới khác nhau thì đó là hai kèo khác nhau. Muốn dùng thì phải
+chứng minh hai lưới trùng nhau trên đúng trận đó trước.
+
+## Nhấp nháy trạng thái: hết
+
+Độ trễ 20 giây trước khi hạ một sàn xuống `ACTION_REQUIRED`. Đo 5 phút/256
+mẫu sau khi vá: CMD **0**, SBOBET **0**, BTI **0** lần đổi trạng thái (trước
+đó riêng CMD 4 lần trong 2 phút). IM 2 lần — lên thật rồi xuống thật.
+
+Hiện tượng gốc còn lại, đo sạch 12 phút/245 mẫu bằng **gói dữ liệu thật
+tăng** (không tính nhịp tim TAB_STATE): CMD 10 mẫu (~30 giây), BTI 2, SABA
+2, APSPORT 2, SBOBET **0**.
+
+## Rò file tạm ăn hết ổ C
+
+`DurableCatalogStore.save` ghi `<hash>.json.<uuid>.tmp` rồi đổi tên. Cả hai
+bước đều mất được, và trên Windows `rename` lỗi thì lệnh xóa ngay sau cũng
+lỗi vì cùng thứ đang giữ file. **4.187 file mồ côi / 10.519 MB** so với 36
+file cache thật / 516 MB. `save` giờ quét file tạm cũ hơn 10 phút, tối đa 5
+phút một lần. Sau khi vá: 1 file, 0 MB.
+
+Ổ C trong phiên: **0,2 → 20,7 GB** (file tạm 10,5 + cache Chrome 3,2 + tắt
+hibernate 13). Cache Chrome an toàn ở `Cache\Cache_Data`, `Code Cache`,
+`GPUCache`, shader cache — **không đụng** `Storage\ext` (extension lưu trạng
+thái tab ở đó), Cookies, Login Data.
+
+## Ghép chéo trong một tối
+
+17.277 → 33.455 → 64.647 → **76.698 cặp market giữa hai sàn**. Kèo góc và
+kèo thẻ lần đầu lên bảng so sánh hai sàn. Kèo dương thật: ROI 5,76%
+(SBOBET × CMD, FH_AH −0.25) và 0,27%.
+
+## Bẫy đã mắc đêm nay, đừng mắc lại
+
+- **Restart rồi đo ngay.** Bảy lần restart trong một đêm, lần nào cũng phải
+  chờ 10–20 phút. Gom thay đổi, deploy một lần.
+- **Đẩy commit khi build lỗi.** `tsc` fail thì `dist` không đổi, restart
+  xong là chạy lại bản cũ — và phép đo sau đó đo nhầm bản cũ. Luôn xác nhận
+  `BUILD_OK` trước khi restart.
+- **Chạy test API mà quên chạy test extension.** Một bộ đếm thêm vào nhịp
+  tim đã làm hỏng `background-source-launch-memory.test.ts` và được push đi
+  mà không ai thấy. Bộ đếm giờ không thể làm chết nhịp tim.
+- **`lastEnvelopeAgeMs` tính cả nhịp tim TAB_STATE.** Dùng nó để đo "tab còn
+  gửi dữ liệu không" cho ra số sai gấp mười lần.
+- **`dom-chunk-N-of-4-awaiting-rest` không phải lỗi.** Mỗi bản quét 4 mảnh
+  thì 3 mảnh đầu đều ghi dòng đó. 94 dòng là 94 bản quét chạy đúng.
+
 # Trạng thái làm việc — 2026-09-12
 
 ## Sàn chết vì tab treo, không vì code — 2026-09-12 checkpoint
