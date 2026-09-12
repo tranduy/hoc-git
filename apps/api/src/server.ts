@@ -511,6 +511,18 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     ? new SelectionPriceProbeCoordinator({ listSources: () => chromeBridgeRegistry.listActiveSources(),
       controlPlane: chromeBridgeControlPlane })
     : null;
+  /**
+   * An adapter that learns its provider stopped sending a usable stream asks
+   * for recovery through the data plane. Production never gave it anywhere to
+   * ask: onSourceRecoveryNeeded was left off the options, so the call went to
+   * null and was neither logged nor counted. Measured 2026-09-13, SABA made
+   * 157 of those requests in twenty minutes and none of them arrived, while
+   * its book shrank from 141 fixtures to 47 and the sweep left it alone
+   * because a working DOM lane kept the feed LIVE the whole time.
+   *
+   * The actor is built further down, so the sink is bound afterwards.
+   */
+  let requestSourceRecovery: ((accountId: string) => void) | null = null;
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       const freshnessMs = providerFeedPolicies.get(catalog.accountId)?.catalogFreshnessMs ?? 20_000;
@@ -518,6 +530,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       catalogPersister.schedule(`catalog-source|${catalog.provider}|${catalog.category}`, catalog);
     }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }),
     authorityCoordinator: chromeBridgeRegistry.authorityCoordinator, telemetry: pipelineTelemetry,
+    onSourceRecoveryNeeded: (accountId) => requestSourceRecovery?.(accountId),
     onIngestRejected: (envelope, reason) => {
       pipelineTelemetry.recordIngestRejected(chromeBridgeProviderAccountIdForLobby(envelope.lobby), reason);
       if (reason === "NETWORK_BODY_UNAVAILABLE") chromeBridgeControlPlane?.rejectNetworkBody(envelope);
@@ -700,6 +713,25 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       } }
       : {})
   });
+  if (automaticSourceRecovery !== null) {
+    // A stream that has gone will say so on every frame that follows, so this
+    // has to be rate limited or one dead socket becomes hundreds of recovery
+    // runs a minute. The soft stage is the right one to ask for: for SABA it
+    // is a snapshot request that reloads and navigates nothing, and the
+    // controller still owns every escalation past it.
+    const askedAtMs = new Map<string, number>();
+    const minIntervalMs = 60_000;
+    requestSourceRecovery = (accountId: string): void => {
+      const nowMs = Date.now();
+      if (nowMs - (askedAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY) < minIntervalMs) return;
+      askedAtMs.set(accountId, nowMs);
+      try {
+        void automaticSourceRecovery.recover({ accountId, stage: "SOFT", attempt: 1,
+          requestedAtMs: nowMs }).catch(() => undefined);
+      } catch { /* an event-driven request is best-effort, like the sweep */ }
+    };
+  }
+
   const providerRecovery = automaticSourceRecovery === null || providerFeeds === null
     ? null
     : startProviderRecoverySweep(providerFeeds, automaticSourceRecovery, {
