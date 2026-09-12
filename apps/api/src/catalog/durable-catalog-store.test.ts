@@ -1,10 +1,10 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeMarketObservation } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
-import { DurableCatalogStore } from "./durable-catalog-store.js";
+import { DurableCatalogStore, TEMPORARY_SWEEP_INTERVAL_MS } from "./durable-catalog-store.js";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -28,6 +28,42 @@ describe("DurableCatalogStore", () => {
     const { value } = await store();
     await value.save("IM|LOL|session", catalog());
     await expect(value.load("IM|LOL|session")).resolves.toEqual(catalog());
+  });
+
+  it("sweeps temporaries a dead writer orphaned without touching a live write", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tool-chenh-catalog-"));
+    roots.push(root);
+    let now = 10 * 60_000;
+    const value = new DurableCatalogStore(root, { now: () => now });
+
+    // A temporary is only ever read by the rename that consumes it, so one
+    // left behind by a writer that died - or by a Windows unlink that failed
+    // for the same reason its rename did - is unreachable and grows forever.
+    const orphan = join(root, "abc.json.11111111-2222-3333-4444-555555555555.tmp");
+    const inFlight = join(root, "abc.json.66666666-7777-8888-9999-000000000000.tmp");
+    await writeFile(orphan, "{}", "utf8");
+    await writeFile(inFlight, "{}", "utf8");
+    const stale = new Date(now - 10 * 60_000);
+    await utimes(orphan, stale, stale);
+    const fresh = new Date(now - 60_000);
+    await utimes(inFlight, fresh, fresh);
+
+    await value.save("IM|LOL|session", catalog());
+    const names = await readdir(root);
+    expect(names).not.toContain(basename(orphan));
+    expect(names).toContain(basename(inFlight));
+    await expect(value.load("IM|LOL|session")).resolves.toEqual(catalog());
+
+    // The sweep costs a directory listing, so it does not run on every save.
+    const later = new Date(now - 10 * 60_000);
+    await utimes(inFlight, later, later);
+    now += 60_000;
+    await value.save("IM|LOL|session", catalog());
+    expect(await readdir(root)).toContain(basename(inFlight));
+
+    now += TEMPORARY_SWEEP_INTERVAL_MS;
+    await value.save("IM|LOL|session", catalog());
+    expect(await readdir(root)).not.toContain(basename(inFlight));
   });
 
   it("preserves the explicit APSPORT observation clock pair without accepting an invalid anchor", async () => {

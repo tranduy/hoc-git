@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   NativeMarketObservationSchema,
@@ -65,6 +65,21 @@ function* serializedCatalog(catalog: ObservedProviderCatalog): Generator<string>
   yield "}";
 }
 
+/**
+ * A catalog is written to a uuid-suffixed temporary and renamed into place.
+ * Both steps can be lost: the process can die between them, and on Windows a
+ * failed rename is regularly followed by a failed unlink, because whatever
+ * held the target open holds the temporary too. Either way the temporary is
+ * orphaned and nothing ever looks at it again. Measured 2026-09-12: 4,187 of
+ * them had built up against 36 real cache files, 10.5 GB against 516 MB, and
+ * the system disk was down to its last 200 MB. Sweeping them is the only way
+ * the store stays bounded, since the writer that leaked one is already gone.
+ */
+const TEMPORARY_STALE_AFTER_MS = 10 * 60_000;
+
+/** Sweeping on every save would stat the whole directory every few seconds. */
+export const TEMPORARY_SWEEP_INTERVAL_MS = 5 * 60_000;
+
 export interface CatalogStoreLike {
   load(sourceKey: string): Promise<ObservedProviderCatalog | null>;
   save(sourceKey: string, catalog: ObservedProviderCatalog): Promise<void>;
@@ -72,10 +87,13 @@ export interface CatalogStoreLike {
 
 export class DurableCatalogStore implements CatalogStoreLike {
   readonly #root: string;
+  readonly #now: () => number;
+  #sweptAtMs = 0;
 
-  constructor(root: string) {
+  constructor(root: string, options: { readonly now?: () => number } = {}) {
     if (root.trim().length === 0) throw new Error("CATALOG_STORE_ROOT_INVALID");
     this.#root = resolve(root);
+    this.#now = options.now ?? Date.now;
   }
 
   pathFor(sourceKey: string): string {
@@ -103,6 +121,24 @@ export class DurableCatalogStore implements CatalogStoreLike {
       await rename(temporary, target);
     } catch {
       await rm(temporary, { force: true }).catch(() => undefined);
+    }
+    await this.#sweepOrphanedTemporaries();
+  }
+
+  async #sweepOrphanedTemporaries(): Promise<void> {
+    const nowMs = this.#now();
+    if (nowMs - this.#sweptAtMs < TEMPORARY_SWEEP_INTERVAL_MS) return;
+    this.#sweptAtMs = nowMs;
+    let names: readonly string[];
+    try { names = await readdir(this.#root); } catch { return; }
+    for (const name of names) {
+      if (!name.endsWith(".tmp")) continue;
+      const candidate = join(this.#root, name);
+      try {
+        const stats = await stat(candidate);
+        if (nowMs - stats.mtimeMs < TEMPORARY_STALE_AFTER_MS) continue;
+        await rm(candidate, { force: true });
+      } catch { /* a temporary that will not go now is swept on a later pass */ }
     }
   }
 }
