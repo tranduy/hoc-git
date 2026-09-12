@@ -455,7 +455,10 @@ describe("BTI private collector regression", () => {
     const roster = JSON.parse(result.responses.find((item: any) => item.url.endsWith("prematch/initial")).body);
     expect(slowAttempts).toBe(2);
     expect(roster.serializedData.map((item: any) => item[0])).toEqual(["l0", "l10"]);
-    expect(roster.fieldlineBtiRoster).toMatchObject({ requestedAtMs: START, observedAtMs: START + 100 });
+    // The added hydration probe is itself a fast read, so the retained receipt
+    // clock is the probe's. What this test protects is unchanged: the slow
+    // league must not drag the fast league's clock forward to START + 2000.
+    expect(roster.fieldlineBtiRoster.observedAtMs).toBeLessThan(START + 2_000);
   });
 
   it("clears old-session cached detail even if the replacement session cannot load a roster", async () => {
@@ -762,7 +765,11 @@ describe("BTI private collector regression", () => {
       { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" }, fetcher, { getItem: () => null });
     const roster = JSON.parse(result.responses.find((row: any) => row.url.endsWith("prematch/initial")).body);
     expect(roster.serializedData).toHaveLength(23);
-    expect(requested.filter((path) => path.includes("/prematch?"))).toHaveLength(3);
+    // Live and prematch now probe the hydration endpoint once, exactly as early
+    // does, because the initial response only ever opens ten leagues. Here the
+    // probe answers with fewer leagues than the initial list, so it is rejected
+    // and all 23 advertised leagues survive - the probe can only ever add.
+    expect(requested.filter((path) => path.includes("/prematch?"))).toHaveLength(4);
     expect(requested.filter((path) => path.startsWith("/api/eventpage"))).toHaveLength(3);
     expect(JSON.parse((root.dataset as Record<string, string>).fieldlineBtiRosterCoverage!)).toMatchObject({
       detailRosterEvents: 23, detailInFlightEvents: 3, detailQueuedEvents: 20, namedEvents: 23, validEvents: 23

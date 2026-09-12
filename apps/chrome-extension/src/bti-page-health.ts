@@ -84,14 +84,21 @@ function parseRosterCoverage(value: unknown): string | null {
     "detailInFlightEvents", "detailOldestReceiptAgeMs", "detailNearTtlMs", "detailDistantTtlMs",
     "detailDueEvents", "detailDeferredEvents", "detailRetainedEventCap", "detailQueueCap",
     "detailOverCapEvents", "requestStatus", "requestRetryInMs", "nativeRosterEvents", "nativePrematchEvents", "nativeLiveEvents",
-    "nativeDetailEvents", "nativeMarketRows", "nativeSelectionRows", "nativeNumericIds", "nativeMalformedRows"];
+    "nativeDetailEvents", "nativeMarketRows", "nativeSelectionRows", "nativeNumericIds", "nativeMalformedRows",
+    "unnamedEvents", "unnamedWithin24h", "unnamedLater"];
   const booleans = ["detailCoverageComplete", "rosterRefreshFailed", "requestPaused", "authBlocked", "nativeInventoryTruncated", "nativeTypeCountsTruncated"];
-  if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts"].includes(key)) ||
+  if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts", "unnamedShapes"].includes(key)) ||
     !["INITIAL", "HYDRATING", "COMPLETE", "FAILED"].includes(String(candidate.phase))) return null;
   if (booleans.some((key) => candidate[key] !== undefined && typeof candidate[key] !== "boolean")) return null;
   if (candidate.nativeTypeCounts !== undefined && (typeof candidate.nativeTypeCounts !== "string" ||
     candidate.nativeTypeCounts.length > 1024 ||
     !/^(?:[A-Z][A-Z0-9_]{0,23}:\d{1,6}(?:,[A-Z][A-Z0-9_]{0,23}:\d{1,6}){0,31})?$/u.test(candidate.nativeTypeCounts))) return null;
+  // Field-index shapes only ("1.2.3.5:900"), never a value. Bounded like the
+  // native type counts above so a malformed page cannot grow the payload.
+  if (candidate.unnamedShapes !== undefined && (typeof candidate.unnamedShapes !== "string" ||
+    candidate.unnamedShapes.length > 256 ||
+    !/^(?:(?:none|d(?:.d){0,4}):d{1,6}(?:,(?:none|d(?:.d){0,4}):d{1,6}){0,7})?$/u
+      .test(candidate.unnamedShapes))) return null;
   for (const key of allowed.slice(1)) {
     if (key === "detailOldestReceiptAgeMs" && candidate[key] === null) continue;
     const maximum = key === "detailCachedBytes" ? 256 * 1024 * 1024

@@ -120,6 +120,11 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       earlyBatches: 0, earlyDone: 0,
       liveBatches: 0, prematchBatches: 0, liveDone: 0, prematchDone: 0, failed: 0,
       events: 0, namedEvents: 0, timedEvents: 0, marketEvents: 0, validEvents: 0,
+      // Shape only: which fields an unnamed row carries and how far out it
+      // kicks off. 1330 of 2386 discovered events were dropped for having no
+      // name; this says whether those are today's fixtures worth recovering
+      // or compact stubs that deserve dropping. No values, only field names.
+      unnamedEvents: 0, unnamedWithin24h: 0, unnamedLater: 0, unnamedShapes: '',
       detailCachedEvents: 0, detailCachedBytes: 0, detailPendingEvents: 0 } };
   const publishCoverage = () => {
     if (!ownsSession()) return;
@@ -229,16 +234,29 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     }
     const hydrationPath = (ids) => plan.canonicalPath +
       (plan.partition === 'early' ? earlyQuery + '&' : '?') + 'leagueIds=' + ids.join(',');
-    if (plan.partition === 'early' && initial.payload.serializedData.length > 0) {
-      const expanded = initial.payload.serializedData.map(masterId).filter((id) => /^[A-Za-z0-9_-]+$/u.test(id)).slice(0, 10);
+    // Measured 2026-09-12: live and prematch each stopped at exactly ten
+    // leagues while early reached 213, because only early ran this expansion.
+    // BTI therefore published zero live fixtures and only ten of today's
+    // leagues, and not one event it quoted corners on was an event another
+    // book also quoted corners on - the entire BTI x APSPORT corner pairing
+    // was empty for that reason alone. The hydration endpoint answers a
+    // request for ten league ids with the full inventory, which early relies
+    // on. A failed expansion falls back to the initial list for live and
+    // prematch so this can only add leagues; early keeps its fail-closed path.
+    if (initial.payload.serializedData.length > 0) {
+      const identify = plan.partition === 'early' ? masterId : requestId;
+      const expanded = initial.payload.serializedData.map(identify)
+        .filter((id) => /^[A-Za-z0-9_-]+$/u.test(id)).slice(0, 10);
       const inventory = expanded.length > 0 ? await fetchList(hydrationPath(expanded)) : null;
-      if (!inventory || !Array.isArray(inventory.payload?.serializedData)) {
+      const usable = inventory !== null && Array.isArray(inventory.payload?.serializedData) &&
+        inventory.payload.serializedData.length >= initial.payload.serializedData.length;
+      if (usable) initial = inventory;
+      else if (plan.partition === 'early') {
         rosterWorker.coverage.failed += 1;
         rosterWorker.coverage.phase = 'FAILED';
         publishCoverage();
         return null;
       }
-      initial = inventory;
     }
     const leagueIds = [];
     const seenLeagueIds = new Set();
@@ -431,6 +449,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const liveIds = new Set(partitions.flatMap((entry) => entry.payload.serializedData.flatMap((league) =>
     (Array.isArray(league?.[12]) ? league[12] : []).flatMap((event) =>
       event?.[5] === true ? [String(event[0])] : []))));
+  const unnamedShapeCounts = new Map();
   const starts = new Map();
   for (const entry of partitions) {
     const payload = entry?.payload;
@@ -469,12 +488,29 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         if (timed) rosterWorker.coverage.timedEvents += 1;
         if (hasMarkets) rosterWorker.coverage.marketEvents += 1;
         if (named && timed) rosterWorker.coverage.validEvents += 1;
+        if (!named) {
+          rosterWorker.coverage.unnamedEvents += 1;
+          const startMs = Date.parse(String(event?.[3] || ''));
+          if (Number.isFinite(startMs) && startMs - now < 86_400_000) {
+            rosterWorker.coverage.unnamedWithin24h += 1;
+          } else rosterWorker.coverage.unnamedLater += 1;
+          const shape = [1, 2, 3, 5, 8].filter((index) => {
+            const field = event?.[index];
+            return Array.isArray(field) ? field.length > 0
+              : typeof field === 'string' ? field.trim().length > 0 : field !== null && field !== undefined;
+          }).join('.') || 'none';
+          if (!unnamedShapeCounts.has(shape) && unnamedShapeCounts.size >= 8) { /* bounded */ }
+          else unnamedShapeCounts.set(shape, (unnamedShapeCounts.get(shape) || 0) + 1);
+        }
       }
     }
   }
   rosterWorker.coverage.phase = partitions.length === initialPlans.length && partitions.every(Boolean)
     ? 'COMPLETE' : 'FAILED';
   rosterWorker.coverage.events = eventIds.length;
+  rosterWorker.coverage.unnamedShapes = [...unnamedShapeCounts]
+    .sort((left, right) => right[1] - left[1])
+    .map(([shape, count]) => shape + ':' + count).join(',');
   publishCoverage();
   let priorVisits = {};
   try {
