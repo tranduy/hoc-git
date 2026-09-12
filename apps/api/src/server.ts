@@ -522,7 +522,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
    *
    * The actor is built further down, so the sink is bound afterwards.
    */
-  let requestSourceRecovery: ((accountId: string) => void) | null = null;
+  let requestSourceRecovery: ((accountId: string, stage?: "SOFT" | "HARD") => void) | null = null;
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       const freshnessMs = providerFeedPolicies.get(catalog.accountId)?.catalogFreshnessMs ?? 20_000;
@@ -530,7 +530,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       catalogPersister.schedule(`catalog-source|${catalog.provider}|${catalog.category}`, catalog);
     }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }),
     authorityCoordinator: chromeBridgeRegistry.authorityCoordinator, telemetry: pipelineTelemetry,
-    onSourceRecoveryNeeded: (accountId) => requestSourceRecovery?.(accountId),
+    onSourceRecoveryNeeded: (accountId, stage) => requestSourceRecovery?.(accountId, stage ?? "SOFT"),
     onIngestRejected: (envelope, reason) => {
       pipelineTelemetry.recordIngestRejected(chromeBridgeProviderAccountIdForLobby(envelope.lobby), reason);
       if (reason === "NETWORK_BODY_UNAVAILABLE") chromeBridgeControlPlane?.rejectNetworkBody(envelope);
@@ -721,12 +721,12 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     // controller still owns every escalation past it.
     const askedAtMs = new Map<string, number>();
     const minIntervalMs = 60_000;
-    requestSourceRecovery = (accountId: string): void => {
+    requestSourceRecovery = (accountId: string, stage: "SOFT" | "HARD" = "SOFT"): void => {
       const nowMs = Date.now();
       if (nowMs - (askedAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY) < minIntervalMs) return;
       askedAtMs.set(accountId, nowMs);
       try {
-        void automaticSourceRecovery.recover({ accountId, stage: "SOFT", attempt: 1,
+        void automaticSourceRecovery.recover({ accountId, stage, attempt: 1,
           requestedAtMs: nowMs }).catch(() => undefined);
       } catch { /* an event-driven request is best-effort, like the sweep */ }
     };

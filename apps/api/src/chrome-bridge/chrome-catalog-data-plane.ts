@@ -39,7 +39,7 @@ export interface ChromeCatalogDataPlaneOptions {
   /** @deprecated Provider feed policies now own recovery cooldowns. */
   readonly recoveryCooldownMs?: number;
   readonly recoverableAccountIds?: ReadonlySet<string>;
-  readonly onSourceRecoveryNeeded?: (accountId: string) => void;
+  readonly onSourceRecoveryNeeded?: (accountId: string, stage?: "SOFT" | "HARD") => void;
   readonly networkBodyBudget?: NetworkBodyAssemblyBudget;
   readonly authorityCoordinator?: ProviderAuthorityCoordinator;
   readonly telemetry?: PipelineTelemetry;
@@ -113,7 +113,7 @@ export class ChromeCatalogDataPlane {
   readonly #candidatePipelines = new Map<string, CandidateDecodePipeline>();
   readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
   readonly #recoverableAccountIds: ReadonlySet<string>;
-  readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
+  readonly #onSourceRecoveryNeeded: ((accountId: string, stage?: "SOFT" | "HARD") => void) | null;
   readonly #networkBodyBudget: NetworkBodyAssemblyBudget;
   readonly #authorityCoordinator: ProviderAuthorityCoordinator;
   readonly #telemetry: PipelineTelemetry | null;
@@ -304,7 +304,14 @@ export class ChromeCatalogDataPlane {
         // Asking for a fresh baseline is not invalidating: the catalog and its
         // freshness are untouched, and a stale price is never presented as
         // current. Only the wait gets shorter.
-        this.#onSourceRecoveryNeeded?.(update.invalidateAccountId);
+        // A snapshot request cannot rebuild a socket, and this branch exists
+        // precisely because the socket is the thing that is gone. Measured
+        // 2026-09-13: asking for the soft stage here left SABA falling from 53
+        // fixtures to 39 over twenty minutes while it refused another 435
+        // frames for want of the baseline only a new document can produce. The
+        // hard stage reloads that document, bounded by its own five-minute
+        // interval, and the catalog is still not invalidated by any of it.
+        this.#onSourceRecoveryNeeded?.(update.invalidateAccountId, "HARD");
         return this.#reject(envelope, `SABA_SOCKET_INVALIDATION_SHADOWED_BY_DOM:${route.adapter.id}`);
       }
       if (admission.disposition === "CANDIDATE") {
