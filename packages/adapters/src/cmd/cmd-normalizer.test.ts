@@ -239,7 +239,7 @@ describe("normalizeCmdCatalog", () => {
       ]);
   });
 
-  it("keeps SABA zero-handicap tolerance out of the CMD normalization path", () => {
+  it("reads a CMD level handicap as the real line it is", () => {
     const zero = { ...structuredClone(record), groups: [{ betTypeIds: ["1"], labels: ["0"], odds: [
       { marketOddsId: "cmd-zero", priceText: "0.82", status: null,
         greyedOut: "false", lineText: "0" },
@@ -249,10 +249,45 @@ describe("normalizeCmdCatalog", () => {
     const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
       timezoneOffsetMinutes: 480, sequence: 8 };
 
-    expect(normalizeObservedFootballCatalog("CMD", [zero], options).markets).toEqual([]);
+    // Measured 2026-09-12: 411 live groups of exactly this shape, and SBOBET,
+    // APSPORT and BTI all published a 0 handicap on the same fixtures.
+    expect(normalizeObservedFootballCatalog("CMD", [zero], options).markets.map(
+      ({ providerMarketId, marketType, line }) => [providerMarketId, marketType, line]))
+      .toEqual([["cmd-zero", "FT_AH", "0"]]);
     expect(observeNativeCmdMarkets("CMD", [zero], options)).toEqual([
-      expect.objectContaining({ providerMarketId: "cmd-zero", disposition: "EXCLUDED",
-        reason: "INVALID_TWO_WAY_SHAPE" })
+      expect.objectContaining({ providerMarketId: "cmd-zero", disposition: "NORMALIZED",
+        reason: "CANONICAL_MARKET_MAPPED" })
+    ]);
+  });
+
+  it("still refuses a CMD handicap that names no line at all", () => {
+    const noLine = { ...structuredClone(record), groups: [{ betTypeIds: ["1"], labels: ["0"], odds: [
+      { marketOddsId: "cmd-noline", priceText: "0.82", status: null, greyedOut: "false" },
+      { marketOddsId: "cmd-noline", priceText: "-0.94", status: null, greyedOut: "false" }
+    ] }] };
+    const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 8 };
+
+    // Accepting a level line must not become accepting an absent one.
+    expect(normalizeObservedFootballCatalog("CMD", [noLine], options).markets).toEqual([]);
+    expect(observeNativeCmdMarkets("CMD", [noLine], options)).toEqual([
+      expect.objectContaining({ disposition: "EXCLUDED", reason: "UNSUPPORTED_TWO_WAY_LINE" })
+    ]);
+  });
+
+  it("reports a market CMD closed as closed, not as a malformed shape", () => {
+    const closed = { ...structuredClone(record), groups: [{ betTypeIds: ["1"], labels: ["-999"], odds: [
+      { marketOddsId: "cmd-shut", priceText: "-999", status: null, greyedOut: "false", lineText: "-999" },
+      { marketOddsId: "cmd-shut", priceText: "-999", status: null, greyedOut: "false", lineText: null }
+    ] }] };
+    const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 8 };
+
+    // A shut market has no price to take. It must stay out of the catalog, and
+    // it must not be counted as a decoder fault while it is out.
+    expect(normalizeObservedFootballCatalog("CMD", [closed], options).markets).toEqual([]);
+    expect(observeNativeCmdMarkets("CMD", [closed], options)).toEqual([
+      expect.objectContaining({ disposition: "EXCLUDED", reason: "NATIVE_MARKET_CLOSED" })
     ]);
   });
 
@@ -273,7 +308,7 @@ describe("normalizeCmdCatalog", () => {
       { marketOddsId: "saba-invalid", priceText: "-0.94", status: null,
         greyedOut: "false", lineText: "+0.5" }
     ]]
-  ] as const)("rejects SABA handicap evidence with %s", (_label, odds) => {
+  ] as const)("rejects SABA handicap evidence with %s", (label, odds) => {
     const malformed: CmdCatalogInputRecord = { ...structuredClone(record), groups: [{
       betTypeIds: ["1"], labels: ["0"], odds
     }] };
@@ -283,8 +318,11 @@ describe("normalizeCmdCatalog", () => {
     const normalized = normalizeObservedFootballCatalog("SABA", [malformed], options);
     expect(normalized.markets).toEqual([]);
     expect(normalized.quotes).toEqual([]);
+    // Each refusal now names itself, so a fixture that stops resolving its
+    // market id is no longer reported as an unsupported line.
     expect(observeNativeCmdMarkets("SABA", [malformed], options)).toEqual([
-      expect.objectContaining({ disposition: "EXCLUDED", reason: "INVALID_TWO_WAY_SHAPE" })
+      expect.objectContaining({ disposition: "EXCLUDED",
+        reason: label === "mismatched IDs" ? "NATIVE_MARKET_ID_NOT_EXACT" : "UNSUPPORTED_TWO_WAY_LINE" })
     ]);
   });
 
@@ -618,9 +656,11 @@ describe("normalizeCmdCatalog", () => {
   it("keeps valid markets when another market in the same event is invalid", () => {
     const mixed: CmdCatalogInputRecord = { ...structuredClone(record), groups: [
       {
-        betTypeIds: ["1"], labels: ["0"], odds: [
-          { marketOddsId: "invalid-ah", priceText: "0.80", status: null, greyedOut: "false", lineText: "0" },
-          { marketOddsId: "invalid-ah", priceText: "-0.90", status: null, greyedOut: "false", lineText: null }
+        // A level handicap is valid now, so the bad market here is one whose
+        // two selections do not resolve to a single native market id.
+        betTypeIds: ["1"], labels: ["0.5"], odds: [
+          { marketOddsId: "invalid-ah-a", priceText: "0.80", status: null, greyedOut: "false", lineText: "0.5" },
+          { marketOddsId: "invalid-ah-b", priceText: "-0.90", status: null, greyedOut: "false", lineText: null }
         ]
       },
       structuredClone(record.groups[1]!)

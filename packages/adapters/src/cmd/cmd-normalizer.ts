@@ -448,16 +448,43 @@ export function observeNativeCmdMarkets(
       const providerMarketId = uniqueIds.length === 1 ? uniqueIds[0]! : fallbackId;
       const semantics = classified === null ? null : cmdGroupSemantics(group, classified.family, provider);
       const marketLine = semantics === null || semantics.linePolicy === "NONE" ? null : semantics.isHandicap
-        ? canonicalHomeHandicap(group.odds, provider === "SABA") : line(group.labels);
+        // A level handicap is a real Asian line, not a missing one. CMD was
+        // held to a stricter rule than SABA with nothing recorded for why, and
+        // it cost 411 groups on the live book (measured 2026-09-12), every one
+        // of them carrying two valid Malay prices with the explicit 0 on
+        // exactly one side - the same evidence shape SABA is already trusted
+        // on. Of their 263 fixtures, SBOBET published a 0 handicap on 75,
+        // APSPORT on 80 and BTI on 51, so the level line is genuinely on offer
+        // there. A group with no line on either side still resolves to nothing
+        // and is still refused.
+        ? canonicalHomeHandicap(group.odds, provider === "SABA" || provider === "CMD") : line(group.labels);
       const resultMarket = semantics !== null && (footballResultMarketSpec(semantics.marketType) !== null ||
         provider === "CMD" && footballCategoricalMarketSpec(semantics.marketType) !== null);
       const expectedSelections = semantics?.selections.length ?? 2;
       const validResultIds = group.odds.flatMap((odd, index) => validResultPrice(odd, semantics?.rawFormat)
         ? [odd.selectionId ?? `${providerMarketId}:${semantics?.selections[index]}`] : []);
-      const validShape = semantics !== null && exactMarketId(group, expectedSelections) !== null &&
-        (semantics.linePolicy === "NONE" || isSupportedFootballTwoWayLine(marketLine)) &&
+      // One reason for three different refusals told us a group was rejected
+      // without telling us what to fix. Measured 2026-09-12 on the live book,
+      // CMD lost 2,951 groups here - native types 7, 8 and FH:2 among them -
+      // and there was no way to tell a market id that did not resolve from a
+      // line the two-way rules do not cover from prices that did not validate.
+      // CMD closes a market by writing -999 into its line and both prices.
+      // Those rows were reported as a malformed shape, which reads as a decoder
+      // fault and buried the real gap: 1,105 of them arrived as an unsupported
+      // line and 1,450 as invalid prices on 2026-09-12, all of them simply shut.
+      // One shut selection shuts the market: a two-way price needs both sides.
+      // -999 is CMD's own sentinel and can never be a real price, in Malay
+      // (|price| <= 1) or decimal (> 1), so this cannot catch a live market.
+      const shut = (value: unknown): boolean => String(value ?? "").trim() === "-999";
+      const nativeClosed = group.odds.some((odd) => shut(odd.priceText) || shut(odd.lineText)) ||
+        group.labels.some(shut);
+      const exactNativeId = semantics !== null && exactMarketId(group, expectedSelections) !== null;
+      const supportedLine = semantics !== null &&
+        (semantics.linePolicy === "NONE" || isSupportedFootballTwoWayLine(marketLine));
+      const validSelectionPrices = semantics !== null &&
         (resultMarket || semantics.rawFormat !== undefined ? validResultIds.length > 0 && new Set(validResultIds).size === validResultIds.length
           : group.odds.every((odd) => validMalay(odd.priceText)));
+      const validShape = exactNativeId && supportedLine && validSelectionPrices;
       const threeWay = group.betTypeIds.length === 1 && (nativeType === "5" ||
         provider === "CMD" && nativeType === "FH:5" || provider === "SABA" && nativeType === "15");
       const disposition: NativeMarketObservation["disposition"] = !comparableEvent || unsupportedPeriod || group.normalizationBlockReason !== undefined ||
@@ -470,7 +497,10 @@ export function observeNativeCmdMarkets(
         : resultMarket && !validShape && semantics.rawFormat === undefined && group.odds.every(odd => odd.priceFormat === undefined) ? "NATIVE_ODDS_FORMAT_UNPROVEN"
         : threeWay && !resultMarket ? "NATIVE_RESULT_OUTCOME_UNPROVEN"
         : semantics === null ? "NATIVE_TYPE_UNMAPPED"
-        : !validShape ? "INVALID_TWO_WAY_SHAPE" : "CANONICAL_MARKET_MAPPED";
+        : nativeClosed && !validShape ? "NATIVE_MARKET_CLOSED"
+        : !exactNativeId ? "NATIVE_MARKET_ID_NOT_EXACT"
+        : !supportedLine ? "UNSUPPORTED_TWO_WAY_LINE"
+        : !validSelectionPrices ? "INVALID_SELECTION_PRICES" : "CANONICAL_MARKET_MAPPED";
       const canonicalOutcomes = semantics?.selections ?? ["OUTCOME_1", "OUTCOME_2"];
       const rawFormat = semantics?.rawFormat ?? (semantics !== null && !resultMarket && group.normalizationBlockReason !== "NATIVE_MR_ODDS_UNPROVEN" ? "MALAY" : undefined);
       observations.push({ provider, category: "FOOTBALL",
@@ -560,7 +590,9 @@ export function normalizeObservedFootballCatalog(
         continue;
       }
       const marketLine = semantics.linePolicy === "NONE" ? null
-        : semantics.isHandicap ? canonicalHomeHandicap(group.odds, provider === "SABA") : line(group.labels);
+        : semantics.isHandicap
+          // Same level-handicap evidence as the observation path above.
+          ? canonicalHomeHandicap(group.odds, provider === "SABA" || provider === "CMD") : line(group.labels);
       const validOdds = group.odds.flatMap((odd, index) => semantics.rawFormat === undefined || validResultPrice(odd, semantics.rawFormat)
         ? [{ odd, index }] : []);
       const pricesValid = semantics.rawFormat !== undefined ? validOdds.length > 0 : group.odds.every((odd) => validMalay(odd.priceText));

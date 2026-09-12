@@ -307,13 +307,15 @@ describe("CMD authenticated native More", () => {
   });
 
   it("retains native main market inventory even when no line-market quote can be normalized", () => {
+    // -999 is how CMD shuts a market. It used to be reported as a malformed
+    // shape, which reads as a decoder fault; the row is simply closed.
     const adapter = new CmdHttpCatalogAdapter();
     const row = [...fixture.owner]; row[40] = -999; row[41] = -999;
     const value = catalog(adapter.decode(envelope(main(row), 1)));
     expect(value.nativeMarketObservations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ nativeType: "1", disposition: "EXCLUDED", reason: "INVALID_TWO_WAY_SHAPE" }),
+      expect.objectContaining({ nativeType: "1", disposition: "EXCLUDED", reason: "NATIVE_MARKET_CLOSED" }),
       expect.objectContaining({ nativeType: "MAIN:2", disposition: "NORMALIZED" }),
-      expect.objectContaining({ nativeType: "FH:2", disposition: "EXCLUDED", reason: "INVALID_TWO_WAY_SHAPE" })
+      expect.objectContaining({ nativeType: "FH:2", disposition: "EXCLUDED", reason: "NATIVE_MARKET_CLOSED" })
     ]));
     expect(value.markets).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerMarketId: "25403104:native:MAIN:2", marketType: "FT_ODD_EVEN" })
