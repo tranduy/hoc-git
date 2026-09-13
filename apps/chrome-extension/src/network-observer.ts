@@ -166,7 +166,23 @@ const APSPORT_DETAIL_MARKET_GROUPS = [1] as const;
 // and each restart reset detail coverage from 72 walked events back to single
 // digits. Add 4 (corners) or 9 (cards) to switch it back on; the derivation,
 // reconnect and read-only guarantees below still hold.
-const APSPORT_HELD_MARKET_GROUPS: readonly number[] = [];
+// Measured 2026-09-13: the detail endpoint returns no corner book at all for a
+// fixture that has not kicked off - 43 market types on a fixture thirty hours
+// out, corner prices for that same fixture on a competitor reading the same
+// provider, and corners only on live fixtures. Group ids are ignored there, the
+// extra flag changes nothing over nineteen probes and the other-lines flag
+// returns fewer markets, so the corner book is simply not on that endpoint.
+// It is on the mg/4 socket the page opens when a person views the Corners tab.
+//
+// Holding that socket open continuously is what destabilised the worker before:
+// 15,814 frames sharing the debugger session the roster fetch needs, and the
+// worker restarting every two or three minutes. Nothing needs it open
+// continuously - a corner price on a prematch fixture stays usable for minutes.
+// Open it for a short window, harvest, close, and leave it shut far longer than
+// it was open. That is less traffic than a person browsing the tab.
+const APSPORT_HELD_MARKET_GROUPS: readonly number[] = [4];
+const APSPORT_HOLD_OPEN_MS = 20_000;
+const APSPORT_HOLD_CLOSED_MS = 240_000;
 const APSPORT_HELD_SOCKET_KEY = "__fieldline_ap_group_sockets__";
 // The detail walk is the only source of corner and card books. Confining it
 // to a six-hour window kept those prices fresh - p50 12-64s against 240s for
@@ -1238,6 +1254,7 @@ export class NetworkObserver {
   readonly #apsportPageRequestTails = new Map<string, Promise<void>[]>();
   readonly #apsportLaneCursors = new Map<string, number>();
   readonly #apsportDetailCoverage = new Map<string, ApsportDetailCoverage>();
+  readonly #apsportHoldWindows = new Map<string, { open: boolean; changedAtMs: number }>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
   readonly #activeKsportStreams = new Map<string, string>();
@@ -2448,8 +2465,16 @@ export class NetworkObserver {
    * URLs are derived from a live mg/1 socket so host, language and any
    * p/u prefix follow the provider instead of being pinned here. */
   #holdApsportGroupSockets(source: ObservedSource): void {
+    if (APSPORT_HELD_MARKET_GROUPS.length === 0) return;
     const template = this.#apsportRequestTemplates.get(source.sourceId);
     if (template === undefined || !this.#apsportTemplateIsCurrent(source, template)) return;
+    const nowMs = this.#now();
+    const window = this.#apsportHoldWindows.get(source.sourceId);
+    const shouldOpen = window === undefined || (window.open
+      ? false
+      : nowMs - window.changedAtMs >= APSPORT_HOLD_CLOSED_MS);
+    const shouldClose = window?.open === true && nowMs - window.changedAtMs >= APSPORT_HOLD_OPEN_MS;
+    if (!shouldOpen && !shouldClose) return;
     const main = [...this.#webSockets.values()].find((socket) =>
       socket.source.sourceId === source.sourceId && socket.closing !== true &&
       this.#isSourceGenerationCurrent(source.sourceId, socket.sourceGeneration) &&
@@ -2468,13 +2493,23 @@ export class NetworkObserver {
     if (targets.length === 0) return;
     const binding = this.#mainWorldContexts.get(source.tabId)?.get(template.frameId);
     if (binding === undefined || binding.sessionId !== template.sessionId) return;
-    const expression = `(() => { const w = window; const k = ${JSON.stringify(APSPORT_HELD_SOCKET_KEY)};`
-      + ` w[k] = w[k] || {}; let opened = 0;`
-      + ` for (const url of ${JSON.stringify(targets)}) {`
-      + `   const held = w[k][url];`
-      + `   if (held && (held.readyState === 0 || held.readyState === 1)) continue;`
-      + `   try { w[k][url] = new WebSocket(url); opened += 1; } catch (e) { }`
-      + ` } return opened; })()`;
+    const expression = shouldClose
+      ? `(() => { const w = window; const k = ${JSON.stringify(APSPORT_HELD_SOCKET_KEY)};`
+        + ` const held = w[k] || {}; let closed = 0;`
+        + ` for (const url of ${JSON.stringify(targets)}) {`
+        + `   const socket = held[url];`
+        + `   if (!socket || socket.readyState > 1) continue;`
+        + `   try { socket.close(); closed += 1; } catch (e) { }`
+        + `   delete held[url];`
+        + ` } return closed; })()`
+      : `(() => { const w = window; const k = ${JSON.stringify(APSPORT_HELD_SOCKET_KEY)};`
+        + ` w[k] = w[k] || {}; let opened = 0;`
+        + ` for (const url of ${JSON.stringify(targets)}) {`
+        + `   const held = w[k][url];`
+        + `   if (held && (held.readyState === 0 || held.readyState === 1)) continue;`
+        + `   try { w[k][url] = new WebSocket(url); opened += 1; } catch (e) { }`
+        + ` } return opened; })()`;
+    this.#apsportHoldWindows.set(source.sourceId, { open: shouldOpen, changedAtMs: nowMs });
     void this.#withFrameCommandTimeout(binding.sessionId === undefined
       ? this.#sendCommand(source.tabId, "Runtime.evaluate",
         { expression, contextId: binding.contextId, returnByValue: true })

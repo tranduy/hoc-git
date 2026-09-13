@@ -3629,11 +3629,70 @@ describe("NetworkObserver", () => {
     await observer.maintain(apsport);
 
     const keeper = evaluated.find((expression) => expression.includes("__fieldline_ap_group_sockets__"));
-    // APSPORT_HELD_MARKET_GROUPS is empty: measured, the held sockets cost more
-    // worker stability than the corners they returned. Re-adding a group must
-    // fail this test on purpose, so whoever does it restores the URL-derivation
-    // and no-send assertions this replaced.
-    expect(keeper).toBeUndefined();
+    // The corner book is not on the detail endpoint at all for a fixture that
+    // has not kicked off, so this socket is the only way to it. It is held on a
+    // duty cycle rather than continuously: holding it open is what cost worker
+    // stability before.
+    expect(keeper).toBeDefined();
+    // Derived from the page's own main socket, same origin, corner group, both
+    // tranches. Nothing is invented.
+    expect(keeper).toContain("wss://spws.agenate.com/ln/en/s/1/mg/4/tr/0");
+    expect(keeper).toContain("wss://spws.agenate.com/ln/en/s/1/mg/4/tr/1");
+    expect(keeper).not.toContain("/mg/1/");
+    // Read-only: the keeper opens sockets and never sends on them.
+    expect(keeper).not.toContain(".send(");
+
+    // A second pass inside the open window must not re-evaluate anything.
+    const openedCount = evaluated.length;
+    await observer.maintain(apsport);
+    expect(evaluated).toHaveLength(openedCount);
+  });
+
+  it("closes the APSPORT corner socket again instead of holding it open", async () => {
+    const evaluated: string[] = [];
+    let nowMs = 1_700_000_000_000;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string") {
+        evaluated.push(params.expression);
+      }
+      return method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+        : { result: { value: 0 } };
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: async () => undefined,
+      now: () => nowMs });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:8", tabId: 8 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 92, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+    await observer.handleEvent(apsport, "Network.webSocketCreated", {
+      requestId: "ws-main", url: "wss://spws.agenate.com/ln/en/s/1/mg/1/tr/1"
+    });
+
+    await observer.maintain(apsport);
+    const keepers = () => evaluated.filter((e) => e.includes("__fieldline_ap_group_sockets__"));
+    expect(keepers()).toHaveLength(1);
+    expect(keepers()[0]).toContain("new WebSocket");
+
+    nowMs += 21_000;
+    await observer.maintain(apsport);
+    expect(keepers()).toHaveLength(2);
+    expect(keepers()[1]).toContain(".close()");
+    expect(keepers()[1]).not.toContain("new WebSocket");
+
+    // And it stays shut for far longer than it was open.
+    nowMs += 60_000;
+    await observer.maintain(apsport);
+    expect(keepers()).toHaveLength(2);
+    nowMs += 200_000;
+    await observer.maintain(apsport);
+    expect(keepers()).toHaveLength(3);
+    expect(keepers()[2]).toContain("new WebSocket");
   });
 
   it("bounds concurrent APSPORT detail probes in the authenticated provider page", async () => {
