@@ -40,6 +40,15 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly recoveryCooldownMs?: number;
   readonly recoverableAccountIds?: ReadonlySet<string>;
   readonly onSourceRecoveryNeeded?: (accountId: string, stage?: "SOFT" | "HARD") => void;
+  /**
+   * The provider transport stopped producing a baseline while the book keeps
+   * reading. Deliberately not the recovery path: routing this through it on
+   * 2026-09-13 dragged SABA into SOFT_RECOVERY and took its prices with it -
+   * 437 fixtures, a catalog 21 minutes stale, zero quote changes a minute
+   * where it had been making 1,500. Losing the prices is worse than missing
+   * the fixtures, so this asks the page to reload and touches nothing else.
+   */
+  readonly onTransportStarved?: (accountId: string, sourceId: string) => void;
   readonly networkBodyBudget?: NetworkBodyAssemblyBudget;
   readonly authorityCoordinator?: ProviderAuthorityCoordinator;
   readonly telemetry?: PipelineTelemetry;
@@ -114,6 +123,7 @@ export class ChromeCatalogDataPlane {
   readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
   readonly #recoverableAccountIds: ReadonlySet<string>;
   readonly #onSourceRecoveryNeeded: ((accountId: string, stage?: "SOFT" | "HARD") => void) | null;
+  readonly #onTransportStarved: ((accountId: string, sourceId: string) => void) | null;
   readonly #networkBodyBudget: NetworkBodyAssemblyBudget;
   readonly #authorityCoordinator: ProviderAuthorityCoordinator;
   readonly #telemetry: PipelineTelemetry | null;
@@ -132,6 +142,7 @@ export class ChromeCatalogDataPlane {
     this.#publish = options.publish ?? null;
     this.#recoverableAccountIds = options.recoverableAccountIds ?? DEFAULT_RECOVERABLE_ACCOUNTS;
     this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
+    this.#onTransportStarved = options.onTransportStarved ?? null;
     this.#feeds = options.feedRegistry ?? new ProviderFeedRegistry({ now: this.#now });
     this.#networkBodyBudget = options.networkBodyBudget ?? new NetworkBodyAssemblyBudget({ now: this.#now });
     this.#authorityCoordinator = options.authorityCoordinator ?? new ProviderAuthorityCoordinator();
@@ -311,7 +322,13 @@ export class ChromeCatalogDataPlane {
         // frames for want of the baseline only a new document can produce. The
         // hard stage reloads that document, bounded by its own five-minute
         // interval, and the catalog is still not invalidated by any of it.
-        this.#onSourceRecoveryNeeded?.(update.invalidateAccountId, "HARD");
+        // Two different asks. The snapshot keeps the DOM book current and is
+        // free; the reload is the only thing that can rebuild the socket and
+        // costs the page. Neither invalidates the catalog in front of them.
+        this.#onSourceRecoveryNeeded?.(update.invalidateAccountId, "SOFT");
+        if (update.sourceId !== undefined) {
+          this.#onTransportStarved?.(update.invalidateAccountId, update.sourceId);
+        }
         return this.#reject(envelope, `SABA_SOCKET_INVALIDATION_SHADOWED_BY_DOM:${route.adapter.id}`);
       }
       if (admission.disposition === "CANDIDATE") {
