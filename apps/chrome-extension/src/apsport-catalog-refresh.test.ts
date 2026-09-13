@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent, buildApsportPageRequestExpression, collectApsportCatalog,
-  collectApsportEventDetail, eligibleApsportFootballEvent,
+  collectApsportEventDetail, resetApsportExtraFlagForTests, eligibleApsportFootballEvent,
   type ApsportCatalogPageRequest, type ApsportRawEvent } from "./apsport-catalog-refresh.js";
 
 const NOW = Date.parse("2026-08-28T00:00:00.000Z");
@@ -711,5 +711,56 @@ describe("APSPORT extra market groups", () => {
       sleep: async () => undefined, isCurrent: () => true
     });
     expect(result).toBeNull();
+  });
+});
+
+describe("APSPORT extra flag probe", () => {
+  beforeEach(() => { resetApsportExtraFlagForTests(); });
+
+  it("asks the other flag once when a group answers empty, and keeps what works", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const request = async (input: { body: Record<string, unknown> }) => {
+      bodies.push(input.body);
+      const group = Number(input.body.mg);
+      // This provider only fills the extra groups when isExtra is false.
+      const filled = group === 1 || input.body.isExtra === false;
+      return { status: 200, data: [league("Detail", [{ ...event("probe"),
+        "50": filled ? [{ "3": group, "9": [], "10": "Active" }] : [] }])] };
+    };
+    const first = await collectApsportEventDetail({
+      eventId: "probe", leagueId: "league-probe", marketGroups: [1, 4],
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request, sleep: async () => undefined, isCurrent: () => true
+    });
+    expect((first?.["50"] as ApsportRawEvent[]).map((g) => g["3"])).toEqual([1, 4]);
+    expect(bodies.map((b) => [b.mg, b.isExtra])).toEqual([[1, false], [4, true], [4, false]]);
+
+    // Learned: the next fixture asks the working flag straight away.
+    bodies.length = 0;
+    await collectApsportEventDetail({
+      eventId: "probe", leagueId: "league-probe", marketGroups: [1, 4],
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request, sleep: async () => undefined, isCurrent: () => true
+    });
+    expect(bodies.map((b) => [b.mg, b.isExtra])).toEqual([[1, false], [4, false]]);
+  });
+
+  it("stops probing when neither flag ever fills the group", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const request = async (input: { body: Record<string, unknown> }) => {
+      bodies.push(input.body);
+      return { status: 200, data: [league("Detail", [{ ...event("dry"),
+        "50": Number(input.body.mg) === 1 ? [{ "3": 3, "9": [], "10": "Active" }] : [] }])] };
+    };
+    for (let index = 0; index < 30; index += 1) {
+      await collectApsportEventDetail({
+        eventId: "dry", leagueId: "league-dry", marketGroups: [1, 4],
+        template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+        request, sleep: async () => undefined, isCurrent: () => true
+      });
+    }
+    // 24 probes at most, then it settles and asks once per group.
+    expect(bodies.filter((b) => Number(b.mg) === 4).length).toBeLessThanOrEqual(30 + 24);
+    expect(bodies.slice(-2).map((b) => [b.mg, b.isExtra])).toEqual([[1, false], [4, true]]);
   });
 });

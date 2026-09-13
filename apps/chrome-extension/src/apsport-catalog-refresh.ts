@@ -351,9 +351,33 @@ function compareDetailPriority(left: ApsportRawEvent, right: ApsportRawEvent): n
   return leftStartAtMs - rightStartAtMs;
 }
 
+/**
+ * Corners and cards are asked for under a flag whose correct value nobody
+ * recorded: "isExtra" was a hardcoded false with no test, no note and no other
+ * mention in the repo, and 475 fixtures came back 100% with main markets, 11%
+ * with corners and 1% with cards. Rather than swap one guess for another, ask
+ * the provider: while nothing is known, a group that answers empty is asked
+ * once more under the other flag, and the first time that difference shows up
+ * it is remembered for the rest of the session. The probe budget is small
+ * because the provider answers 429 beyond three lanes.
+ */
+const extraFlagState = { preferred: true, learned: false, probesLeft: 24, gained: 0 };
+export function apsportExtraFlagShape(): string {
+  return `AP_EXTRA[flag:${extraFlagState.preferred};learned:${extraFlagState.learned};` +
+    `probes:${extraFlagState.probesLeft};gained:${extraFlagState.gained}]`;
+}
+export function resetApsportExtraFlagForTests(): void {
+  extraFlagState.preferred = true; extraFlagState.learned = false;
+  extraFlagState.probesLeft = 24; extraFlagState.gained = 0;
+}
+function groupMarketCount(detailed: ApsportRawEvent | undefined): number {
+  return Array.isArray(detailed?.["50"]) ? (detailed["50"] as unknown[]).length : 0;
+}
+
 async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
   "template" | "request" | "sleep" | "isCurrent" | "maxAttempts">,
-  rawEvent: ApsportRawEvent, marketGroup = 1): Promise<ApsportCatalogPageResponse | null> {
+  rawEvent: ApsportRawEvent, marketGroup = 1,
+  isExtra = marketGroup !== 1): Promise<ApsportCatalogPageResponse | null> {
   const id = eventId(rawEvent);
   if (id === null) return null;
   const attempts = options.maxAttempts ?? maxDetailAttempts;
@@ -368,8 +392,7 @@ async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
         // with main markets, 11% with corners and 1% with cards. Corners and
         // cards are the provider's extra books, and every group was being asked
         // for as if it were the main one.
-        body: { si: 1, li: rawEvent["1"], isExtra: marketGroup !== 1, opl: false,
-          mg: marketGroup } });
+        body: { si: 1, li: rawEvent["1"], isExtra, opl: false, mg: marketGroup } });
     } catch {
       response = { status: 0, data: null };
     }
@@ -433,16 +456,36 @@ export async function collectApsportEventDetail(
   for (const marketGroup of marketGroups) {
     if (!options.isCurrent()) return null;
     const response = await detailResponse(options, { "2": id,
-      ...(leagueId === null ? {} : { "1": leagueId }) }, marketGroup);
+      ...(leagueId === null ? {} : { "1": leagueId }) }, marketGroup,
+      marketGroup !== 1 ? extraFlagState.preferred : false);
     // A group that could not be reached is unknown, not empty: publishing the
     // rest would delete corner books this fixture really has. A group that
     // answered and simply carries nothing is an ordinary absence, and throwing
     // away the main markets over it is how a fixture with no corners ended up
     // with no book at all.
     if (response?.status !== 200 || !options.isCurrent()) return null;
-    const detailed: ApsportRawEvent | undefined = apsportEventsFromProviderData(response.data)
-      .find((item) => eventId(item) === id);
-    if (detailed === undefined || validateApsportDetail(detailed)?.eventId !== id) {
+    const usable = (value: ApsportRawEvent | undefined): ApsportRawEvent | undefined =>
+      value !== undefined && validateApsportDetail(value)?.eventId === id ? value : undefined;
+    let detailed = usable(apsportEventsFromProviderData(response.data)
+      .find((item) => eventId(item) === id));
+    if (marketGroup !== 1 && groupMarketCount(detailed) === 0 &&
+      !extraFlagState.learned && extraFlagState.probesLeft > 0) {
+      extraFlagState.probesLeft -= 1;
+      const other = await detailResponse(options, { "2": id,
+        ...(leagueId === null ? {} : { "1": leagueId }) }, marketGroup, !extraFlagState.preferred);
+      if (other?.status === 200 && options.isCurrent()) {
+        const alternative = usable(apsportEventsFromProviderData(other.data)
+          .find((item) => eventId(item) === id));
+        if (groupMarketCount(alternative) > 0) {
+          extraFlagState.preferred = !extraFlagState.preferred;
+          extraFlagState.learned = true;
+          extraFlagState.gained += 1;
+          detailed = alternative;
+        }
+      }
+      if (extraFlagState.probesLeft === 0) extraFlagState.learned = true;
+    }
+    if (detailed === undefined) {
       if (merged === null) return null;
       continue;
     }

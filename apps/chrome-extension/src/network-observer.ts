@@ -55,6 +55,7 @@ import { sbobetEarlyRequestFromObserved, sbobetEarlyRequestFromMain, sbobetEarly
   buildSbobetEarlyFetchExpression, type SbobetEarlyRequest } from "./sbobet-early-protocol.js";
 import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent,
   buildApsportPageRequestExpression,
+  apsportExtraFlagShape,
   collectApsportCatalog, collectApsportEventDetail, type ApsportCatalogBatch,
   type ApsportCatalogPageRequest, type ApsportDetailStateUpdate, type ApsportRequestTemplate, type CollectApsportCatalogOptions,
   type CollectApsportEventDetailOptions, validateApsportDetail } from "./apsport-catalog-refresh.js";
@@ -6985,7 +6986,8 @@ export class NetworkObserver {
       // as typed counters so the running API needs no restart to show them.
       const d = this.#wsAttachDiagnostic(source);
       return (`AP_MG[sockets:${d.apCornerSockets};frames:${d.apCornerFramesReceived};` +
-        `parsed:${d.apCornerFramesParsed}] ` + existing).slice(0, 900);
+        `parsed:${d.apCornerFramesParsed}] ` + apsportExtraFlagShape() + ` ` +
+        existing).slice(0, 900);
     }
     if (source.lobby === "BTI") {
       // Say how much collector coverage arrived, so an empty page-health probe
