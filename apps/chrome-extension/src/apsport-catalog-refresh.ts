@@ -377,6 +377,24 @@ const extraFlagState = { preferred: true, learned: false, probesLeft: 24, gained
 // honouring mg again; twelve requests is a price worth paying for that.
 const groupCensus = { eventsLeft: 1, counts: new Map<number, number>(), seen: new Set<number>() };
 const CENSUS_GROUPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const;
+/**
+ * Group ids turned out to be ignored, and the extra flag changed nothing over
+ * nineteen probes. What is left in the request body is "opl", never tested.
+ * The gap it has to explain is exact: a fixture thirty hours out comes back
+ * with 43 market types and no corner book, the same fixture carries corner
+ * prices on a competitor reading the same provider, and a live fixture comes
+ * back with corners. Ask all four flag combinations once, on prematch
+ * fixtures only, and report how many markets and how many corner-ish groups
+ * each answered with. Counts only.
+ */
+const bodyCensus = { left: 2, rows: new Map<string, string>() };
+export function apsportBodyCensusShape(): string {
+  if (bodyCensus.rows.size === 0) return "AP_BODY[chua-do]";
+  return `AP_BODY[${[...bodyCensus.rows].map(([k, v]) => `${k}:${v}`).join(",")}]`;
+}
+export function resetApsportBodyCensusForTests(): void {
+  bodyCensus.left = 2; bodyCensus.rows.clear();
+}
 export function apsportGroupCensusShape(): string {
   if (groupCensus.counts.size === 0) return "AP_GROUPS[chua-do]";
   return `AP_GROUPS[${[...groupCensus.counts].sort((a, b) => a[0] - b[0])
@@ -400,7 +418,7 @@ function groupMarketCount(detailed: ApsportRawEvent | undefined): number {
 async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
   "template" | "request" | "sleep" | "isCurrent" | "maxAttempts">,
   rawEvent: ApsportRawEvent, marketGroup = 1,
-  isExtra = marketGroup !== 1): Promise<ApsportCatalogPageResponse | null> {
+  isExtra = marketGroup !== 1, otherLines = false): Promise<ApsportCatalogPageResponse | null> {
   const id = eventId(rawEvent);
   if (id === null) return null;
   const attempts = options.maxAttempts ?? maxDetailAttempts;
@@ -415,7 +433,7 @@ async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
         // with main markets, 11% with corners and 1% with cards. Corners and
         // cards are the provider's extra books, and every group was being asked
         // for as if it were the main one.
-        body: { si: 1, li: rawEvent["1"], isExtra, opl: false, mg: marketGroup } });
+        body: { si: 1, li: rawEvent["1"], isExtra, opl: otherLines, mg: marketGroup } });
     } catch {
       response = { status: 0, data: null };
     }
@@ -517,6 +535,25 @@ export async function collectApsportEventDetail(
       String(merged![key]) !== String(detailed![key]))) continue;
     merged = { ...merged, ...detailed,
       "50": [...merged["50"] as unknown[], ...detailed!["50"] as unknown[]] };
+  }
+  if (options.probeMarketGroups === true && merged !== null && bodyCensus.left > 0 &&
+    merged["6"] !== true) {
+    bodyCensus.left -= 1;
+    for (const extra of [false, true]) {
+      for (const other of [false, true]) {
+        if (!options.isCurrent()) break;
+        const response = await detailResponse(options, { "2": id,
+          ...(leagueId === null ? {} : { "1": leagueId }) }, 1, extra, other);
+        if (response?.status !== 200) { bodyCensus.rows.set(`e${Number(extra)}o${Number(other)}`, "err"); continue; }
+        const detailed = apsportEventsFromProviderData(response.data).find((item) => eventId(item) === id);
+        const groups = Array.isArray(detailed?.["50"]) ? detailed["50"] as Record<string, unknown>[] : [];
+        // Native group ids only, so a corner book can be told from a goal book
+        // without recording a single price.
+        const ids = [...new Set(groups.map((g) => Number(g["3"])).filter(Number.isFinite))];
+        bodyCensus.rows.set(`e${Number(extra)}o${Number(other)}`,
+          `${groups.length}/${ids.length}`);
+      }
+    }
   }
   if (options.probeMarketGroups === true && merged !== null && groupCensus.eventsLeft > 0 &&
     !groupCensus.seen.has(Number(id))) {
