@@ -123,7 +123,7 @@ describe("first-read share", () => {
   const plan = (events: readonly { id: string; hoursOut: number }[], nowMs: number) => ({
     revision: 1,
     events: events.map(({ id, hoursOut }) => ({ eventId: id,
-      startAtUtcMs: nowMs + hoursOut * 3_600_000, isLive: hoursOut <= 0 }))
+      startAtUtcMs: nowMs + hoursOut * 3_600_000, isLive: hoursOut <= 0, urgent: false }))
   });
 
   it("gives an unread fixture one slot in three instead of the leftovers", () => {

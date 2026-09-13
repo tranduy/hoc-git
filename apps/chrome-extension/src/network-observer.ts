@@ -6987,6 +6987,12 @@ export class NetworkObserver {
       return (`AP_MG[sockets:${d.apCornerSockets};frames:${d.apCornerFramesReceived};` +
         `parsed:${d.apCornerFramesParsed}] ` + existing).slice(0, 900);
     }
+    if (source.lobby === "BTI") {
+      // Say how much collector coverage arrived, so an empty page-health probe
+      // can be told apart from a collector that published nothing at all.
+      const reported = this.#btiCollectorCoverage.get(source.sourceId);
+      return (`BTI_COV[chars:${reported?.length ?? 0}] ` + existing).slice(0, 900);
+    }
     return source.lobby === "KSPORT" ? (`SBO_PAUSE[${this.#sbobetLastFailureLane};` +
       `status:${this.#sbobetRequestBackoff.lastStatus()};waitMs:${this.#sbobetRequestBackoff.retryInMs()}] ` +
       this.#sbobetDiscoveryText(source.sourceId) + existing).slice(0, 900) : existing;
@@ -7054,15 +7060,26 @@ export class NetworkObserver {
     // only be judged by whether the fixtures appeared - not by whether it
     // found the tab at all.
     const diagnostic = source.lobby === "KSPORT" || source.lobby === "TSPORT" ||
-      source.lobby === "SABA" || source.lobby === "CMD"
+      source.lobby === "SABA" || source.lobby === "CMD" || source.lobby === "BTI"
       ? this.#wsAttachDiagnostic(source) : null;
     const btiPageHealth = source.lobby === "BTI" ? await this.probeBtiPageHealth(source) : null;
+    // A BTI page-health body used to take the place of the WS_ATTACH body
+    // rather than accompany it, and BTI was excluded from the diagnostic
+    // lobbies besides, so catalogShape - the only channel carrying per-lobby
+    // collector counters - never reached the API for this book at all. Send
+    // page health on its own envelope and leave the shape channel open.
+    if (btiPageHealth !== null && diagnostic !== null) {
+      await this.#emit(source, `https://${hostname}/__fieldline_heartbeat__`, "Tab", "TAB_STATE", {
+        encoding: "UTF8", body: JSON.stringify({ kind: "PAGE_HEALTH", ...btiPageHealth })
+      });
+    }
     const webSockets = diagnostic === null ? 0 : [...this.#webSockets.values()].filter((socket) =>
       socket.source.sourceId === source.sourceId && socket.sourceGeneration === diagnostic.sourceGeneration).length;
     await this.#emit(source, `https://${hostname}/__fieldline_heartbeat__`, "Tab", "TAB_STATE", {
       encoding: "UTF8",
-      body: btiPageHealth !== null ? JSON.stringify({ kind: "PAGE_HEALTH", ...btiPageHealth }) :
-        diagnostic === null ? "{}" : JSON.stringify({ kind: "WS_ATTACH",
+      body: diagnostic === null ? (btiPageHealth !== null
+        ? JSON.stringify({ kind: "PAGE_HEALTH", ...btiPageHealth }) : "{}")
+        : JSON.stringify({ kind: "WS_ATTACH",
         ...(source.lobby === "SABA" ? { sabaCollector: {
           nativeReady: this.hasCompleteSabaBaseline(source.sourceId),
           schemaContextReady: (this.#sabaSchemaContexts.get(source.sourceId)?.size ?? 0) > 0,
