@@ -165,3 +165,35 @@ describe("first-read share", () => {
     expect(new Set(order).size).toBe(ids.length);
   });
 });
+
+describe("two books converge on the same first reads", () => {
+  const build = (ids: readonly string[], startsMs: readonly number[], nowMs: number) => {
+    const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, () => nowMs);
+    scheduler.setPlan({ revision: 1, events: ids.map((eventId, index) => ({
+      eventId, startAtUtcMs: startsMs[index]!, isLive: false, urgent: false })) });
+    return scheduler;
+  };
+
+  it("walks unread fixtures in the same order whatever the provider ids are", () => {
+    const nowMs = 1_700_000_000_000;
+    const starts = [nowMs + 20 * 3_600_000, nowMs + 30 * 3_600_000, nowMs + 25 * 3_600_000];
+    // Same three fixtures, ids that sort differently on each book.
+    const left = build(["a1", "a2", "a3"], starts, nowMs);
+    const right = build(["z3", "z2", "z1"], starts, nowMs);
+    // One already-read fixture each, so the first-read share is engaged.
+    left.setPlan({ revision: 2, events: [...["a1", "a2", "a3"].map((eventId, index) => ({
+      eventId, startAtUtcMs: starts[index]!, isLive: false, urgent: false })),
+      { eventId: "a0", startAtUtcMs: nowMs + 3_600_000, isLive: false, urgent: false }] });
+    right.setPlan({ revision: 2, events: [...["z3", "z2", "z1"].map((eventId, index) => ({
+      eventId, startAtUtcMs: starts[index]!, isLive: false, urgent: false })),
+      { eventId: "z0", startAtUtcMs: nowMs + 3_600_000, isLive: false, urgent: false }] });
+    left.completed("a0", nowMs);
+    right.completed("z0", nowMs);
+    const kickoffOf = new Map([["a1", starts[0]], ["a2", starts[1]], ["a3", starts[2]],
+      ["z3", starts[0]], ["z2", starts[1]], ["z1", starts[2]]]);
+    const kickoffs = (order: readonly string[]) => order
+      .filter((id) => kickoffOf.has(id)).map((id) => kickoffOf.get(id));
+    expect(kickoffs(left.sort(["a1", "a2", "a3", "a0"])))
+      .toEqual(kickoffs(right.sort(["z3", "z2", "z1", "z0"])));
+  });
+});

@@ -115,7 +115,19 @@ export function createFootballCollectionScheduler(
       if (unread.size === 0 || unread.size === values.length) return values;
       const ordered: string[] = [];
       const queue = values.filter(id => !unread.has(id));
-      const firstReads = values.filter(id => unread.has(id));
+      // Two books only produce a comparable price when they have both read the
+      // same fixture. Left to the tie-break above, each orders its unread
+      // fixtures by its own provider event id, so they walk different ones:
+      // measured 2026-09-13, APSPORT carried corners on 53 fixtures and BTI on
+      // 79, and the two sets intersected on two. Kickoff time is the one key
+      // both books agree on, so order first reads by it and they converge on
+      // the same fixtures without either being told about the other.
+      const firstReads = values.filter(id => unread.has(id)).sort((a, b) => {
+        const sa = timing(a).start, sb = timing(b).start;
+        const left = typeof sa === "number" && Number.isFinite(sa) ? sa : Infinity;
+        const right = typeof sb === "number" && Number.isFinite(sb) ? sb : Infinity;
+        return left - right || a.localeCompare(b);
+      });
       while (queue.length > 0 || firstReads.length > 0) {
         const wantsFirstRead = ordered.length % 3 === 2 && firstReads.length > 0;
         ordered.push((wantsFirstRead || queue.length === 0 ? firstReads : queue).shift()!);
