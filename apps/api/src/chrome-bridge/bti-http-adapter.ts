@@ -230,7 +230,18 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
         for (const eventId of rawListedEventIds) pending.listedEventIds.add(eventId);
         parts.pending.set(generation.id, pending);
         this.#parts.set(envelope.sourceId, parts);
-        if ([...LIST_PATHS].some((path) => !pending.lists.has(path))) return noteBtiRefusal("awaiting-remaining-list-partitions");
+        // Which partition is missing decides everything about this book.
+        // Measured 2026-09-13: BTI held 805 fixtures and not one of them
+        // inside 24 hours, while its own page was pricing matches kicking
+        // off in seventeen minutes. A commit that waits for all three and
+        // says only that it waited cannot tell a slow partition from one
+        // that never comes.
+        const missing = [...LIST_PATHS].filter((path) => !pending.lists.has(path));
+        if (missing.length > 0) {
+          return noteBtiRefusal(`awaiting-list-${missing
+            .map((path) => path.replace("/api/eventlist/asia/leagues/v2/1/", "").replace(/[/]/gu, "-"))
+            .sort().join("+")}`);
+        }
         const currentEventIds = pending.listedEventIds;
         for (const eventId of parts.details.keys()) {
           if (!currentEventIds.has(eventId)) parts.details.delete(eventId);
