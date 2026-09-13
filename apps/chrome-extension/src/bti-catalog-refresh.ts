@@ -806,6 +806,14 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     const currentWorker = root[detailWorkerKey];
     if (currentWorker && typeof currentWorker.update === 'function') {
       currentWorker.update(nextJob);
+      // Refilling the queue is not the same as having anyone to drain it. A
+      // lane exits when the queue runs dry, and the worker object only retires
+      // once every lane has exited - so while a single slow lane survives, the
+      // other two are gone for good and never restart. Measured 2026-09-13:
+      // BTI sat at 186 events due and 107 queued with one lane in flight, and
+      // every corner price on fixtures three to thirteen hours out was three
+      // hours old, while the tiers either side of them were current.
+      currentWorker.start?.();
     } else {
       // A worker from an older extension build cannot be trusted to own the
       // complete queue. Retire only that incompatible object; current workers
@@ -818,6 +826,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         queue: [],
         activeEventIds: new Set(),
         controllers: new Map(),
+        lanes: 0,
         update(job) {
           this.generation = job.generation;
           this.headers = job.headers;
@@ -847,7 +856,6 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
           root.dataset.fieldlineBtiDetailVisits = JSON.stringify(visits);
         }
       };
-      detailWorker.update(nextJob);
       root[detailWorkerKey] = detailWorker;
       const runDetailLane = async () => {
         while (ownsSession() && !requestsPaused() && root[detailWorkerKey] === detailWorker && detailWorker.queue.length > 0) {
@@ -1056,10 +1064,21 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
           }
         }
       };
-      detailWorker.promise = Promise.all(Array.from({ length: 3 }, () => runDetailLane())).finally(() => {
-        if (root[detailWorkerKey] === detailWorker) delete root[detailWorkerKey];
-        detailWorker.publishCoverage();
-      });
+      detailWorker.start = () => {
+        while (detailWorker.lanes < 3 && detailWorker.queue.length > 0 &&
+          root[detailWorkerKey] === detailWorker && ownsSession() && !requestsPaused()) {
+          detailWorker.lanes += 1;
+          void runDetailLane().catch(() => undefined).finally(() => {
+            detailWorker.lanes -= 1;
+            if (detailWorker.lanes === 0) {
+              if (root[detailWorkerKey] === detailWorker) delete root[detailWorkerKey];
+              detailWorker.publishCoverage();
+            }
+          });
+        }
+      };
+      detailWorker.update(nextJob);
+      detailWorker.start();
     }
     publishCoverage();
     };

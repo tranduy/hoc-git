@@ -927,3 +927,46 @@ describe("BTI league addressing", () => {
     expect(requested.some((path) => /leagueIds=m1(?:,|$)/u.test(path))).toBe(true);
   });
 });
+
+describe("BTI detail lanes", () => {
+  it("puts lanes back to work when the queue refills under a surviving lane", async () => {
+    // A lane exits when the queue runs dry. While one slow lane survives, the
+    // worker object stays, so refilling its queue used to leave the other two
+    // gone for good - the ratchet that left BTI at one lane, 107 queued, and
+    // corner prices three hours old on the tiers in the middle.
+    const root: Record<string, unknown> & { dataset: Record<string, string> } = { dataset: {} };
+    let inFlight = 0;
+    let peak = 0;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const league = (events: unknown[]) => {
+      const value = Array(13).fill(null);
+      value[0] = "L"; value[1] = "League"; value[3] = "L"; value[12] = events;
+      return value;
+    };
+    const named = (id: string) => [id, [["h", { EN: "Home" }], ["a", { EN: "Away" }]],
+      "Home vs Away", "2027-09-07T12:00:00Z", null, false];
+    const ids = Array.from({ length: 9 }, (_unused, index) => `e${index}`);
+    const fetcher = async (path: string) => {
+      if (path.startsWith("/api/eventpage")) {
+        inFlight += 1; peak = Math.max(peak, inFlight);
+        if (path.includes("e0")) await held;
+        inFlight -= 1;
+        return { ok: true, text: async () => JSON.stringify({ data: [] }) };
+      }
+      if (path.includes("/early") || path.includes("/live")) {
+        return { ok: true, text: async () => '{"serializedData":[]}' };
+      }
+      return { ok: true, text: async () => JSON.stringify({ serializedData: [league(ids.map(named))] }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`);
+    await evaluate({ documentElement: root },
+      { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" }, fetcher, { getItem: () => null });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(peak).toBeGreaterThan(1);
+    const worker = root.__fieldlineBtiDetailWorkerV10 as { lanes: number } | undefined;
+    expect(worker?.lanes).toBeGreaterThan(0);
+    release();
+  });
+});
