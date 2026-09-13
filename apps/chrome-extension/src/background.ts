@@ -32,6 +32,7 @@ import { ProviderPageLeaseCoordinator, isRenewableLobby, parseProviderPageLeaseS
   renewExactProviderTab, type RenewableLobby } from "./provider-page-lease.js";
 import { recoverUnexpectedDebuggerDetach } from "./debugger-detach-recovery.js";
 import { reloadAttachedSourceTab } from "./source-tab-reload.js";
+import { lobbyLanguageUrl } from "./lobby-language.js";
 import { sabaSourceControlAction } from "./saba-source-control.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
@@ -735,6 +736,24 @@ async function configureBridgeOnce(): Promise<boolean> {
             await chrome.tabs.reload(attached.tabId);
           }
         }
+      },
+      onLobbyLanguage: async (lobby, language) => {
+        // The tab is the only place the session token lives, so the rewrite
+        // happens here and the token never travels. Same origin, same token,
+        // one parameter moved - which is the difference between changing a
+        // page's language and spending the launch that page was opened with.
+        const attached = registry.list().find((entry) => entry.lobby === lobby);
+        if (attached === undefined) return;
+        const [tab] = await chrome.tabs.query({});
+        void tab;
+        const current = await chrome.tabs.get(attached.tabId).catch(() => undefined);
+        const currentUrl = current?.url;
+        if (typeof currentUrl !== "string") return;
+        const next = lobbyLanguageUrl(attached.lobby, currentUrl, language);
+        if (next === null) return;
+        const recognized = recognizeLobbyTab({ id: attached.tabId, url: next });
+        if (recognized?.lobby !== attached.lobby) return;
+        await chrome.tabs.update(attached.tabId, { url: next });
       },
       onSourceNavigate: async (sourceId, url) => {
         if (sourceId.startsWith("chrome:IM:")) throw new Error("IM_AUTOMATIC_NAVIGATION_DISABLED");

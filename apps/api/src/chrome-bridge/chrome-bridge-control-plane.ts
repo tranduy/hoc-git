@@ -226,6 +226,23 @@ export class ChromeBridgeControlPlane {
     return 0;
   }
 
+  /**
+ * Ask a lobby to read in another language. The worker rewrites its own
+   * URL, so the session token stays inside the extension and is never spent.
+   */
+  setLobbyLanguage(lobby: "SABA" | "IM" | "KSPORT" | "TSPORT" | "BTI" | "CMD",
+    language: "en" | "vi"): number {
+    let sent = 0;
+    for (const source of this.#navigableSources()) {
+      if (source.lobby !== lobby || source.socket.readyState !== 1) continue;
+      const control: ChromeBridgeControlMessage = { version: 1, kind: "SET_LOBBY_LANGUAGE", lobby, language };
+      try { source.socket.send(JSON.stringify(control)); sent += 1; }
+      catch { /* a closed socket is not a language failure */ }
+      break;
+    }
+    return sent;
+  }
+
   reloadSource(sourceId: string, transportStarved = false): number {
     if (this.#sendReload(sourceId, this.#exactSocket(sourceId), transportStarved) === 1) return 1;
     // Re-resolve only after the active attempt. Its synchronous send can close

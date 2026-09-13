@@ -54,6 +54,7 @@ export interface LocalBridgeOptions {
     { readonly kind: "REQUEST_SNAPSHOT" }>, "version" | "kind">) => void | Promise<void>;
   readonly onSourceResync?: (sourceId: string) => void | Promise<void>;
   readonly onSourceReload?: (sourceId: string, transportStarved: boolean) => void | Promise<void>;
+  readonly onLobbyLanguage?: (lobby: string, language: "en" | "vi") => void | Promise<void>;
   /** Identity of the bundle this worker is running, injected at build time. */
   readonly buildIdentity?: string;
   readonly onExtensionReload?: (buildIdentity: string) => void;
@@ -82,6 +83,7 @@ export class LocalBridge {
   readonly #onSnapshotRequest: NonNullable<LocalBridgeOptions["onSnapshotRequest"]>;
   readonly #onSourceResync: (sourceId: string) => void | Promise<void>;
   readonly #onSourceReload: (sourceId: string, transportStarved: boolean) => void | Promise<void>;
+  readonly #onLobbyLanguage: (lobby: string, language: "en" | "vi") => void | Promise<void>;
   readonly #buildIdentity: string | null;
   readonly #onExtensionReload: ((buildIdentity: string) => void) | null;
   readonly #onSourceNavigate: NonNullable<LocalBridgeOptions["onSourceNavigate"]>;
@@ -142,6 +144,7 @@ export class LocalBridge {
     this.#onSourceResync = options.onSourceResync ??
       ((sourceId) => this.#onSnapshotRequest({ sourceId, prematchWindowHours: undefined }));
     this.#onSourceReload = options.onSourceReload ?? (() => undefined);
+    this.#onLobbyLanguage = options.onLobbyLanguage ?? (() => undefined);
     this.#buildIdentity = options.buildIdentity ?? null;
     this.#onExtensionReload = options.onExtensionReload ?? null;
     this.#onSourceNavigate = options.onSourceNavigate ?? (() => undefined);
@@ -408,6 +411,12 @@ export class LocalBridge {
       if (parsed.data.kind === "REQUEST_SNAPSHOT") {
         const { sourceId, prematchWindowHours } = parsed.data;
         this.#enqueueSnapshotRecovery({ sourceId, prematchWindowHours });
+        return;
+      }
+      if (parsed.data.kind === "SET_LOBBY_LANGUAGE") {
+        const { lobby, language } = parsed.data;
+        try { void Promise.resolve(this.#onLobbyLanguage(lobby, language)).catch(() => undefined); }
+        catch { /* a language switch must not interrupt the bridge */ }
         return;
       }
       if (parsed.data.kind === "RELOAD_EXTENSION") {

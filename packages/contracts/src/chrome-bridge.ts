@@ -245,6 +245,20 @@ const ReloadExtensionMessageSchema = z.strictObject({
   buildIdentity: z.string().trim().min(1).max(128).regex(/^sha256:[0-9a-f]{64}$/u)
 });
 
+/**
+ * Switch a lobby's page language in place. The worker rewrites the one
+ * parameter that names the language on the URL it already has and navigates
+ * same-origin, so the session token never leaves the extension and is never
+ * spent - the distinction that decides whether a book survives being sent
+ * somewhere.
+ */
+const SetLobbyLanguageMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("SET_LOBBY_LANGUAGE"),
+  lobby: z.enum(["SABA", "IM", "KSPORT", "TSPORT", "BTI", "CMD"]),
+  language: z.enum(["en", "vi"])
+});
+
 const ReloadSourceMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("RELOAD_SOURCE"),
@@ -363,6 +377,7 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
   SnapshotRequestMessageSchema,
   CollectionPlanMessageSchema,
   ReloadSourceMessageSchema,
+  SetLobbyLanguageMessageSchema,
   ReloadExtensionMessageSchema,
   KeepAliveMessageSchema,
   NavigateSourceMessageSchema,

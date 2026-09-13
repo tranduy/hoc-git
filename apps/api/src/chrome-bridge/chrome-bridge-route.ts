@@ -48,6 +48,10 @@ const FocusSelectionBodySchema = z.strictObject({
 // that lobby is already attached to. Same origin keeps the logged-in session
 // cookies, which is the whole point: re-launching from a single-use token URL
 // instead consumed the token and killed the live session (measured 2026-09-12).
+const LobbyLanguageBodySchema = z.strictObject({
+  lobby: z.enum(["SABA", "IM", "KSPORT", "TSPORT", "BTI", "CMD"]),
+  language: z.enum(["en", "vi"])
+});
 const NavigateLobbyBodySchema = z.strictObject({
   lobby: z.enum(["SABA", "IM", "KSPORT", "TSPORT", "BTI", "CMD"]),
   url: z.string().min(1).max(2048)
@@ -102,6 +106,15 @@ export function registerChromeBridgeRoute(
       }
     });
   }
+  app.post("/api/chrome-bridge/lobby-language", async (request, reply) => {
+    if (!isLoopback(request.ip)) return reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
+    const parsed = LobbyLanguageBodySchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "INVALID_LANGUAGE_REQUEST" });
+    if (options.controlPlane === undefined) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
+    const requested = options.controlPlane.setLobbyLanguage(parsed.data.lobby, parsed.data.language);
+    if (requested < 1) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
+    return reply.code(202).send({ lobby: parsed.data.lobby, language: parsed.data.language, requested });
+  });
   app.post("/api/chrome-bridge/navigate-lobby", async (request, reply) => {
     if (!isLoopback(request.ip)) return reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
     const parsed = NavigateLobbyBodySchema.safeParse(request.body);
