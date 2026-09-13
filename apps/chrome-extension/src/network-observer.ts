@@ -161,15 +161,21 @@ const APSPORT_DETAIL_MARKET_GROUPS = [1, 4, 9] as const;
 // reconnect and read-only guarantees below still hold.
 const APSPORT_HELD_MARKET_GROUPS: readonly number[] = [];
 const APSPORT_HELD_SOCKET_KEY = "__fieldline_ap_group_sockets__";
-// The detail walk is the only source of corner/card books, and it moves at a
-// measured 3.3 events per minute against a provider that answers 429 when
-// pushed harder. Spread over every roster event that is one pass every ~3.2
-// hours, so a fixture kicking off in twenty minutes carried corner prices
-// hours stale. Spending the lanes on fixtures near kick-off instead keeps the
-// window where a price actually moves. Far fixtures keep their main markets:
-// those arrive on the mg/1 socket for every event regardless of this walk.
-const APSPORT_WALK_TIERS: ReadonlySet<string> =
-  new Set(["LIVE", "URGENT", "NEAR", "3_6H", "UNKNOWN"]);
+// The detail walk is the only source of corner and card books. Confining it
+// to a six-hour window kept those prices fresh - p50 12-64s against 240s for
+// main markets - and quietly decided that no fixture further out would ever
+// be asked for its corners at all. Measured 2026-09-13, that left APSPORT
+// carrying corners on 53 of 1,288 fixtures, and the corner arbitrage this
+// project exists to find sits on fixtures ten hours to three days out: of
+// seven such pairs on a competitor screen that day, five were outside the
+// window and none of them could form here.
+//
+// Widening it does not cost the near window, because the scheduler already
+// orders by refresh interval and reserves exactly one slot per batch for a
+// distant fixture. Near fixtures keep their priority; far ones get their
+// first book at one slot a batch and then refresh at their own hourly rate.
+export const APSPORT_WALK_TIERS: ReadonlySet<string> =
+  new Set(["LIVE", "URGENT", "NEAR", "3_6H", "6_13H", "13_24H", "24_72H", "UNKNOWN"]);
 const APSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
 const APSPORT_ROSTER_COLLAPSE_FLOOR = 20;
 const APSPORT_MIN_RETAINED_ROSTER_SHARE = 0.9;
