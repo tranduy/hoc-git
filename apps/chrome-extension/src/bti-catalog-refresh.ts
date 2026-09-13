@@ -11,6 +11,12 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     doneEvents: 0, doneWithin24h: 0, doneLive: 0, donePrematch: 0, doneEarly: 0,
     gates: { live: '', prematch: '', early: '' },
     bodyLiveKb: 0, bodyLiveInitKb: 0, bodyPrematchKb: 0,
+    // Two guesses at why the detail queue stopped draining were both wrong.
+    // Count what each lane actually does with an item instead: taken off the
+    // queue and fetched, skipped because the roster no longer wants it, or
+    // skipped because it is not due after all. Plus how often a lane starts
+    // and ends, which says whether they are being topped up.
+    lane: { fetched: 0, notDesired: 0, notDue: 0, started: 0, ended: 0 },
     shapes: { live: '', prematch: '', early: '' },
     answered: { live: '', prematch: '', early: '' } });
   if (!location.pathname || !location.hostname) return 'page-unavailable';
@@ -197,6 +203,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       rosterShapeEarly: stats.shapes.early,
       rosterAnsweredLive: stats.answered.live, rosterAnsweredToday: stats.answered.prematch,
       rosterAnsweredEarly: stats.answered.early,
+      rosterLane: 'f' + stats.lane.fetched + '.nd' + stats.lane.notDesired +
+        '.nq' + stats.lane.notDue + '.s' + stats.lane.started + '.e' + stats.lane.ended,
       rosterAgeMs: stats.startedAtMs > 0 ? Date.now() - stats.startedAtMs : null,
       rosterCompletedAgeMs: stats.completedAtMs > 0 ? Date.now() - stats.completedAtMs : null
     });
@@ -866,9 +874,10 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       const runDetailLane = async () => {
         while (ownsSession() && !requestsPaused() && root[detailWorkerKey] === detailWorker && detailWorker.queue.length > 0) {
           const eventId = detailWorker.queue.shift();
-          if (!eventId || !detailWorker.desired.has(eventId)) continue;
+          if (!eventId || !detailWorker.desired.has(eventId)) { stats.lane.notDesired += 1; continue; }
           const latest = root[detailBodiesKey]?.find(item => item.eventId === eventId);
-          if (deadline(eventId, latest) > Date.now()) continue;
+          if (deadline(eventId, latest) > Date.now()) { stats.lane.notDue += 1; continue; }
+          stats.lane.fetched += 1;
           detailWorker.activeEventIds.add(eventId);
           const headers = { ...detailWorker.headers };
           const requestedAtMs = Date.now();
@@ -1074,8 +1083,10 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         while (detailWorker.lanes < 3 && detailWorker.queue.length > 0 &&
           root[detailWorkerKey] === detailWorker && ownsSession() && !requestsPaused()) {
           detailWorker.lanes += 1;
+          stats.lane.started += 1;
           void runDetailLane().catch(() => undefined).finally(() => {
             detailWorker.lanes -= 1;
+            stats.lane.ended += 1;
             detailWorker.start();
           });
         }

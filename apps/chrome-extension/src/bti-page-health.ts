@@ -100,11 +100,12 @@ function parseRosterCoverage(value: unknown): string | null {
   const gateKeys = ["rosterGateLive", "rosterGateToday", "rosterGateEarly"];
   const shapeKeys = ["rosterShapeLive", "rosterShapeToday", "rosterShapeEarly"];
   const answeredKeys = ["rosterAnsweredLive", "rosterAnsweredToday", "rosterAnsweredEarly"];
+  const laneKey = "rosterLane";
   const ageKeys = ["detailOldestReceiptAgeMs", "rosterAgeMs", "rosterCompletedAgeMs"];
   const booleans = ["detailCoverageComplete", "rosterRefreshFailed", "requestPaused", "authBlocked", "nativeInventoryTruncated", "nativeTypeCountsTruncated"];
   if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts", "unnamedShapes",
     "rosterTeardown", "rosterPartFail", ...gateKeys, ...shapeKeys,
-    ...answeredKeys].includes(key)) ||
+    ...answeredKeys, laneKey].includes(key)) ||
     !["INITIAL", "HYDRATING", "COMPLETE", "FAILED"].includes(String(candidate.phase))) return null;
   if (booleans.some((key) => candidate[key] !== undefined && typeof candidate[key] !== "boolean")) return null;
   if (candidate.nativeTypeCounts !== undefined && (typeof candidate.nativeTypeCounts !== "string" ||
@@ -117,6 +118,8 @@ function parseRosterCoverage(value: unknown): string | null {
     if (candidate[key] !== undefined && (typeof candidate[key] !== "string" ||
       !/^[0-9A-Za-z,.]{0,200}$/u.test(candidate[key]))) return null;
   }
+  if (candidate[laneKey] !== undefined && (typeof candidate[laneKey] !== "string" ||
+    !/^f\d{1,7}\.nd\d{1,7}\.nq\d{1,7}\.s\d{1,7}\.e\d{1,7}$/u.test(candidate[laneKey]))) return null;
   for (const key of answeredKeys) {
     // "requested.answered", counts only.
     if (candidate[key] !== undefined && (typeof candidate[key] !== "string" ||
