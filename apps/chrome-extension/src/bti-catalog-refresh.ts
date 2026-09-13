@@ -2,6 +2,12 @@
 export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const root = document.documentElement;
   const now = Date.now();
+  // Shape only: how often the roster walk restarts, completes or loses its
+  // session. Never deleted by a teardown, otherwise it could not count them.
+  const statsKey = '__fieldlineBtiRosterStatsV1';
+  const stats = root[statsKey] || (root[statsKey] = { starts: 0, completed: 0, failed: 0,
+    teardownVersion: 0, teardownSession: 0, lostSession: 0, paused: 0, fetchNull: 0,
+    partFail: { live: 0, prematch: 0, early: 0 }, startedAtMs: 0, completedAtMs: 0 });
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   const rosterWorkerKey = '__fieldlineBtiRosterWorkerV10';
   const detailBodiesKey = '__fieldlineBtiDetailBodiesV10';
@@ -22,6 +28,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     authBlocked: previousState.authBlocked === true
   } : {};
   if (previousState && (previousState.collectorVersion !== 14 || !previousState.sameSession?.(authValue, contextValue))) {
+    if (previousState.collectorVersion !== 14) stats.teardownVersion += 1;
+    else stats.teardownSession += 1;
     const retainedBodies = previousState.sameSession?.(authValue, contextValue) &&
       Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
     for (const controller of previousState.listControllers || []) controller.abort();
@@ -156,10 +164,20 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       detailQueuedEvents: worker?.queue.length || 0,
       detailInFlightEvents: worker?.activeEventIds.size || 0,
       detailOldestReceiptAgeMs: cached.length > 0
-        ? Math.max(...cached.map((item) => Math.max(0, Date.now() - item.observedAtMs))) : null
+        ? Math.max(...cached.map((item) => Math.max(0, Date.now() - item.observedAtMs))) : null,
+      rosterStarts: stats.starts, rosterCompleted: stats.completed, rosterFailed: stats.failed,
+      rosterTeardown: 'v' + stats.teardownVersion + '.s' + stats.teardownSession,
+      rosterLostSession: stats.lostSession, rosterPaused: stats.paused,
+      rosterFetchNull: stats.fetchNull,
+      rosterPartFail: 'live:' + stats.partFail.live + ',pre:' + stats.partFail.prematch +
+        ',early:' + stats.partFail.early,
+      rosterAgeMs: stats.startedAtMs > 0 ? Date.now() - stats.startedAtMs : null,
+      rosterCompletedAgeMs: stats.completedAtMs > 0 ? Date.now() - stats.completedAtMs : null
     });
     root.dataset.fieldlineBtiRosterCoverage = JSON.stringify(rosterWorker.coverage);
   };
+  stats.starts += 1;
+  stats.startedAtMs = now;
   publishCoverage();
   root[rosterWorkerKey] = rosterWorker;
   rosterWorker.promise = (async () => {
@@ -169,7 +187,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const listBase = '/api/eventlist/asia/leagues/v2/1/';
   const fetchList = async (path) => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (!ownsSession() || requestsPaused()) return null;
+      if (!ownsSession()) { stats.lostSession += 1; return null; }
+      if (requestsPaused()) { stats.paused += 1; return null; }
       const controller = new AbortController();
       detailState.listControllers.add(controller);
       const requestedAtMs = Date.now();
@@ -192,8 +211,9 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       const result = await Promise.race([request, timeout, aborted]);
       clearTimeout(timeoutId);
       detailState.listControllers.delete(controller);
-      if (!ownsSession()) return null;
+      if (!ownsSession()) { stats.lostSession += 1; return null; }
       if (result) return result;
+      stats.fetchNull += 1;
     }
     return null;
   };
@@ -227,6 +247,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       Array.isArray(league) && (typeof league[0] === 'string' || typeof league[0] === 'number') ? String(league[0]) : '';
     let initial = await fetchList(plan.requestPath);
     if (!initial || !Array.isArray(initial.payload?.serializedData)) {
+      stats.partFail[plan.partition] += 1;
       rosterWorker.coverage.failed += 1;
       rosterWorker.coverage.phase = 'FAILED';
       publishCoverage();
@@ -252,6 +273,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         inventory.payload.serializedData.length >= initial.payload.serializedData.length;
       if (usable) initial = inventory;
       else if (plan.partition === 'early') {
+        stats.partFail[plan.partition] += 1;
         rosterWorker.coverage.failed += 1;
         rosterWorker.coverage.phase = 'FAILED';
         publishCoverage();
@@ -285,6 +307,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         const page = await fetchList(hydrationPath(batches[index]));
         if (!page || !Array.isArray(page.payload?.serializedData)) {
           failed = true;
+          stats.partFail[plan.partition] += 1;
           rosterWorker.coverage.failed += 1;
           rosterWorker.coverage.phase = 'FAILED';
           publishCoverage();
@@ -940,10 +963,13 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     if (root[rosterWorkerKey] === rosterWorker) {
       rosterWorker.result = result;
       rosterWorker.completedAt = Date.now();
+      stats.completed += 1;
+      stats.completedAtMs = rosterWorker.completedAt;
     }
     return result;
   }).catch(() => {
     if (!ownsSession()) return cancelled();
+    stats.failed += 1;
     rosterWorker.coverage.phase = 'FAILED';
     rosterWorker.coverage.failed += 1;
     publishCoverage();

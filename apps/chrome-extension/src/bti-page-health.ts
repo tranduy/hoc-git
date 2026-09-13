@@ -85,14 +85,23 @@ function parseRosterCoverage(value: unknown): string | null {
     "detailDueEvents", "detailDeferredEvents", "detailRetainedEventCap", "detailQueueCap",
     "detailOverCapEvents", "requestStatus", "requestRetryInMs", "nativeRosterEvents", "nativePrematchEvents", "nativeLiveEvents",
     "nativeDetailEvents", "nativeMarketRows", "nativeSelectionRows", "nativeNumericIds", "nativeMalformedRows",
-    "unnamedEvents", "unnamedWithin24h", "unnamedLater"];
+    "unnamedEvents", "unnamedWithin24h", "unnamedLater",
+    // Why the roster walk keeps restarting instead of finishing: counts only.
+    "rosterStarts", "rosterCompleted", "rosterFailed", "rosterLostSession", "rosterPaused",
+    "rosterFetchNull", "rosterAgeMs", "rosterCompletedAgeMs"];
+  const ageKeys = ["detailOldestReceiptAgeMs", "rosterAgeMs", "rosterCompletedAgeMs"];
   const booleans = ["detailCoverageComplete", "rosterRefreshFailed", "requestPaused", "authBlocked", "nativeInventoryTruncated", "nativeTypeCountsTruncated"];
-  if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts", "unnamedShapes"].includes(key)) ||
+  if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts", "unnamedShapes",
+    "rosterTeardown", "rosterPartFail"].includes(key)) ||
     !["INITIAL", "HYDRATING", "COMPLETE", "FAILED"].includes(String(candidate.phase))) return null;
   if (booleans.some((key) => candidate[key] !== undefined && typeof candidate[key] !== "boolean")) return null;
   if (candidate.nativeTypeCounts !== undefined && (typeof candidate.nativeTypeCounts !== "string" ||
     candidate.nativeTypeCounts.length > 1024 ||
     !/^(?:[A-Z][A-Z0-9_]{0,23}:\d{1,6}(?:,[A-Z][A-Z0-9_]{0,23}:\d{1,6}){0,31})?$/u.test(candidate.nativeTypeCounts))) return null;
+  if (candidate.rosterTeardown !== undefined && (typeof candidate.rosterTeardown !== "string" ||
+    !/^v\d{1,6}\.s\d{1,6}$/u.test(candidate.rosterTeardown))) return null;
+  if (candidate.rosterPartFail !== undefined && (typeof candidate.rosterPartFail !== "string" ||
+    !/^live:\d{1,6},pre:\d{1,6},early:\d{1,6}$/u.test(candidate.rosterPartFail))) return null;
   // Field-index shapes only ("1.2.3.5:900"), never a value. Bounded like the
   // native type counts above so a malformed page cannot grow the payload.
   if (candidate.unnamedShapes !== undefined && (typeof candidate.unnamedShapes !== "string" ||
@@ -100,9 +109,9 @@ function parseRosterCoverage(value: unknown): string | null {
     !/^(?:(?:none|d(?:.d){0,4}):d{1,6}(?:,(?:none|d(?:.d){0,4}):d{1,6}){0,7})?$/u
       .test(candidate.unnamedShapes))) return null;
   for (const key of allowed.slice(1)) {
-    if (key === "detailOldestReceiptAgeMs" && candidate[key] === null) continue;
+    if (ageKeys.includes(key) && candidate[key] === null) continue;
     const maximum = key === "detailCachedBytes" ? 256 * 1024 * 1024
-      : key === "detailOldestReceiptAgeMs" || key === "requestRetryInMs" ? Number.MAX_SAFE_INTEGER : 1_000_000;
+      : ageKeys.includes(key) || key === "requestRetryInMs" ? Number.MAX_SAFE_INTEGER : 1_000_000;
     if (candidate[key] !== undefined && (!Number.isSafeInteger(candidate[key]) || Number(candidate[key]) < 0 ||
       Number(candidate[key]) > maximum)) return null;
   }
