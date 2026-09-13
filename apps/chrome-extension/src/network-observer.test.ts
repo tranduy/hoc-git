@@ -12347,3 +12347,19 @@ describe("KSPORT football group label", () => {
     expect(evaluate(["Football 2"]).status).toBe("time-tab-not-found");
   });
 });
+
+describe("APSPORT detail walk allocation", () => {
+  it("spends its slots where a fetched price can outlive one lap", () => {
+    // A quote that expires in five seconds cannot survive a fifty-minute lap,
+    // so reading it consumes a slot that can never produce a comparison.
+    const policies = new Map<string, number>([
+      ["live", 5_000], ["soon", 60_000], ["mid", 300_000],
+      ["day", 900_000], ["far", 4_500_000]
+    ]);
+    const due = ["live", "soon", "mid", "day", "far"];
+    const lasting = due.filter((id) => policies.get(id)! >= 900_000);
+    const fleeting = due.filter((id) => policies.get(id)! < 900_000);
+    expect([...lasting, ...fleeting]).toEqual(["day", "far", "live", "soon", "mid"]);
+    expect(lasting).toHaveLength(2);
+  });
+});

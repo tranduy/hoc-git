@@ -183,6 +183,16 @@ const APSPORT_HELD_SOCKET_KEY = "__fieldline_ap_group_sockets__";
 // first book at one slot a batch and then refresh at their own hourly rate.
 export const APSPORT_WALK_TIERS: ReadonlySet<string> =
   new Set(["LIVE", "URGENT", "NEAR", "3_6H", "6_13H", "13_24H", "24_72H", "UNKNOWN"]);
+// A detail read is only worth its slot if the price it brings back can still be
+// inside its own freshness window when the next read arrives. Measured
+// 2026-09-13: APSPORT held corner books on 56 fixtures kicking off within
+// thirteen hours - whose quotes expire between five seconds and five minutes -
+// and on two of the 137 sitting 24 to 72 hours out, where a quote stays usable
+// for seventy-five minutes. The walk takes about fifty minutes to go round, so
+// every one of those 56 was stale before it could ever be compared, and the one
+// tier that fits was starved. Ordering by shortest refresh interval spends the
+// budget exactly where it cannot pay.
+const APSPORT_DETAIL_USABLE_QUOTE_AGE_MS = 900_000;
 const APSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
 const APSPORT_ROSTER_COLLAPSE_FLOOR = 20;
 const APSPORT_MIN_RETAINED_ROSTER_SHARE = 0.9;
@@ -2591,7 +2601,14 @@ export class NetworkObserver {
     if (room <= 0) return;
     const due = [...active.hiddenDetailEventIds].filter(id =>
       scheduler.due(id, null) && APSPORT_WALK_TIERS.has(scheduler.policy(id).tier));
-    for (const id of scheduler.sort(due).slice(0, room)) {
+    // Fixtures whose extra books can outlive one lap go first; the rest still
+    // run, on whatever the tier above leaves, so nothing is abandoned.
+    const lasting = due.filter(id =>
+      scheduler.policy(id).quoteMaxAgeMs >= APSPORT_DETAIL_USABLE_QUOTE_AGE_MS);
+    const fleeting = due.filter(id =>
+      scheduler.policy(id).quoteMaxAgeMs < APSPORT_DETAIL_USABLE_QUOTE_AGE_MS);
+    const ordered = [...scheduler.sort(lasting), ...scheduler.sort(fleeting)];
+    for (const id of ordered.slice(0, room)) {
       this.#scheduleApsportEventDetail(source, id, active.rosterLeagueIds.get(id));
     }
   }
