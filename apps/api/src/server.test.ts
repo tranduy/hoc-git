@@ -50,13 +50,18 @@ describe("localWarpAuthEnabled", () => {
 });
 
 describe("resolveApsportPrematchWindowHours", () => {
-  it("defaults to 24 hours and accepts only integer hours from 1 through 48", () => {
-    expect(resolveApsportPrematchWindowHours({})).toBe(24);
+  it("defaults to the full 72-hour horizon the refresh policy already plans for", () => {
+    // The policy carries a 24-72 hour tier and the scheduler reserves a slot
+    // for it, but a 24-hour roster meant those fixtures never arrived to be
+    // scheduled. Corner arbitrage sits there: measured 2026-09-13, five of
+    // seven corner pairs on a competitor screen were ten hours to three days
+    // out, and APSPORT could not have priced one of them.
+    expect(resolveApsportPrematchWindowHours({})).toBe(72);
     expect(resolveApsportPrematchWindowHours({ APSPORT_PREMATCH_WINDOW_HOURS: "1" })).toBe(1);
-    expect(resolveApsportPrematchWindowHours({ APSPORT_PREMATCH_WINDOW_HOURS: "48" })).toBe(48);
-    for (const value of ["0", "49", "1.5", "abc", ""]) {
+    expect(resolveApsportPrematchWindowHours({ APSPORT_PREMATCH_WINDOW_HOURS: "72" })).toBe(72);
+    for (const value of ["0", "73", "1.5", "abc", ""]) {
       expect(() => resolveApsportPrematchWindowHours({ APSPORT_PREMATCH_WINDOW_HOURS: value }))
-        .toThrow("APSPORT_PREMATCH_WINDOW_HOURS must be an integer between 1 and 48");
+        .toThrow("APSPORT_PREMATCH_WINDOW_HOURS must be an integer between 1 and 72");
     }
   });
 });

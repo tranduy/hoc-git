@@ -93,7 +93,7 @@ export class ChromeBridgeControlPlane {
     this.#authorityCoordinator = options.authorityCoordinator ?? null;
     const apsportPrematchWindowHours = options.apsportPrematchWindowHours;
     if (apsportPrematchWindowHours !== undefined && (!Number.isSafeInteger(apsportPrematchWindowHours) ||
-      apsportPrematchWindowHours < 1 || apsportPrematchWindowHours > 48)) {
+      apsportPrematchWindowHours < 1 || apsportPrematchWindowHours > 72)) {
       throw new Error("APSPORT_PREMATCH_WINDOW_HOURS_INVALID");
     }
     this.#apsportPrematchWindowHours = apsportPrematchWindowHours ?? null;

@@ -197,7 +197,7 @@ export function eligibleApsportFootballEvent(
   prematchWindowHours: number
 ): boolean {
   if (!Number.isFinite(nowMs) || !Number.isSafeInteger(prematchWindowHours) ||
-    prematchWindowHours < 1 || prematchWindowHours > 48 || eventId(value) === null ||
+    prematchWindowHours < 1 || prematchWindowHours > 72 || eventId(value) === null ||
     !activeEventEvidence(value) || virtualFootballIdentity(value)) return false;
   if (value["6"] === true) return true;
   if (typeof value["11"] !== "string") return false;

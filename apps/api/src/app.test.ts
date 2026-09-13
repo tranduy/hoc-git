@@ -236,7 +236,7 @@ describe("Fastify snapshot API", () => {
       viteOrigin: "http://127.0.0.1:4311",
       dataMode: "LIVE",
       fixtureReplaySpeed: 1,
-      apsportPrematchWindowHours: 24
+      apsportPrematchWindowHours: 72
     });
     expect(resolveServerConfig({
       API_HOST: "localhost",
@@ -250,7 +250,7 @@ describe("Fastify snapshot API", () => {
       viteOrigin: "http://localhost:5311",
       dataMode: "FIXTURE",
       fixtureReplaySpeed: 2,
-      apsportPrematchWindowHours: 24
+      apsportPrematchWindowHours: 72
     });
     expect(resolveServerConfig({ VITE_ORIGIN: "https://live.babiesbo.uk" }).viteOrigin)
       .toBe("https://live.babiesbo.uk");

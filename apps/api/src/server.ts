@@ -369,11 +369,16 @@ function dataMode(value: string | undefined): DataMode {
 export function resolveApsportPrematchWindowHours(
   env: Readonly<Record<string, string | undefined>>
 ): number {
+  // The refresh policy carries a 24-72 hour tier and the scheduler reserves a
+  // slot for it, but a 24-hour roster meant those fixtures never arrived to be
+  // scheduled at all. Corner arbitrage sits exactly there: measured 2026-09-13,
+  // five of seven corner pairs on a competitor screen were on fixtures ten
+  // hours to three days out, and APSPORT could not have priced one of them.
   const raw = env.APSPORT_PREMATCH_WINDOW_HOURS;
-  if (raw === undefined) return 24;
+  if (raw === undefined) return 72;
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 1 || value > 48) {
-    throw new Error("APSPORT_PREMATCH_WINDOW_HOURS must be an integer between 1 and 48");
+  if (!Number.isSafeInteger(value) || value < 1 || value > 72) {
+    throw new Error("APSPORT_PREMATCH_WINDOW_HOURS must be an integer between 1 and 72");
   }
   return value;
 }

@@ -260,7 +260,7 @@ const apsportCatalogBatchSchema = z.object({
   complete: z.boolean(),
   verifiedEmpty: z.literal(true).optional(),
   trigger: z.enum(["SWEEP", "EVENT_CHANGE"]).optional(),
-  prematchWindowHours: z.number().int().min(1).max(48),
+  prematchWindowHours: z.number().int().min(1).max(72),
   records: z.array(z.record(z.string(), z.unknown())).max(5_000)
 }).strict();
 // DOM coverage must use the same virtual-football identity boundary as the
