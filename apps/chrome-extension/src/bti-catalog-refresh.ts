@@ -804,7 +804,13 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     if (root.__fieldlineCollectionSchedulerV1) dueIds = root.__fieldlineCollectionSchedulerV1.sort(dueIds);
     const nextJob = { generation, headers: { ...listHeaders }, eventIds: selected, dueIds, publishCoverage };
     const currentWorker = root[detailWorkerKey];
-    if (currentWorker && typeof currentWorker.update === 'function') {
+    // A worker without start() is from a build that could not top its lanes
+    // back up. It keeps the key while its last lane hangs, so update() lands on
+    // an object nobody is draining: measured after deploy, 183 due and 122
+    // queued with no lane in flight at all. Treat it as incompatible and
+    // replace it, which is what the branch below is for.
+    if (currentWorker && typeof currentWorker.update === 'function' &&
+      typeof currentWorker.start === 'function') {
       currentWorker.update(nextJob);
       // Refilling the queue is not the same as having anyone to drain it. A
       // lane exits when the queue runs dry, and the worker object only retires
