@@ -55,7 +55,7 @@ import { sbobetEarlyRequestFromObserved, sbobetEarlyRequestFromMain, sbobetEarly
   buildSbobetEarlyFetchExpression, type SbobetEarlyRequest } from "./sbobet-early-protocol.js";
 import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent,
   buildApsportPageRequestExpression,
-  apsportExtraFlagShape,
+  apsportExtraFlagShape, apsportGroupCensusShape,
   collectApsportCatalog, collectApsportEventDetail, type ApsportCatalogBatch,
   type ApsportCatalogPageRequest, type ApsportDetailStateUpdate, type ApsportRequestTemplate, type CollectApsportCatalogOptions,
   type CollectApsportEventDetailOptions, validateApsportDetail } from "./apsport-catalog-refresh.js";
@@ -4660,6 +4660,7 @@ export class NetworkObserver {
     try {
       detailed = await this.#collectApsportEventDetail({ eventId,
         marketGroups: APSPORT_DETAIL_MARKET_GROUPS,
+        probeMarketGroups: true,
         ...(this.#collectionSchedulers.has(source.sourceId) ? { maxAttempts: 1 } : {}),
         ...(rosterLeagueId === undefined ? {} : { leagueId: rosterLeagueId }),
         template: { origin: template.origin, headers: template.headers, body: template.body },
@@ -6987,7 +6988,7 @@ export class NetworkObserver {
       const d = this.#wsAttachDiagnostic(source);
       return (`AP_MG[sockets:${d.apCornerSockets};frames:${d.apCornerFramesReceived};` +
         `parsed:${d.apCornerFramesParsed}] ` + apsportExtraFlagShape() + ` ` +
-        existing).slice(0, 900);
+        apsportGroupCensusShape() + ' ' + existing).slice(0, 900);
     }
     if (source.lobby === "BTI") {
       // Say how much collector coverage arrived, so an empty page-health probe

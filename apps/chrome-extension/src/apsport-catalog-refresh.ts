@@ -76,6 +76,8 @@ export interface CollectApsportEventDetailOptions {
   readonly request: (request: ApsportCatalogPageRequest) => Promise<ApsportCatalogPageResponse>;
   readonly sleep: (delayMs: number) => Promise<void>;
   readonly isCurrent: () => boolean;
+  /** Scheduled walks only: spend one bounded census on which group ids answer. */
+  readonly probeMarketGroups?: boolean;
 }
 
 const modes = [2, 4, 3] as const;
@@ -362,6 +364,25 @@ function compareDetailPriority(left: ApsportRawEvent, right: ApsportRawEvent): n
  * because the provider answers 429 beyond three lanes.
  */
 const extraFlagState = { preferred: true, learned: false, probesLeft: 24, gained: 0 };
+
+/**
+ * Which market-group id actually carries corners is an assumption, not a
+ * measurement: group 4 was taken as corners and group 9 as cards, and 475
+ * fixtures came back with corners on 11% and cards on 1% under either value of
+ * the extra flag. Walk the low group ids once, on a handful of fixtures, and
+ * report how many markets each one answers with. Counts only, no market
+ * content, and it runs once per worker session.
+ */
+const groupCensus = { eventsLeft: 3, counts: new Map<number, number>(), seen: new Set<number>() };
+const CENSUS_GROUPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const;
+export function apsportGroupCensusShape(): string {
+  if (groupCensus.counts.size === 0) return "AP_GROUPS[chua-do]";
+  return `AP_GROUPS[${[...groupCensus.counts].sort((a, b) => a[0] - b[0])
+    .map(([group, count]) => `${group}:${count}`).join(",")}]`;
+}
+export function resetApsportGroupCensusForTests(): void {
+  groupCensus.eventsLeft = 3; groupCensus.counts.clear(); groupCensus.seen.clear();
+}
 export function apsportExtraFlagShape(): string {
   return `AP_EXTRA[flag:${extraFlagState.preferred};learned:${extraFlagState.learned};` +
     `probes:${extraFlagState.probesLeft};gained:${extraFlagState.gained}]`;
@@ -494,6 +515,20 @@ export async function collectApsportEventDetail(
       String(merged![key]) !== String(detailed![key]))) continue;
     merged = { ...merged, ...detailed,
       "50": [...merged["50"] as unknown[], ...detailed!["50"] as unknown[]] };
+  }
+  if (options.probeMarketGroups === true && merged !== null && groupCensus.eventsLeft > 0 &&
+    !groupCensus.seen.has(Number(id))) {
+    groupCensus.seen.add(Number(id));
+    groupCensus.eventsLeft -= 1;
+    for (const group of CENSUS_GROUPS) {
+      if (!options.isCurrent()) break;
+      const response = await detailResponse(options, { "2": id,
+        ...(leagueId === null ? {} : { "1": leagueId }) }, group, false);
+      if (response?.status !== 200) continue;
+      const detailed = apsportEventsFromProviderData(response.data).find((item) => eventId(item) === id);
+      const count = Array.isArray(detailed?.["50"]) ? (detailed["50"] as unknown[]).length : 0;
+      groupCensus.counts.set(group, Math.max(groupCensus.counts.get(group) ?? 0, count));
+    }
   }
   return merged;
 }
