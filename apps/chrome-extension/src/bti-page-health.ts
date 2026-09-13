@@ -99,10 +99,12 @@ function parseRosterCoverage(value: unknown): string | null {
     "rosterDoneEarly", "rosterBodyLiveKb", "rosterBodyLiveInitKb", "rosterBodyPrematchKb"];
   const gateKeys = ["rosterGateLive", "rosterGateToday", "rosterGateEarly"];
   const shapeKeys = ["rosterShapeLive", "rosterShapeToday", "rosterShapeEarly"];
+  const answeredKeys = ["rosterAnsweredLive", "rosterAnsweredToday", "rosterAnsweredEarly"];
   const ageKeys = ["detailOldestReceiptAgeMs", "rosterAgeMs", "rosterCompletedAgeMs"];
   const booleans = ["detailCoverageComplete", "rosterRefreshFailed", "requestPaused", "authBlocked", "nativeInventoryTruncated", "nativeTypeCountsTruncated"];
   if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts", "unnamedShapes",
-    "rosterTeardown", "rosterPartFail", ...gateKeys, ...shapeKeys].includes(key)) ||
+    "rosterTeardown", "rosterPartFail", ...gateKeys, ...shapeKeys,
+    ...answeredKeys].includes(key)) ||
     !["INITIAL", "HYDRATING", "COMPLETE", "FAILED"].includes(String(candidate.phase))) return null;
   if (booleans.some((key) => candidate[key] !== undefined && typeof candidate[key] !== "boolean")) return null;
   if (candidate.nativeTypeCounts !== undefined && (typeof candidate.nativeTypeCounts !== "string" ||
@@ -114,6 +116,11 @@ function parseRosterCoverage(value: unknown): string | null {
     // Type letters, field indexes and lengths only; no provider text can pass.
     if (candidate[key] !== undefined && (typeof candidate[key] !== "string" ||
       !/^[0-9a-z,.]{0,200}$/u.test(candidate[key]))) return null;
+  }
+  for (const key of answeredKeys) {
+    // "requested.answered", counts only.
+    if (candidate[key] !== undefined && (typeof candidate[key] !== "string" ||
+      !/^\d{1,6}\.\d{1,6}$/u.test(candidate[key]))) return null;
   }
   for (const key of gateKeys) {
     if (candidate[key] !== undefined && (typeof candidate[key] !== "string" ||

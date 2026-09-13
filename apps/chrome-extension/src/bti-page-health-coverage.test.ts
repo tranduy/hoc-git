@@ -27,6 +27,7 @@ const coverage = {
   rosterDonePrematch: 971, rosterDoneEarly: 803,
   rosterGateLive: "n0.f0.t0.m0.ok31", rosterGateToday: "n0.f0.t0.m0.ok971",
   rosterGateEarly: "n0.f0.t0.m0.ok803",
+  rosterAnsweredLive: "23.23", rosterAnsweredToday: "291.291", rosterAnsweredEarly: "154.154",
   rosterBodyLiveKb: 22, rosterBodyLiveInitKb: 0, rosterBodyPrematchKb: 4639,
   rosterShapeLive: "0i,1a2,2s31,3s24,4a2,5b,6i,7z,8a37.p.0i,1o3,2s0,3z",
   rosterShapeToday: "0s,3s,5b,6b,7a5,9a0,13b,14o5,17o3.p.0z,1z,2z,3z",

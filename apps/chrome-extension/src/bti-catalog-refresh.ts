@@ -11,7 +11,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     doneEvents: 0, doneWithin24h: 0, doneLive: 0, donePrematch: 0, doneEarly: 0,
     gates: { live: '', prematch: '', early: '' },
     bodyLiveKb: 0, bodyLiveInitKb: 0, bodyPrematchKb: 0,
-    shapes: { live: '', prematch: '', early: '' } });
+    shapes: { live: '', prematch: '', early: '' },
+    answered: { live: '', prematch: '', early: '' } });
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   const rosterWorkerKey = '__fieldlineBtiRosterWorkerV10';
   const detailBodiesKey = '__fieldlineBtiDetailBodiesV10';
@@ -194,6 +195,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       rosterBodyPrematchKb: stats.bodyPrematchKb,
       rosterShapeLive: stats.shapes.live, rosterShapeToday: stats.shapes.prematch,
       rosterShapeEarly: stats.shapes.early,
+      rosterAnsweredLive: stats.answered.live, rosterAnsweredToday: stats.answered.prematch,
+      rosterAnsweredEarly: stats.answered.early,
       rosterAgeMs: stats.startedAtMs > 0 ? Date.now() - stats.startedAtMs : null,
       rosterCompletedAgeMs: stats.completedAtMs > 0 ? Date.now() - stats.completedAtMs : null
     });
@@ -403,6 +406,23 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     };
     await Promise.all(Array.from({ length: Math.min(2, batches.length) }, () => worker()));
     if (failed || pages.some((page) => !page)) return null;
+    // Asking for a league is not the same as being given it. If the roster
+    // endpoint answers a request for ten ids with only its own default set,
+    // every batch after the first is wasted and coverage silently stops at ten
+    // leagues however many the discovery step found.
+    let requestedLeagues = 0;
+    let answeredLeagues = 0;
+    for (let index = 0; index < pages.length; index += 1) {
+      const requested = new Set(batches[index]);
+      requestedLeagues += requested.size;
+      const answered = new Set();
+      for (const league of pages[index].payload.serializedData) {
+        const leagueId = requestId(league);
+        if (requested.has(leagueId) && namedLeagueRows(league) > 0) answered.add(leagueId);
+      }
+      answeredLeagues += answered.size;
+    }
+    stats.answered[plan.partition] = requestedLeagues + '.' + answeredLeagues;
     const merged = new Map();
     const leagueClocks = new Map();
     const anonymous = [];
