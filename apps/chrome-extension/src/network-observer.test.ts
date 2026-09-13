@@ -3679,17 +3679,17 @@ describe("NetworkObserver", () => {
     expect(keepers()).toHaveLength(1);
     expect(keepers()[0]).toContain("new WebSocket");
 
-    nowMs += 21_000;
+    nowMs += 61_000;
     await observer.maintain(apsport);
     expect(keepers()).toHaveLength(2);
     expect(keepers()[1]).toContain(".close()");
     expect(keepers()[1]).not.toContain("new WebSocket");
 
     // And it stays shut for far longer than it was open.
-    nowMs += 60_000;
+    nowMs += 30_000;
     await observer.maintain(apsport);
     expect(keepers()).toHaveLength(2);
-    nowMs += 200_000;
+    nowMs += 70_000;
     await observer.maintain(apsport);
     expect(keepers()).toHaveLength(3);
     expect(keepers()[2]).toContain("new WebSocket");

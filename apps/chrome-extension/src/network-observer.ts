@@ -181,8 +181,15 @@ const APSPORT_DETAIL_MARKET_GROUPS = [1] as const;
 // Open it for a short window, harvest, close, and leave it shut far longer than
 // it was open. That is less traffic than a person browsing the tab.
 const APSPORT_HELD_MARKET_GROUPS: readonly number[] = [4];
-const APSPORT_HOLD_OPEN_MS = 20_000;
-const APSPORT_HOLD_CLOSED_MS = 240_000;
+// The first duty cycle proved the socket is reachable and decodable - 4,658
+// frames arrived and 4,633 parsed, with the worker steady and the walk
+// untouched - but twenty seconds in every four minutes is far sparser than the
+// freshness rule those corner prices live under: five seconds live, sixty
+// before kickoff. Raise it and watch the worker rather than guess: sixty open,
+// ninety shut, still well short of the continuous hold that cost a restart
+// every two or three minutes.
+const APSPORT_HOLD_OPEN_MS = 60_000;
+const APSPORT_HOLD_CLOSED_MS = 90_000;
 const APSPORT_HELD_SOCKET_KEY = "__fieldline_ap_group_sockets__";
 // The detail walk is the only source of corner and card books. Confining it
 // to a six-hour window kept those prices fresh - p50 12-64s against 240s for
