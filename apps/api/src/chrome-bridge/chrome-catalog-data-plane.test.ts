@@ -1791,33 +1791,27 @@ describe("ChromeCatalogDataPlane", () => {
     expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
   });
 
-  it("asks the page to reload without ever touching the feed it is still reading", async () => {
-    const starved: { accountId: string; sourceId: string }[] = [];
+  it("asks for the stage that can actually rebuild a socket the DOM is hiding", async () => {
     const recoveries: { accountId: string; stage: "SOFT" | "HARD" | undefined }[] = [];
     let now = 100_002;
     const plane = new ChromeCatalogDataPlane({ now: () => now,
-      onSourceRecoveryNeeded: (accountId, stage) => { recoveries.push({ accountId, stage }); },
-      onTransportStarved: (accountId, sourceId) => { starved.push({ accountId, sourceId }); } });
+      onSourceRecoveryNeeded: (accountId, stage) => { recoveries.push({ accountId, stage }); } });
     expect(plane.ingest(sabaCompleteCollector(0))).toBe(true);
     plane.ingest(sabaPushOpen(1, "1"));
     expect(plane.ingest(sabaPushBaseline(2, "1"))).toBe(true);
+    // The collector sweep takes the catalog back, which is the state this
+    // branch is about: a good DOM book in front of a socket that has gone.
     expect(plane.ingest(sabaCompleteCollector(3))).toBe(true);
-    const before = await plane.read(SABA);
 
+    // A socket gap must not throw away a DOM catalog that is still good, so
+    // the invalidation is shadowed - and then nothing else told anyone the
+    // stream had gone. Measured 2026-09-13: SABA took this path 157 times in
+    // twenty minutes while its recoveryStage stayed NONE and the book fell to
+    // 39 fixtures. A snapshot cannot rebuild a socket; only a new document can.
     now = 100_004;
     plane.ingest(sabaPushEnvelope(4, "1",
       `42${JSON.stringify(["m", "b1", [[999, "o"]], "revision-4"])}`));
-
-    // The reload is asked for by its own path. Routing it through recovery on
-    // 2026-09-13 pulled SABA into SOFT_RECOVERY and took its prices with it:
-    // 437 fixtures, a catalog 21 minutes stale, zero quote changes a minute
-    // where it had been making 1,500. The snapshot ask stays soft and free.
-    expect(starved).toEqual([{ accountId: SABA, sourceId: "chrome:SABA:7" }]);
-    expect(recoveries).toContainEqual({ accountId: SABA, stage: "SOFT" });
-    expect(recoveries).not.toContainEqual({ accountId: SABA, stage: "HARD" });
-
-    // The book in front of the dead socket is untouched, and still readable.
-    await expect(plane.read(SABA)).resolves.toEqual(before);
+    expect(recoveries).toContainEqual({ accountId: SABA, stage: "HARD" });
   });
 
   it("keeps a candidate tab out of active feed recovery until catalog promotion", async () => {

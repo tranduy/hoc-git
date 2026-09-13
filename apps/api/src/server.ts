@@ -523,28 +523,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
    * The actor is built further down, so the sink is bound afterwards.
    */
   let requestSourceRecovery: ((accountId: string, stage?: "SOFT" | "HARD") => void) | null = null;
-  /**
-   * A page whose socket reconnects without resending reset can only be
-   * repaired by a new document, and it says so on every frame that follows.
-   * Three rules keep that from becoming a reload loop, each one bought on
-   * 2026-09-13 when an earlier attempt cost SABA its prices:
-   *
-   * - A reload gets twenty minutes to prove itself. Five was not enough time
-   *   for the page to authenticate, subscribe and complete a baseline, so it
-   *   was reloaded out of every recovery it managed to start.
-   * - Three reloads that do not restore the stream and it stops asking, and
-   *   says so. Asking forever is what turned a degraded book into a dead one.
-   * - The feed is never touched. A starved book is still reading and still
-   *   pricing; losing those prices is worse than missing the fixtures.
-   *
-   * Silence is how success is recognised: once the socket carries a baseline
-   * the gap stops being reported, and a book quiet for half an hour is
-   * forgotten, so the next episode starts from a clean count.
-   */
-  const STARVED_RELOAD_COOLDOWN_MS = 20 * 60_000;
-  const STARVED_RELOAD_LIMIT = 3;
-  const STARVED_SETTLED_MS = 30 * 60_000;
-  const starvedPages = new Map<string, { reloadedAtMs: number; reloads: number; signalledAtMs: number }>();
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       const freshnessMs = providerFeedPolicies.get(catalog.accountId)?.catalogFreshnessMs ?? 20_000;
@@ -553,24 +531,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }),
     authorityCoordinator: chromeBridgeRegistry.authorityCoordinator, telemetry: pipelineTelemetry,
     onSourceRecoveryNeeded: (accountId, stage) => requestSourceRecovery?.(accountId, stage ?? "SOFT"),
-    onTransportStarved: (accountId, sourceId) => {
-      const nowMs = Date.now();
-      const held = starvedPages.get(accountId);
-      if (held !== undefined && nowMs - held.signalledAtMs > STARVED_SETTLED_MS) starvedPages.delete(accountId);
-      const state = starvedPages.get(accountId) ??
-        { reloadedAtMs: Number.NEGATIVE_INFINITY, reloads: 0, signalledAtMs: nowMs };
-      state.signalledAtMs = nowMs;
-      starvedPages.set(accountId, state);
-      if (state.reloads >= STARVED_RELOAD_LIMIT) return;
-      if (nowMs - state.reloadedAtMs < STARVED_RELOAD_COOLDOWN_MS) return;
-      state.reloadedAtMs = nowMs;
-      state.reloads += 1;
-      const delivered = chromeBridgeControlPlane?.reloadSource(sourceId, true) ?? 0;
-      app.log.warn({ accountId, reloads: state.reloads, delivered },
-        state.reloads >= STARVED_RELOAD_LIMIT
-          ? "Provider transport still starved after the last reload; no longer asking"
-          : "Provider transport starved; asking the page to reload");
-    },
     onIngestRejected: (envelope, reason) => {
       pipelineTelemetry.recordIngestRejected(chromeBridgeProviderAccountIdForLobby(envelope.lobby), reason);
       if (reason === "NETWORK_BODY_UNAVAILABLE") chromeBridgeControlPlane?.rejectNetworkBody(envelope);
