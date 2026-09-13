@@ -665,3 +665,51 @@ it("stops legacy admission after roster when a plan arrives, flushing the in-fli
   expect(onDetail).toHaveBeenCalledWith(expect.objectContaining({ complete: false,
     records: [event("1")] }));
 });
+
+describe("APSPORT extra market groups", () => {
+  it("asks the corner and card groups as extra books, and the main one as main", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    await collectApsportEventDetail({
+      eventId: "extra", leagueId: "league-extra", marketGroups: [1, 4, 9],
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async (input) => {
+        bodies.push(input.body);
+        return { status: 200, data: [league("Detail", [{ ...event("extra"),
+          "50": [{ "3": Number(input.body.mg), "9": [], "10": "Active" }] }])] };
+      },
+      sleep: async () => undefined, isCurrent: () => true
+    });
+    expect(bodies.map((body) => [body.mg, body.isExtra]))
+      .toEqual([[1, false], [4, true], [9, true]]);
+  });
+
+  it("keeps the main markets when a group answers with nothing", async () => {
+    // A fixture the provider quotes no corners on still has a main book, and
+    // 100% of read fixtures carried main markets against 11% carrying corners.
+    const result = await collectApsportEventDetail({
+      eventId: "nocorners", leagueId: "league-nocorners", marketGroups: [1, 4, 9],
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async (input) => Number(input.body.mg) === 1
+        ? { status: 200, data: [league("Detail", [{ ...event("nocorners"),
+            "50": [{ "3": 3, "9": [], "10": "Active" }] }])] }
+        : { status: 200, data: [league("Detail", [])] },
+      sleep: async () => undefined, isCurrent: () => true
+    });
+    expect((result?.["50"] as ApsportRawEvent[]).map((group) => group["3"])).toEqual([3]);
+  });
+
+  it("still publishes nothing when a group could not be reached", async () => {
+    // Unreachable is unknown, not empty: publishing the rest would delete
+    // corner books the fixture really has.
+    const result = await collectApsportEventDetail({
+      eventId: "unreachable", leagueId: "league-unreachable", marketGroups: [1, 4], maxAttempts: 1,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async (input) => Number(input.body.mg) === 1
+        ? { status: 200, data: [league("Detail", [{ ...event("unreachable"),
+            "50": [{ "3": 3, "9": [], "10": "Active" }] }])] }
+        : { status: 503, data: null },
+      sleep: async () => undefined, isCurrent: () => true
+    });
+    expect(result).toBeNull();
+  });
+});
