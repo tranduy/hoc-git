@@ -322,7 +322,10 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
   // real clock, and every one of the 73 was published as in-play with no period
   // and no clock. They were then paired as live tickets whose prices never
   // moved, because the matches had not kicked off.
-  const streamedKickoff = /^TRỰC TIẾP\s+(\d{1,2}):(\d{2})(AM|PM)?$/u.exec(normalized);
+  // The same row reads LIVE on the English lobby, and a book whose language
+  // is switched must not lose its kick-off times to a regex that knows only
+  // one of the two words. Both spellings, one meaning.
+  const streamedKickoff = /^(?:TRỰC TIẾP|LIVE)\s+(\d{1,2}):(\d{2})(AM|PM)?$/u.exec(normalized);
   if (streamedKickoff !== null) {
     const meridiem = streamedKickoff[3];
     const rawHour = Number(streamedKickoff[1]);

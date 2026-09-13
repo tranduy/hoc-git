@@ -260,6 +260,26 @@ describe("normalizeCmdCatalog", () => {
     ]);
   });
 
+  it("reads a streamed kick-off in either lobby language", () => {
+    // The row reads "TRỰC TIẾP 11:30PM" on the Vietnamese lobby and
+    // "LIVE 11:30PM" on the English one, and it means the same thing in both:
+    // a stream advertised on a fixture that has not started. A book switched to
+    // English must not lose its kick-off times, because a fixture with no time
+    // is published as in-play and paired as a live ticket whose price never
+    // moves. Measured on the SABA lobby 2026-09-01: 73 of 236 rows read this way.
+    const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 1, explicitProviderDate: "2026-08-15" };
+    const vietnamese = { ...structuredClone(record), timeText: "TRỰC TIẾP 11:30PM" };
+    const english = { ...structuredClone(record), timeText: "LIVE 11:30PM" };
+
+    const fromVietnamese = normalizeCmdCatalog([vietnamese], options);
+    const fromEnglish = normalizeCmdCatalog([english], options);
+    expect(fromEnglish.events).toHaveLength(1);
+    expect(fromEnglish.events[0]?.startAtUtcMs).toBe(fromVietnamese.events[0]?.startAtUtcMs);
+    expect(fromEnglish.events[0]?.isLive).toBe(false);
+    expect(fromVietnamese.events[0]?.isLive).toBe(false);
+  });
+
   it("still refuses a CMD handicap that names no line at all", () => {
     const noLine = { ...structuredClone(record), groups: [{ betTypeIds: ["1"], labels: ["0"], odds: [
       { marketOddsId: "cmd-noline", priceText: "0.82", status: null, greyedOut: "false" },

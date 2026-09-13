@@ -257,12 +257,19 @@ export function providerRenewalUrl(lobby: RenewableLobby, currentUrl: string, no
   catch { throw new Error("UNTRUSTED_PROVIDER_RENEWAL_URL"); }
   if (!trustedProviderOrigin(lobby, current)) throw new Error("UNTRUSTED_PROVIDER_RENEWAL_URL");
 
+  // Renewal has to follow the language the tab is already on. These paths and
+  // parameters were pinned to Vietnamese, so switching a book to English
+  // would have sent every renewal to a path that no longer exists and lost
+  // the lease. The tab itself is the only thing that knows its language.
+  const currentSegments = current.pathname.split("/").filter(Boolean);
+  const currentLanguage = /^[a-z]{2}$/u.test(currentSegments[0] ?? "") ? currentSegments[0]! : "vi";
   if (lobby === "BTI") {
-    return new URL("/vi/asian-view/today/Bóng-đá?operatorToken=logout", current.origin).href;
+    const path = currentLanguage === "vi" ? "/vi/asian-view/today/Bóng-đá" : `/${currentLanguage}/asian-view/today/Football`;
+    return new URL(`${path}?operatorToken=logout`, current.origin).href;
   }
   if (lobby === "IM") {
-    const renewal = new URL("/?languageCode=vi", current.origin);
-    // IM's public shell is tokenless, but navigating to the identical URL can
+    const renewal = new URL(
+      `/?languageCode=${current.searchParams.get("languageCode") ?? "vi"}`, current.origin);
     // preserve a broken SPA instance whose GetSE calls keep returning
     // StatusCode 500. A time-only cache buster forces a fresh shell in the
     // same owned tab without carrying session or account parameters forward.

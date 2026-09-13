@@ -37,6 +37,17 @@ interface SourceTabRecoveryOptions {
   readonly completeBlankHandoff?: (tabId: number) => Promise<void>;
 }
 
+/**
+ * The direct lobby URLs carry no session segment, which is the point: SABA
+ * hands out a new cookieless session when one is asked for without it, so
+ * this is how a page gets a working subscription back. Reloading the tab's
+ * own URL cannot - that URL carries a session already spent, which is why
+ * two reload-based remedies on 2026-09-13 left the book frozen.
+ *
+ * The language stays as written here. Changing a book to English is done by
+ * navigating the tab, and the recovery URL is followed only when the tab has
+ * lost its document entirely, at which point the language it had is gone too.
+ */
 export const SABA_DIRECT_LOBBY_URL =
   "https://c0z0oa.bpd3a3fn.com/NewIndex?lang=vn&webskintype=3&scmt=tab02&ssmt=tab02";
 export const BTI_DIRECT_LOBBY_URL =
