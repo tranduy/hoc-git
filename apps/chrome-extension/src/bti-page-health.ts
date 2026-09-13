@@ -115,7 +115,7 @@ function parseRosterCoverage(value: unknown): string | null {
   for (const key of shapeKeys) {
     // Type letters, field indexes and lengths only; no provider text can pass.
     if (candidate[key] !== undefined && (typeof candidate[key] !== "string" ||
-      !/^[0-9a-z,.]{0,200}$/u.test(candidate[key]))) return null;
+      !/^[0-9A-Za-z,.]{0,200}$/u.test(candidate[key]))) return null;
   }
   for (const key of answeredKeys) {
     // "requested.answered", counts only.

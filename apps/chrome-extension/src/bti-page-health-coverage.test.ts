@@ -29,9 +29,9 @@ const coverage = {
   rosterGateEarly: "n0.f0.t0.m0.ok803",
   rosterAnsweredLive: "23.23", rosterAnsweredToday: "291.291", rosterAnsweredEarly: "154.154",
   rosterBodyLiveKb: 22, rosterBodyLiveInitKb: 0, rosterBodyPrematchKb: 4639,
-  rosterShapeLive: "0i,1a2,2s31,3s24,4a2,5b,6i,7z,8a37.p.0i,1o3,2s0,3z",
-  rosterShapeToday: "0s,3s,5b,6b,7a5,9a0,13b,14o5,17o3.p.0z,1z,2z,3z",
-  rosterShapeEarly: "0i,1a2,2s31,3s24,4a2,5b,6i,7z,8a37.p.0i,1o3,2s0,3z",
+  rosterShapeLive: "0i,1a2,2s31,3s24,4a2,5b,6i,7z,8a37.P.0i,1o3,2s0,3z",
+  rosterShapeToday: "0s,3s,5b,6b,7a5,9a0,13b,14o5,17o3.P.0z,1z,2z,3z",
+  rosterShapeEarly: "0i,1a2,2s31,3s24,4a2,5b,6i,7z,8a37.P.0i,1o3,2s0,3z",
   rosterAgeMs: 3866, rosterCompletedAgeMs: 19736,
   nativeRosterEvents: 1805, nativePrematchEvents: 971, nativeLiveEvents: 31,
   nativeDetailEvents: 10, nativeMarketRows: 900, nativeSelectionRows: 1800,
@@ -71,5 +71,31 @@ describe("unnamed shape counts", () => {
     for (const shapes of ["bad:1", "Arsenal:1", "1.2.3.5:9000000", "::"]) {
       expect(withShapes(shapes), shapes).toBeNull();
     }
+  });
+});
+
+describe("shape strings the collector really emits", () => {
+  /**
+   * These are verbatim from a live BTI page. A guard written against an
+   * invented sample agrees with itself: the ".P." separator here is upper
+   * case, and a lower-case-only character class silently discarded every
+   * counter the collector published.
+   */
+  const observed = [
+    "0s.3s.5b.6b.7a5.9a0.13b.14o5.17o3.P.0z,1z,2z,3z",
+    "0s5,1a2,2s13,3s24,4z,5b,6b,7a0,8a4,9z,10z,11z,12z.P.0s1,1o1,2z,3z",
+    ""
+  ];
+
+  it("accepts them", () => {
+    for (const shape of observed) {
+      expect(parseBtiPageHealthProbe({ status: "HEALTHY", code: null,
+        rosterCoverage: JSON.stringify({ ...coverage, rosterShapeToday: shape }) }), shape).not.toBeNull();
+    }
+  });
+
+  it("still refuses a shape carrying provider text", () => {
+    expect(parseBtiPageHealthProbe({ status: "HEALTHY", code: null,
+      rosterCoverage: JSON.stringify({ ...coverage, rosterShapeToday: "Arsenal vs Spurs" }) })).toBeNull();
   });
 });
