@@ -2202,6 +2202,59 @@ giá cũ vẫn cũ và vẫn khai tuổi của nó.
   Đừng vừa deploy vừa đo.
 - IM vẫn chết (tab đứng, 0 gói dữ liệu) — theo yêu cầu, tạm bỏ qua.
 
+### 2026-09-13 tối — mã giải: xin 268, nhận 10
+
+Sau khi sửa đường lấy dữ liệu, BTI vẫn chỉ có 49 trận trong 24 giờ. Bộ đếm
+"xin bao nhiêu giải / nhận được bao nhiêu" trả lời ngay:
+
+```
+answered  live=72.10   today=267.10   early=156.156
+```
+
+Mỗi dòng giải mang **hai mã**: ô số 0 là mã thùng chứa (khoá để gộp), ô số 3 là mã
+thật mà nhà cái trả lời. Early vốn đã xin bằng mã thật nên được đủ 156/156. Live và
+hôm nay xin bằng mã thùng chứa, và nhà cái **lặng lẽ trả về đúng 10 giải mặc định**
+— không lỗi, không từ chối, chỉ là bớt đi. Vì thế mở rộng bước dò giải không đổi được
+gì: tìm ra 267 mã rồi bị bỏ qua hết.
+
+Sửa: mọi phân vùng đều xin bằng mã thật.
+
+| BTI | Trước | Sau |
+| --- | --- | --- |
+| Tổng trận | 804 | 1.821 |
+| Trận live | 0 | 144 |
+| Trận trong 24 giờ | 0 | 838 |
+| Giải hôm nay xin/nhận | 267/10 | 268/268 |
+| Dòng bị vứt vì mất tên | 999/999 | 0 |
+
+### Cái bẫy khi tự đo kèo chênh
+
+Script đo tạm của tôi báo 434 cơ hội dương, biên tới +50%. **Sai cả hai lẽ:**
+
+1. Nó ghép 2 trong 3 cửa của kèo 1X2. Muốn ăn chắc phải phủ **hết** cửa —
+   `1/HOME + 1/DRAW + 1/AWAY < 1`, không phải từng cặp.
+2. Nó ghép trận chỉ bằng tên đội, thô hơn hệ thống thật (hệ thống dùng liên kết giải
+   + mã phân biệt trận), nên nó ghép "Mallorca II v Deportiva Minera" với
+   "Mallorca v Sabadell".
+
+Biên +50% trên kèo góc là dấu hiệu lỗi script, không phải cơ hội. **Số cơ hội thật chỉ
+được đọc từ màn hình so sánh của web**, đừng tin script đo tạm.
+
+### Đừng vừa deploy vừa đo (lần nữa)
+
+Mỗi lần build lại extension là xoá sạch tiến độ đi bộ của APSPORT và bộ nhớ chi tiết
+của BTI. Đo trong 55 phút **không** động vào gì:
+
+```
+17:05  AP đã đọc  37/1178   BTI kèo góc 18
+17:30  AP đã đọc  61/1179   BTI kèo góc 17
+18:00  AP đã đọc 226/1172   BTI kèo góc 79
+```
+
+Tiến độ chỉ tích luỹ khi để yên. Kế hoạch thu thập vốn đã tự giới hạn vào các trận có
+mặt trên ≥2 sàn (`pairable-event-plan.ts`), nên nó đang đi đúng chỗ — chỉ cần thời gian.
+Lưu ý: kế hoạch đó do **trang web** phát, nên tab dashboard phải mở.
+
 ## Tài liệu liên quan
 
 - `docs/apsport-handoff-codex.md` — nguyên nhân gốc APSPORT (adapter xoá record socket
