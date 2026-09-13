@@ -2108,6 +2108,100 @@ sau khi gắn lại tab** rồi rữa dần.
 
 Bản bàn giao gọn cho buổi sáng: `docs/BAN-GIAO-2026-09-12.md`.
 
+## 2026-09-13 chiều — BTI mất sạch kèo hôm nay và live, và vì sao không ai thấy
+
+### Triệu chứng
+
+BTI giữ 804 trận, **không một trận nào đá trong 24 giờ** (210 trận ở 24-72h, 594 trận
+>72h). Vì thế nó không chia sẻ trận nào với APSPORT mà cả hai cùng treo kèo góc, và
+toàn bộ việc ghép kèo góc BTI × APSPORT bằng 0.
+
+### Không phải lỗi trình thu thập
+
+Trình thu thập trên trang đi hết 1.805 trận mỗi vòng, 1.002 trận trong 24 giờ (31 dòng
+live, 971 dòng hôm nay, 803 dòng early), và **chạy xong**: 8 vòng liên tiếp, không lần
+nào bị dựng lại, không mất phiên, không hỏng request. Dựng lại đúng 4 cổng kiểm tra của
+bộ giải mã theo từng phần cho ra câu trả lời:
+
+```
+live   n0.f0.t0.m39.ok0     ← 39/39 rớt vì tên đội
+today  n0.f0.t0.m960.ok0    ← 960/960 rớt vì tên đội
+early  n0.f0.t0.m0.ok803    ← 803/803 qua hết
+```
+
+Mọi lần rớt đều là luật hai tên, không gì khác.
+
+### Nguyên nhân gốc
+
+Dòng bị rớt có hình dạng `0s.3s.5b.6b.7a5.9a0.13b.14o.17o` — một id, một giờ bóng lăn,
+một cờ live, và các object có khoá `IsBetBuilder`/`IsVIPExcluded` và
+`HomeShirtColour`/`Team_Logo_Home`. Không có người chơi, không có tên hiển thị, không có
+kèo. **Đó là dòng delta, không phải dòng roster.**
+
+Live và prematch mở hai endpoint dưới cùng bộ league id:
+
+| Đường | Trả về |
+| --- | --- |
+| `/v2/1/{live,prematch}` | chỉ các trường thay đổi — không tên, không kèo |
+| `/v2/1/{live,prematch}/initial` | dòng roster đầy đủ, nhưng chỉ cho league được hỏi |
+
+Bước mở rộng league thêm ngày 2026-09-12 lấy qua đường thứ nhất và chấp nhận kết quả vì
+nó **nhiều league hơn**, nên một danh sách dài các dòng vô danh đã đè lên danh sách đầy
+đủ. Early không có sự chia đôi này, nên chỉ mình nó sống sót.
+
+### Đã sửa
+
+- Lấy **danh sách league** từ đường delta, lấy **dòng dữ liệu** từ đường `/initial`.
+- Một lần mở rộng phải giữ được ít nhất bằng số dòng có tên mà nó thay thế.
+- Một trang không có dòng nào có tên không được cho nghỉ hưu dòng đang giữ mà có tên.
+- Khi hai trang cùng mô tả một trận, **dòng có tên thắng** bất kể số byte nói gì: dòng
+  delta ở đây serialize dài hơn dòng roster, xét theo độ giàu thì nó thắng.
+
+### Ba cánh cửa im lặng đã nuốt chẩn đoán
+
+Mất nhiều giờ nhất không phải là lỗi, mà là việc không nhìn thấy gì. Cả ba đều đã sửa:
+
+1. **Nút "Reset sàn"** chạy đường khởi động lại toàn bộ trình duyệt qua Fabet: làm mới
+   mọi phiên, xin URL mới cho từng sàn, xoá coverage, thay cả 6 tab, rồi đợi 6 tab mới.
+   Fabet bị chặn nên nó không bao giờ bắt đầu, và không sàn nào được bảo đi lấy kèo. Giờ
+   nút này chạy đúng đường từng sàn: bảo mỗi reader đang gắn đi lấy lại, cách nhau 1,5
+   giây, và một sàn chết không kéo 5 sàn kia xuống nữa.
+2. **`catalogShape` chưa từng tới API cho BTI.** BTI bị loại khỏi danh sách lobby có chẩn
+   đoán, và body page-health *thay chỗ* body WS_ATTACH thay vì đi cùng. Mọi bộ đếm của
+   BTI sau cánh cửa đó đã vô hình từ khi nó tồn tại.
+3. **Bộ canh `unnamedShapes` mất dấu gạch chéo ngược**, nên nó khớp chữ `d` chứ không
+   phải chữ số, và chỉ chấp nhận đúng một giá trị: chuỗi rỗng. Chỉ cần BTI có **một**
+   dòng vô danh là toàn bộ roster coverage không parse được và bị vứt. Một coverage bị
+   vứt hiện ra là "status UNKNOWN, không có coverage" — y hệt một trang đang tải. Trình
+   thu thập báo 1.815 ký tự suốt thời gian đó.
+
+### APSPORT: trần là nhà cái, không phải bộ lập lịch
+
+```
+rosterEvents=1251  successfulEvents=38  pendingEvents=1213
+queuedEvents=2     inFlightEvents=0     ← lối đi đang RỖNG, không phải quá tải
+catalogShape: APSPORT_ROSTER_HTTP_429
+```
+
+Nhà cái trả 429 khi vượt 3 lane (đã đo: 6 lane bị chặn liên tục), nên bước đi giữ được
+khoảng **5 lượt đọc/phút**. Riêng 14 trận live ở bậc 5 giây đã đòi 168 lượt/phút. Xếp
+thứ tự thuần theo chu kỳ làm mới thì live ăn hết mọi suất, và 1.213 trận chưa từng được
+đọc lần nào — không trận nào trong số đó mang được kèo góc.
+
+**Một trận chưa có kèo thì không so được với sàn nào. Một trận có kèo cũ thì vẫn so
+được, vì mỗi giá tự mang đồng hồ của nó.** Hai cái đó không cùng giá trị nên đừng xếp
+như nhau: lượt đọc đầu tiên được 1 suất trong mỗi 3 suất. Không ngưỡng tươi nào bị nới —
+giá cũ vẫn cũ và vẫn khai tuổi của nó.
+
+### Còn lại
+
+- **Kèo góc BTI dao động** 92 → 4 → 82 → 10 giữa các thế hệ roster: kèo góc đến từ event
+  detail, và mỗi lần commit roster lại xoá detail không nằm trong danh sách mới.
+- **Mỗi lần build lại extension là xoá sạch tiến độ đi bộ của APSPORT**
+  (`successfulEvents` về 3 rồi bò lên ~7,5/phút). Nó cần nhiều giờ không bị động vào.
+  Đừng vừa deploy vừa đo.
+- IM vẫn chết (tab đứng, 0 gói dữ liệu) — theo yêu cầu, tạm bỏ qua.
+
 ## Tài liệu liên quan
 
 - `docs/apsport-handoff-codex.md` — nguyên nhân gốc APSPORT (adapter xoá record socket
