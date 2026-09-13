@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RefreshableProvider } from "./routes/maintenance.js";
 import {
-  describeProviderReset, providerResetFailure, RESET_PROVIDERS, resetProviderSources
+  describeProviderReset, providerResetFailure, RESET_PROVIDERS, resetProviderSources, resetTimedOut
 } from "./catalog-reset.js";
 
 const noSleep = async (): Promise<void> => undefined;
@@ -76,6 +76,20 @@ describe("resetProviderSources", () => {
       { provider: "CMD", delivered: 1, failure: null },
       { provider: "IM", delivered: null, failure: "CHROME_BRIDGE_SNAPSHOT_UNDELIVERED:IM" }
     ])).toBe("Reset sàn: 1/2 sàn đã lấy kèo lại (CMD); " +
+      "chưa lấy lại được: IM(CHROME_BRIDGE_SNAPSHOT_UNDELIVERED:IM)");
+  });
+
+  it("does not call a book failed when only its baseline was late", () => {
+    // Measured 2026-09-13: a reset reported SBOBET and SABA as not recovered,
+    // and both were LIVE and quoting three minutes later.
+    expect(resetTimedOut("PROVIDER_FEED_BASELINE_TIMEOUT")).toBe(true);
+    expect(resetTimedOut("CHROME_BRIDGE_SNAPSHOT_UNDELIVERED:IM")).toBe(false);
+    expect(describeProviderReset([
+      { provider: "CMD", delivered: 1, failure: null },
+      { provider: "SABA", delivered: null, failure: "PROVIDER_FEED_BASELINE_TIMEOUT" },
+      { provider: "IM", delivered: null, failure: "CHROME_BRIDGE_SNAPSHOT_UNDELIVERED:IM" }
+    ])).toBe("Reset sàn: 1/3 sàn đã lấy kèo lại (CMD); " +
+      "đã khởi động lại nhưng chưa kịp báo về trong 90 giây: SABA; " +
       "chưa lấy lại được: IM(CHROME_BRIDGE_SNAPSHOT_UNDELIVERED:IM)");
   });
 });

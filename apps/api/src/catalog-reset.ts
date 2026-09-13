@@ -22,6 +22,17 @@ export interface ProviderResetOptions {
   readonly onOutcome?: (outcome: ProviderResetOutcome) => void;
 }
 
+/**
+ * A baseline that did not arrive inside the window is not the same as a book
+ * that failed. Measured 2026-09-13: a reset reported SBOBET and SABA as not
+ * recovered, and both were LIVE and quoting within three minutes - the reset
+ * had in fact restarted them. Saying "failed" there teaches the operator to
+ * distrust the button.
+ */
+export function resetTimedOut(failure: string | null): boolean {
+  return failure !== null && failure.includes("PROVIDER_FEED_BASELINE_TIMEOUT");
+}
+
 export function resetFailureCode(error: unknown): string {
   const raw = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim();
   return raw === "" ? "UNKNOWN" : raw.slice(0, 80);
@@ -66,13 +77,18 @@ export async function resetProviderSources(
 export function describeProviderReset(outcomes: readonly ProviderResetOutcome[]): string {
   if (outcomes.length === 0) return "Reset sàn: không có sàn nào đang gắn";
   const recovered = outcomes.filter((outcome) => outcome.failure === null).map((outcome) => outcome.provider);
-  const failed = outcomes.filter((outcome) => outcome.failure !== null);
-  const head = `Reset sàn: ${recovered.length}/${outcomes.length} sàn đã lấy kèo lại`;
-  if (failed.length === 0) return `${head} (${recovered.join(", ")})`;
-  const detail = failed.map((outcome) => `${outcome.provider}(${outcome.failure ?? "UNKNOWN"})`).join(", ");
-  return recovered.length === 0
-    ? `${head}; chưa lấy lại được: ${detail}`
-    : `${head} (${recovered.join(", ")}); chưa lấy lại được: ${detail}`;
+  const pending = outcomes.filter((outcome) => resetTimedOut(outcome.failure)).map((outcome) => outcome.provider);
+  const failed = outcomes.filter((outcome) => outcome.failure !== null && !resetTimedOut(outcome.failure));
+  const parts = [`Reset sàn: ${recovered.length}/${outcomes.length} sàn đã lấy kèo lại` +
+    (recovered.length === 0 ? "" : ` (${recovered.join(", ")})`)];
+  if (pending.length > 0) {
+    parts.push(`đã khởi động lại nhưng chưa kịp báo về trong 90 giây: ${pending.join(", ")}`);
+  }
+  if (failed.length > 0) {
+    parts.push(`chưa lấy lại được: ${failed
+      .map((outcome) => `${outcome.provider}(${outcome.failure ?? "UNKNOWN"})`).join(", ")}`);
+  }
+  return parts.join("; ");
 }
 
 /**

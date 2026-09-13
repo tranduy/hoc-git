@@ -41,7 +41,8 @@ import { ProviderAuthorityCoordinator } from "./chrome-bridge/provider-authority
 import { chromeBridgeSourceIdentity } from "./chrome-bridge/chrome-bridge-account.js";
 import { PipelineTelemetry } from "./diagnostics/pipeline-telemetry.js";
 import { providerFeedPolicies } from "./chrome-bridge/provider-feed-policies.js";
-import { describeProviderReset, providerResetFailure, resetProviderSources } from "./catalog-reset.js";
+import { describeProviderReset, providerResetFailure, resetProviderSources,
+  resetTimedOut } from "./catalog-reset.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -634,7 +635,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
           maintenanceJournal.record(outcome.failure === null ? "INFO" : "WARN",
             outcome.failure === null
               ? `Reset sàn: ${outcome.provider} đã lấy kèo lại`
-              : `Reset sàn: ${outcome.provider} chưa lấy lại được (${outcome.failure})`);
+              : resetTimedOut(outcome.failure)
+                ? `Reset sàn: ${outcome.provider} đã khởi động lại, chưa kịp báo về trong 90 giây`
+                : `Reset sàn: ${outcome.provider} chưa lấy lại được (${outcome.failure})`);
         }
       });
       maintenanceJournal.record("INFO", describeProviderReset(outcomes));
