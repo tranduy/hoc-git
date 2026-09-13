@@ -98,7 +98,29 @@ export function createFootballCollectionScheduler(
         const firstNonLive = values.findIndex(id => !timing(id).live);
         values.splice(firstNonLive < 0 ? values.length : firstNonLive, 0, far);
       }
-      return values;
+      // A fixture with no book at all cannot be compared against any other
+      // book; a fixture whose book is merely stale still can, because every
+      // quote carries its own clock. Ordering purely by refresh interval hides
+      // that difference: measured 2026-09-13, APSPORT sustained about five
+      // detail reads a minute against a provider that answers 429 beyond three
+      // lanes, while its fourteen live fixtures alone asked for one hundred and
+      // sixty-eight. Live won every slot and 1,213 of 1,251 fixtures had never
+      // been read once.
+      //
+      // So give first reads a share of the batch rather than the leftovers:
+      // one slot in every three, taken in the existing priority order, and only
+      // where a fixture that has never been read is actually waiting. Nothing
+      // here loosens a freshness rule - a stale price stays stale and says so.
+      const unread = new Set(values.filter(id => !receipts.has(id)));
+      if (unread.size === 0 || unread.size === values.length) return values;
+      const ordered: string[] = [];
+      const queue = values.filter(id => !unread.has(id));
+      const firstReads = values.filter(id => unread.has(id));
+      while (queue.length > 0 || firstReads.length > 0) {
+        const wantsFirstRead = ordered.length % 3 === 2 && firstReads.length > 0;
+        ordered.push((wantsFirstRead || queue.length === 0 ? firstReads : queue).shift()!);
+      }
+      return ordered;
     },
     snapshot() { return { revision, events: events.size, completed: receipts.size, manualPending: manual.size }; }
   };

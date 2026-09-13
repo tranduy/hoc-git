@@ -118,3 +118,50 @@ describe("football collection scheduling", () => {
     expect(first.snapshot().completed).toBe(1);
   });
 });
+
+describe("first-read share", () => {
+  const plan = (events: readonly { id: string; hoursOut: number }[], nowMs: number) => ({
+    revision: 1,
+    events: events.map(({ id, hoursOut }) => ({ eventId: id,
+      startAtUtcMs: nowMs + hoursOut * 3_600_000, isLive: hoursOut <= 0 }))
+  });
+
+  it("gives an unread fixture one slot in three instead of the leftovers", () => {
+    let nowMs = 1_700_000_000_000;
+    const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, () => nowMs);
+    const live = ["l1", "l2", "l3", "l4", "l5", "l6"];
+    const distant = ["d1", "d2", "d3"];
+    scheduler.setPlan(plan([
+      ...live.map((id) => ({ id, hoursOut: 0 })),
+      ...distant.map((id) => ({ id, hoursOut: 30 }))
+    ], nowMs));
+    // Every live fixture has been read; no distant one ever has.
+    for (const id of live) scheduler.completed(id, nowMs);
+    nowMs += 60_000;
+    const order = scheduler.sort([...live, ...distant]);
+    expect(order.slice(0, 6).filter((id) => distant.includes(id)).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("leaves the order alone when every fixture has been read", () => {
+    let nowMs = 1_700_000_000_000;
+    const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, () => nowMs);
+    const ids = ["a", "b", "c", "d"];
+    scheduler.setPlan(plan(ids.map((id) => ({ id, hoursOut: 0 })), nowMs));
+    for (const id of ids) scheduler.completed(id, nowMs);
+    nowMs += 60_000;
+    expect(scheduler.sort(ids)).toEqual(scheduler.sort(ids));
+    expect(new Set(scheduler.sort(ids))).toEqual(new Set(ids));
+  });
+
+  it("keeps every fixture exactly once", () => {
+    let nowMs = 1_700_000_000_000;
+    const scheduler = createFootballCollectionScheduler(footballRefreshPolicy, () => nowMs);
+    const ids = Array.from({ length: 40 }, (_unused, index) => `e${index}`);
+    scheduler.setPlan(plan(ids.map((id, index) => ({ id, hoursOut: index % 5 })), nowMs));
+    for (const id of ids.slice(0, 25)) scheduler.completed(id, nowMs);
+    nowMs += 60_000;
+    const order = scheduler.sort(ids);
+    expect(order).toHaveLength(ids.length);
+    expect(new Set(order).size).toBe(ids.length);
+  });
+});
