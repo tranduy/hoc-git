@@ -301,15 +301,11 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     const hydrationPath = (ids) =>
       (plan.partition === 'early' ? plan.canonicalPath : plan.initialCanonicalPath) +
       (plan.partition === 'early' ? earlyQuery + '&' : '?') + 'leagueIds=' + ids.join(',');
-    // Measured 2026-09-12: live and prematch each stopped at exactly ten
-    // leagues while early reached 213, because only early ran this expansion.
-    // BTI therefore published zero live fixtures and only ten of today's
-    // leagues, and not one event it quoted corners on was an event another
-    // book also quoted corners on - the entire BTI x APSPORT corner pairing
-    // was empty for that reason alone. The hydration endpoint answers a
-    // request for ten league ids with the full inventory, which early relies
-    // on. A failed expansion falls back to the initial list for live and
-    // prematch so this can only add leagues; early keeps its fail-closed path.
+    // Early has one endpoint that answers a request for ten league ids with
+    // its full inventory, and it relies on that expansion: its initial response
+    // opens only ten leagues. A failed expansion is fatal for early and merely
+    // leaves live and prematch on their own initial list, which the league
+    // discovery below then widens.
     if (initial.payload.serializedData.length > 0) {
       const identify = plan.partition === 'early' ? masterId : requestId;
       const expanded = initial.payload.serializedData.map(identify)
@@ -329,11 +325,34 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         return null;
       }
     }
+    // The roster endpoint answers with whole rows, but only for the leagues it
+    // was asked about; the delta endpoint answers with the full league list, but
+    // rows too thin to decode. Take the list from one and the rows from the
+    // other rather than choosing between coverage and names: hydrating through
+    // the delta path gave 291 of today's leagues and no usable row in any of
+    // them, hydrating through the roster path alone gave whole rows for ten.
+    const discovered = [];
+    if (plan.partition !== 'early' && initial.payload.serializedData.length > 0) {
+      const seed = initial.payload.serializedData.map(requestId)
+        .filter((id) => /^[A-Za-z0-9_-]+$/u.test(id)).slice(0, 10);
+      const catalogue = seed.length > 0
+        ? await fetchList(plan.canonicalPath + '?leagueIds=' + seed.join(',')) : null;
+      for (const league of Array.isArray(catalogue?.payload?.serializedData)
+        ? catalogue.payload.serializedData : []) {
+        const leagueId = requestId(league);
+        if (leagueId && /^[A-Za-z0-9_-]+$/u.test(leagueId)) discovered.push(leagueId);
+      }
+    }
     const leagueIds = [];
     const seenLeagueIds = new Set();
     for (const league of initial.payload.serializedData) {
       const leagueId = requestId(league);
       if (!leagueId || !/^[A-Za-z0-9_-]+$/u.test(leagueId) || seenLeagueIds.has(leagueId)) continue;
+      seenLeagueIds.add(leagueId);
+      leagueIds.push(leagueId);
+    }
+    for (const leagueId of discovered) {
+      if (seenLeagueIds.has(leagueId)) continue;
       seenLeagueIds.add(leagueId);
       leagueIds.push(leagueId);
     }
@@ -405,7 +424,17 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
               continue;
             }
             const retained = events.get(eventId);
-            if (!retained || rowRichness(event) > rowRichness(retained)) events.set(eventId, event);
+            if (!retained) { events.set(eventId, event); continue; }
+            // A named row beats an unnamed one whatever the byte counts say: a
+            // delta row can serialize longer than a roster row and still be
+            // undecodable. Richness only settles ties between rows of the same
+            // kind.
+            const incomingNamed = rowHasNames(event);
+            if (incomingNamed !== rowHasNames(retained)) {
+              if (incomingNamed) events.set(eventId, event);
+              continue;
+            }
+            if (rowRichness(event) > rowRichness(retained)) events.set(eventId, event);
           }
         };
         addEvents(existing);
@@ -423,9 +452,15 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     for (let index = 0; index < pages.length; index += 1) {
       // An explicit league read supersedes that league's initial shell, even
       // when events/markets disappeared. Richness is not a freshness clock.
+      // A page carrying no named row at all is the exception: that is the delta
+      // shape, and letting it retire named rows is how today's fixtures were
+      // lost. An undecodable row replaces nothing, so keep what is already held
+      // and let the richness merge below add whatever the page does carry.
       const requestedMasters = new Set(batches[index]);
-      for (const [containerId, league] of merged) {
-        if (requestedMasters.has(requestId(league))) { merged.delete(containerId); leagueClocks.delete(containerId); }
+      if (plan.partition === 'early' || namedRows(pages[index].payload) > 0) {
+        for (const [containerId, league] of merged) {
+          if (requestedMasters.has(requestId(league))) { merged.delete(containerId); leagueClocks.delete(containerId); }
+        }
       }
       // Every normal response also carries unexpanded shells for the other
       // leagues. Only the requested master IDs have authoritative full rows.

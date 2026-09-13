@@ -450,7 +450,7 @@ describe("BTI private collector regression", () => {
       })), ids[0] === "l10" ? 2_000 : 100)) };
     });
     const pending = h.refresh();
-    await vi.advanceTimersByTimeAsync(2_600);
+    await vi.advanceTimersByTimeAsync(2_800);
     const result = await pending;
     const roster = JSON.parse(result.responses.find((item: any) => item.url.endsWith("prematch/initial")).body);
     expect(slowAttempts).toBe(2);
@@ -770,9 +770,10 @@ describe("BTI private collector regression", () => {
     // does, because the initial response only ever opens ten leagues. Here the
     // probe answers with fewer leagues than the initial list, so it is rejected
     // and all 23 advertised leagues survive - the probe can only ever add.
-    // Hydration reads the roster endpoint, not the delta endpoint: one probe
-    // plus three batches of ten across the 23 advertised leagues.
-    expect(requested.filter((path) => path.includes("/prematch?"))).toHaveLength(0);
+    // Rows come from the roster endpoint - one probe plus three batches of ten
+    // across the 23 advertised leagues. The delta endpoint is read once, only
+    // to learn which leagues exist.
+    expect(requested.filter((path) => path.includes("/prematch?"))).toHaveLength(1);
     expect(requested.filter((path) =>
       path.includes("/prematch/initial?leagueIds="))).toHaveLength(4);
     expect(requested.filter((path) => path.startsWith("/api/eventpage"))).toHaveLength(3);
@@ -781,7 +782,7 @@ describe("BTI private collector regression", () => {
     });
   });
 
-  it("expands live and prematch through the roster endpoint, never the delta endpoint", async () => {
+  it("takes the league list from the delta endpoint and the rows from the roster endpoint", async () => {
     const root = { dataset: {} };
     const requested: string[] = [];
     const named = (id: string) => [id, [["h", { EN: "Home" }], ["a", { EN: "Away" }]], "Home vs Away",
@@ -802,23 +803,28 @@ describe("BTI private collector regression", () => {
       if (path.includes("/early") || path.includes("/live")) {
         return { ok: true, text: async () => '{"serializedData":[]}' };
       }
-      const ids = path.includes("leagueIds=01") ? ["a", "b"]
-        : new URL(path, "https://bti.test").searchParams.get("leagueIds")!.split(",");
+      // The bootstrap opens one league; only the delta endpoint knows about the
+      // second, and only the roster endpoint can describe either one.
+      const ids = path.includes("leagueIds=01") ? ["a"]
+        : path.includes("/initial")
+          ? new URL(path, "https://bti.test").searchParams.get("leagueIds")!.split(",")
+          : ["a", "b"];
       const rows = (id: string) => path.includes("/initial") ? [named(`e-${id}`)] : [delta(`e-${id}`)];
       return { ok: true, text: async () => JSON.stringify({ serializedData: ids.map((id) => league(id, rows(id))) }) };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage", `return ${BTI_CATALOG_REFRESH_EXPRESSION}`);
     const result = await evaluate({ documentElement: root },
       { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" }, fetcher, { getItem: () => null });
-    expect(requested.some((path) => /[/]prematch[?]/u.test(path))).toBe(false);
     const roster = JSON.parse(result.responses.find((row: any) => row.url.endsWith("prematch/initial")).body);
+    expect(roster.serializedData.map((item: any) => item[0]).sort()).toEqual(["a", "b"]);
     expect(roster.serializedData.flatMap((item: any) => item[12])
       .every((event: any) => Array.isArray(event[1]) && event[1].length === 2)).toBe(true);
+    expect(requested.some((path) => /[/]prematch[?]leagueIds=/u.test(path))).toBe(true);
     expect(JSON.parse((root.dataset as Record<string, string>).fieldlineBtiRosterCoverage!))
       .toMatchObject({ namedEvents: 2, validEvents: 2 });
   });
 
-  it("rejects an expansion that returns more leagues but fewer named rows", async () => {
+  it("never lets a nameless response retire rows that already have names", async () => {
     const root = { dataset: {} };
     const named = (id: string) => [id, [["h", { EN: "Home" }], ["a", { EN: "Away" }]], "Home vs Away",
       "2027-09-07T12:00:00Z", null, false];
@@ -837,15 +843,19 @@ describe("BTI private collector regression", () => {
       if (path.includes("leagueIds=01")) {
         return { ok: true, text: async () => JSON.stringify({ serializedData: [league("a", [named("e-a")])] }) };
       }
-      // Longer, but every row has lost its names: it must not replace the list.
+      // Every other read answers with nameless rows, including the ones the
+      // batches make. None of them may retire the named row already held.
       return { ok: true, text: async () => JSON.stringify({
         serializedData: [league("a", [nameless("e-a")]), league("b", [nameless("e-b")])] }) };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage", `return ${BTI_CATALOG_REFRESH_EXPRESSION}`);
-    await evaluate({ documentElement: root },
+    const result = await evaluate({ documentElement: root },
       { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" }, fetcher, { getItem: () => null });
+    const roster = JSON.parse(result.responses.find((row: any) => row.url.endsWith("prematch/initial")).body);
+    const kept = roster.serializedData.find((item: any) => item[0] === "a");
+    expect(Array.isArray(kept[12][0][1]) && kept[12][0][1].length).toBe(2);
     expect(JSON.parse((root.dataset as Record<string, string>).fieldlineBtiRosterCoverage!))
-      .toMatchObject({ prematchLeagues: 1 });
+      .toMatchObject({ namedEvents: 1 });
   });
 
   it("uses the explicit league response to retire initial events and old market rows", async () => {
