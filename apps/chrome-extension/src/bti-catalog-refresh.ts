@@ -138,6 +138,16 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       // or compact stubs that deserve dropping. No values, only field names.
       unnamedEvents: 0, unnamedWithin24h: 0, unnamedLater: 0, unnamedShapes: '',
       detailCachedEvents: 0, detailCachedBytes: 0, detailPendingEvents: 0 } };
+  // The collector runs in whichever frame owns the provider API, so its
+  // coverage on that frame's document can be unreachable from a probe that
+  // evaluates in the top frame. Carry it back in the result as well: this path
+  // reaches the API from the same frame that produced the roster.
+  const publishedCoverage = () => {
+    try {
+      const text = String(root.dataset.fieldlineBtiRosterCoverage || '');
+      return text.length > 0 && text.length <= 4096 ? text : '';
+    } catch { return ''; }
+  };
   const publishCoverage = () => {
     if (!ownsSession()) return;
     if (root[rosterWorkerKey] && root[rosterWorkerKey] !== rosterWorker) return;
@@ -1130,6 +1140,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   return {
     status: 'catalog-requested',
     generation,
+    coverage: publishedCoverage(),
     origin: location.origin || ('https://' + location.hostname),
     responses: [...responses.values()]
   };
@@ -1137,7 +1148,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   rosterWorker.snapshot = snapshot;
   // Background completion retains the roster for inventory inspection but
   // must not consume delivery priority for detail that nobody has forwarded.
-  return { status: 'catalog-requested', generation,
+  return { status: 'catalog-requested', generation, coverage: publishedCoverage(),
     origin: location.origin || ('https://' + location.hostname),
     responses: listResponses.map((item) => ({ url: item.path, body: item.body })) };
   })().then((result) => {

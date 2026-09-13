@@ -1297,6 +1297,7 @@ export class NetworkObserver {
   readonly #collectionPlanFrames = new WeakMap<MainWorldContextBinding, string>();
   readonly #collectionPlanInstalls = new Map<string, Promise<void>>();
   readonly #mainWorldContexts = new Map<number, Map<string, MainWorldContextBinding>>();
+  readonly #btiCollectorCoverage = new Map<string, string>();
   readonly #observedChildSessions = new Map<string, Set<string>>();
   readonly #ksportAttachedTargetSessions = new Map<string, Map<string, string>>();
   readonly #sabaAttachedTargetSessions = new Map<string, Map<string, {
@@ -6065,6 +6066,12 @@ export class NetworkObserver {
         (!allowedPaths.has(response.url) && !allowedDetail) || response.body.length > 12 * 1024 * 1024) continue;
       unique.set(response.url, response.body);
     }
+    // The collector reports its own coverage from the frame that produced the
+    // roster, which a top-frame probe cannot always reach.
+    if (typeof value.coverage === "string" && value.coverage.length > 0 &&
+      value.coverage.length <= 4096 && /^[-A-Za-z0-9_":{},.]+$/u.test(value.coverage)) {
+      this.#btiCollectorCoverage.set(source.sourceId, value.coverage);
+    }
     if ([...requiredPaths].some((path) => !unique.has(path))) return false;
     const detailPaths = [...unique.keys()].filter((path) =>
       /^\/api\/eventpage\/events\/[^/?]{1,1024}$/u.test(path)).slice(0, 48);
@@ -7145,6 +7152,12 @@ export class NetworkObserver {
       const probe = await read({ expression: BTI_PAGE_HEALTH_EXPRESSION,
         contextId: world.contextId, returnByValue: true }, world.sessionId);
       if (probe?.rosterCoverage !== undefined) return probe;
+    }
+    const reported = this.#btiCollectorCoverage.get(source.sourceId);
+    if (reported !== undefined) {
+      const merged = parseBtiPageHealthProbe({ status: top?.status ?? "UNKNOWN",
+        code: top?.code ?? null, rosterCoverage: reported });
+      if (merged !== null) return merged;
     }
     return top ?? { status: "UNKNOWN", code: null };
   }
