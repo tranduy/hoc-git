@@ -5,7 +5,11 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   // Shape only: how often the roster walk restarts, completes or loses its
   // session. Never deleted by a teardown, otherwise it could not count them.
   const statsKey = '__fieldlineBtiRosterStatsV1';
-  const stats = root[statsKey] || (root[statsKey] = { starts: 0, completed: 0, failed: 0,
+  // The object survives every injection, so a counter added later is missing
+  // from the one already on the page and reading it throws where nothing
+  // reports the throw: the lane counters simply never appeared. Fill in what a
+  // newer build expects rather than trusting what an older one left.
+  const statsDefaults = { starts: 0, completed: 0, failed: 0,
     teardownVersion: 0, teardownSession: 0, lostSession: 0, paused: 0, fetchNull: 0,
     partFail: { live: 0, prematch: 0, early: 0 }, startedAtMs: 0, completedAtMs: 0,
     doneEvents: 0, doneWithin24h: 0, doneLive: 0, donePrematch: 0, doneEarly: 0,
@@ -18,7 +22,16 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     // and ends, which says whether they are being topped up.
     lane: { fetched: 0, notDesired: 0, notDue: 0, started: 0, ended: 0 },
     shapes: { live: '', prematch: '', early: '' },
-    answered: { live: '', prematch: '', early: '' } });
+    answered: { live: '', prematch: '', early: '' } };
+  const stats = root[statsKey] || (root[statsKey] = statsDefaults);
+  for (const [key, value] of Object.entries(statsDefaults)) {
+    if (stats[key] === undefined) stats[key] = value;
+    else if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [inner, fallback] of Object.entries(value)) {
+        if (stats[key][inner] === undefined) stats[key][inner] = fallback;
+      }
+    }
+  }
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   const rosterWorkerKey = '__fieldlineBtiRosterWorkerV10';
   const detailBodiesKey = '__fieldlineBtiDetailBodiesV10';
