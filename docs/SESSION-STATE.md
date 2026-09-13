@@ -2255,6 +2255,58 @@ Tiến độ chỉ tích luỹ khi để yên. Kế hoạch thu thập vốn đ�
 mặt trên ≥2 sàn (`pairable-event-plan.ts`), nên nó đang đi đúng chỗ — chỉ cần thời gian.
 Lưu ý: kế hoạch đó do **trang web** phát, nên tab dashboard phải mở.
 
+### 2026-09-13 tối muộn — kèo góc APSPORT nằm ở đâu, và chuỗi loại trừ
+
+BetBurger hiện kèo góc Pinnacle cho FC Porto II v Vizela (còn 30 giờ). Của ta đọc
+đúng trận đó, lấy về **43 loại kèo, không có góc**. Cùng lúc, Silkeborg v Viborg
+(đang đá) lấy về 44 loại **có góc**. Provider có, request của ta không xin được.
+
+Đã loại trừ, mỗi bước một phép đo — **đừng thử lại**:
+
+| Giả thuyết | Phép đo | Kết quả |
+| --- | --- | --- |
+| Chưa đọc tới | 93/134 trận mốc 24-72h đã đọc, ~40 loại kèo/trận | 2 trận có góc |
+| Bộ giải mã vứt | 45.764 quan sát gốc | 44.843 chuẩn hoá, 921 bỏ có khai lý do |
+| Sai mã nhóm `mg` | dò `mg` 1→12 trên 2 trận | **mọi nhóm trả cùng một bộ kèo** |
+| Sai cờ `isExtra` | dò 19 lần khi nhóm rỗng | đổi cờ được thêm **0** kèo |
+| Sai cờ `opl` | dò cả 4 tổ hợp | `opl:true` cho **ít** kèo hơn (45 → 8) |
+
+Kết luận: **endpoint chi tiết HTTP không có kèo góc cho trận chưa đá.** Kèo góc đi
+qua socket `mg/4` — kênh trang tự mở khi người dùng bấm tab Corners.
+
+Hệ quả phụ rất lớn: vì `mg` bị bỏ qua, mỗi trận đang gửi **3 request y hệt nhau**
+(mg 1, 4, 9). Bỏ 2 cái thừa → tốc độ đọc **3,4 → 20 trận/phút**, một vòng 1.000 trận
+từ 6 tiếng xuống ~50 phút.
+
+### Luật tươi quyết định kèo nào có thể lên bảng
+
+```
+LIVE 5s · <3h 60s · 3-6h 120s · 6-13h 5m · 13-24h 15m · 24-72h 75m
+```
+
+Một lượt đọc chi tiết chỉ đáng bỏ ra nếu giá lấy về **còn kịp tươi đến lượt sau**.
+Bộ lập lịch xếp theo chu kỳ làm mới ngắn nhất — đúng cho sàn chạy socket, **sai cho
+sàn phải hỏi từng trận**: nó dồn hết lượt đọc vào mốc live/gần, nơi giá chắc chắn bị
+từ chối, và bỏ đói mốc 24-72h là mốc duy nhất một vòng 50 phút theo kịp.
+
+### Socket kèo góc: mở ngắt quãng, không mở liên tục
+
+Mở liên tục từng làm worker restart 2-3 phút/lần (15.814 khung dùng chung phiên
+debugger mà roster cần). Mở theo chu kỳ thì không: đo được **4.658 khung về, 4.633
+giải mã được (99,5%)**, worker đứng yên, walk không suy suyển. Bắt đầu 20 giây mở /
+4 phút đóng, sau nâng lên 60/90 vì chu kỳ đầu quá thưa so với luật tươi.
+
+`AP_MG[sockets:N;frames:N;parsed:N]` trong `catalogShape` nói ngay nó có quá tay không.
+
+### Cái bẫy khi tự đo kèo chênh — lần hai
+
+1. Ghép 2 trong 3 cửa của kèo 1X2 **không phải** kèo chắc. Phải phủ hết cửa.
+2. Ghép trận chỉ bằng tên đội là ghép nhầm đội trẻ với đội một. Cần thêm điều kiện
+   giờ bóng lăn.
+3. **DNB không bằng chấp 0.** BTI treo cả hai trên 88 trận và tự ra giá lệch 2,26%
+   (p90 4,17%). Quy đổi vào là chế ra chênh lệch ảo đúng cỡ một kèo thơm. Lệnh cấm
+   trong `football-comparison-equivalents.ts` là đúng, nay đã có bằng chứng kèm.
+
 ## Tài liệu liên quan
 
 - `docs/apsport-handoff-codex.md` — nguyên nhân gốc APSPORT (adapter xoá record socket
