@@ -740,20 +740,30 @@ async function configureBridgeOnce(): Promise<boolean> {
       onLobbyLanguage: async (lobby, language) => {
         // The tab is the only place the session token lives, so the rewrite
         // happens here and the token never travels. Same origin, same token,
-        // one parameter moved - which is the difference between changing a
-        // page's language and spending the launch that page was opened with.
+        // one parameter moved - the difference between changing a language
+        // and spending the launch the page was opened with.
+        //
+        // Every way this can decline to act says so. The first attempt
+        // returned 202 and did nothing at all, and only a count of the books
+        // competition names showed it: 209 of 230 were still Vietnamese
+        // twenty minutes later.
         const attached = registry.list().find((entry) => entry.lobby === lobby);
-        if (attached === undefined) return;
-        const [tab] = await chrome.tabs.query({});
-        void tab;
+        const note = (outcome: string): void => {
+          try { observer.noteTabKeepAlive?.(attached?.tabId ?? -1, `lang-${outcome}`); }
+          catch { /* a counter is not worth the command */ }
+        };
+        if (attached === undefined) { note("no-attached-tab"); return; }
         const current = await chrome.tabs.get(attached.tabId).catch(() => undefined);
         const currentUrl = current?.url;
-        if (typeof currentUrl !== "string") return;
+        if (typeof currentUrl !== "string") { note("tab-url-unavailable"); return; }
         const next = lobbyLanguageUrl(attached.lobby, currentUrl, language);
-        if (next === null) return;
+        if (next === null) { note("url-carries-no-language"); return; }
         const recognized = recognizeLobbyTab({ id: attached.tabId, url: next });
-        if (recognized?.lobby !== attached.lobby) return;
-        await chrome.tabs.update(attached.tabId, { url: next });
+        if (recognized?.lobby !== attached.lobby) { note("rewritten-url-unrecognized"); return; }
+        try {
+          await chrome.tabs.update(attached.tabId, { url: next });
+          note("navigated");
+        } catch { note("navigate-failed"); }
       },
       onSourceNavigate: async (sourceId, url) => {
         if (sourceId.startsWith("chrome:IM:")) throw new Error("IM_AUTOMATIC_NAVIGATION_DISABLED");
