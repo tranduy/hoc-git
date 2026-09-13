@@ -43,16 +43,22 @@ describe("collection plan observer ownership", () => {
       await observer.refreshCatalog(source);
       expect(sweepContinued).toBe(false);
       await vi.advanceTimersByTimeAsync(2_000);
-      // The walk now spends its lanes inside the six-hour window, so the
-      // +30h and +80h fixtures are left to the mg/1 socket for main markets.
-      expect(detail.mock.calls.map(c => c[0].eventId)).toEqual(["1"]);
+      // The +30h fixture is walked too. Confining the walk to six hours kept
+      // near kick-off corner books fresh and, unnoticed, meant no fixture
+      // further out was ever asked for its corners - which is where the
+      // corner arbitrage actually sits. The +80h fixture stays out: it is
+      // beyond the 72-hour horizon the roster itself carries.
+      expect(detail.mock.calls.map(c => c[0].eventId)).toEqual(["1", "2"]);
       await observer.maintain(source);
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(detail).toHaveBeenCalledTimes(1);
+      // Nothing new is due yet: both books were just taken.
+      expect(detail).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(10_000);
       await observer.maintain(source);
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(detail.mock.calls.map(c => c[0].eventId)).toEqual(["1", "1"]);
+      // The near fixture comes round again first: the scheduler orders on
+      // refresh interval, which is what keeps the near window in front.
+      expect(detail.mock.calls.map(c => c[0].eventId)).toEqual(["1", "2", "1"]);
     } finally { await observer.stop(source); vi.useRealTimers(); }
   });
   it("installs only into attached source contexts and rejects older plans without source recovery", async () => {
@@ -122,10 +128,15 @@ describe("collection plan observer ownership", () => {
 
       await vi.advanceTimersByTimeAsync(20_000);
 
-      // Fixtures inside the six-hour walk window all complete; the +7h one is
-      // deliberately left out so near kick-off corner books stay fresh.
+      // Every fixture is walked, the +7h one included. Confining this to six
+      // hours kept near kick-off corner books fresh and, unnoticed, decided
+      // that no fixture further out would ever be asked for its corners:
+      // measured 2026-09-13, APSPORT carried corners on 53 of 1,288 fixtures
+      // and shared none of them with BTI, while the corner arbitrage worth
+      // finding sat ten hours to three days out. The near window is kept by
+      // the scheduler ordering on refresh interval, not by excluding these.
       expect(new Set(detail.mock.calls.map(call => call[0].eventId))).toEqual(
-        new Set(records.slice(0, 6).map(record => record["2"])));
+        new Set(records.map(record => record["2"])));
     } finally { await observer.stop(source); vi.useRealTimers(); }
   });
 });
