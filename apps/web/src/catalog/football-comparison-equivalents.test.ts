@@ -84,6 +84,16 @@ describe("proven native football equivalences",()=>{
     expect(footballComparisonEquivalents(cell("CORNER_FT_TOTAL", "8", ["OVER"], true), ["8.5"]))
       .toEqual([]);
   });
+  // Draw-no-bet reads like the zero handicap - the draw voids the bet either
+  // way - and BTI quotes it on 175 fixtures APSPORT also has, 49 of which
+  // APSPORT prices a zero handicap on and BTI does not, so projecting would
+  // look like 49 new comparable rows.
+  //
+  // Measured 2026-09-13 on the 88 fixtures where BTI quotes both itself: the
+  // two prices differ by 2.26% at the median, 4.17% at p90 and 8.44% at worst,
+  // and agree within 1% on two of them. A book does not price one bet two ways
+  // by two percent. Projecting would have manufactured a couple of points of
+  // edge on every one of those fixtures - arbitrage-sized, and entirely false.
   it.each(["FT_DRAW_NO_BET","FH_DRAW_NO_BET","SH_DRAW_NO_BET"] as const)("retains %s without inferring the Asian settlement rule",type=>{
     const out=footballComparisonEquivalents(cell(type,null,["HOME","AWAY"]));
     expect(out).toEqual([]);
