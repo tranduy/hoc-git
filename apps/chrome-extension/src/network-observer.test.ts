@@ -4245,13 +4245,21 @@ describe("NetworkObserver", () => {
           serializedData: prematchLeagueIds.map((leagueId) => league(leagueId))
         }) };
       }
-      const match = /^\/api\/eventlist\/asia\/leagues\/v2\/1\/(live|prematch)\?leagueIds=(.+)$/u.exec(path);
-      if (match !== null) {
-        const eventPrefix = match[1] === "live" ? "live" : "prematch";
+      // Rows now come from the roster endpoint; the delta endpoint is read once
+      // per partition purely to learn which leagues exist.
+      const rows = /^\/api\/eventlist\/asia\/leagues\/v2\/1\/(live|prematch)\/initial\?leagueIds=(.+)$/u.exec(path);
+      if (rows !== null) {
+        const eventPrefix = rows[1] === "live" ? "live" : "prematch";
         return { ok: true, text: async () => JSON.stringify({
-          serializedData: match[2]!.split(",").map((leagueId) => league(leagueId,
+          serializedData: rows[2]!.split(",").map((leagueId) => league(leagueId,
             leagueId === "live-league-12" ? [] : [`${eventPrefix}-event-${leagueId}`]))
         }) };
+      }
+      const listing = /^\/api\/eventlist\/asia\/leagues\/v2\/1\/(live|prematch)\?leagueIds=/u.exec(path);
+      if (listing !== null) {
+        const ids = listing[1] === "live" ? liveLeagueIds : prematchLeagueIds;
+        return { ok: true, text: async () => JSON.stringify({
+          serializedData: ids.map((leagueId) => league(leagueId)) }) };
       }
       return { ok: false, text: async () => "" };
     };
@@ -4267,19 +4275,23 @@ describe("NetworkObserver", () => {
       pathname: "/sports", hostname: "bti.test", origin: "https://bti.test"
     }, fetcher, { getItem: () => null });
 
-    // The first entry is the hydration probe live now runs, the same one early
-    // has always run: the initial response opens only ten leagues, so a probe
-    // asks the hydration endpoint for the full inventory. Here it answers with
-    // no more leagues than the initial list, so it is rejected and every one of
-    // the advertised leagues is still batched below.
+    // The delta endpoint is read once per partition, to list the leagues. Rows
+    // are then fetched from the roster endpoint: a probe of the first ten, then
+    // a batch per ten across everything the listing advertised.
     expect(requested.filter((path) => path.includes("/live?leagueIds="))).toEqual([
-      `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(0, 10).join(",")}`,
-      `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(0, 10).join(",")}`,
-      `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(10).join(",")}`
+      `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(0, 10).join(",")}`
+    ]);
+    expect(requested.filter((path) => path.includes("/live/initial?leagueIds="))).toEqual([
+      `/api/eventlist/asia/leagues/v2/1/live/initial?leagueIds=${liveLeagueIds.slice(0, 10).join(",")}`,
+      `/api/eventlist/asia/leagues/v2/1/live/initial?leagueIds=${liveLeagueIds.slice(0, 10).join(",")}`,
+      `/api/eventlist/asia/leagues/v2/1/live/initial?leagueIds=${liveLeagueIds.slice(10).join(",")}`
     ]);
     expect(requested.filter((path) => path.includes("/prematch?leagueIds="))).toEqual([
-      `/api/eventlist/asia/leagues/v2/1/prematch?leagueIds=${prematchLeagueIds.join(",")}`,
       `/api/eventlist/asia/leagues/v2/1/prematch?leagueIds=${prematchLeagueIds.join(",")}`
+    ]);
+    expect(requested.filter((path) => path.includes("/prematch/initial?leagueIds="))).toEqual([
+      `/api/eventlist/asia/leagues/v2/1/prematch/initial?leagueIds=${prematchLeagueIds.join(",")}`,
+      `/api/eventlist/asia/leagues/v2/1/prematch/initial?leagueIds=${prematchLeagueIds.join(",")}`
     ]);
     const live = result.responses.find(({ url }) =>
       url === "/api/eventlist/asia/leagues/v2/1/live");

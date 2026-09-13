@@ -274,12 +274,17 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       .map((name) => name.trim());
     return split.length === 2 && split.every(Boolean);
   };
+  const namedLeagueRows = (league) => {
+    let count = 0;
+    for (const event of Array.isArray(league?.[12]) ? league[12] : []) {
+      if (rowHasNames(event)) count += 1;
+    }
+    return count;
+  };
   const namedRows = (payload) => {
     let count = 0;
     for (const league of Array.isArray(payload?.serializedData) ? payload.serializedData : []) {
-      for (const event of Array.isArray(league?.[12]) ? league[12] : []) {
-        if (rowHasNames(event)) count += 1;
-      }
+      count += namedLeagueRows(league);
     }
     return count;
   };
@@ -452,15 +457,22 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     for (let index = 0; index < pages.length; index += 1) {
       // An explicit league read supersedes that league's initial shell, even
       // when events/markets disappeared. Richness is not a freshness clock.
-      // A page carrying no named row at all is the exception: that is the delta
-      // shape, and letting it retire named rows is how today's fixtures were
-      // lost. An undecodable row replaces nothing, so keep what is already held
-      // and let the richness merge below add whatever the page does carry.
+      // The one retirement that is never right is trading a league's named rows
+      // for rows that carry no name: those decode to nothing, so the league
+      // would simply disappear. That is how today's fixtures were lost. Any
+      // other retirement, including one that empties a league, still stands.
       const requestedMasters = new Set(batches[index]);
-      if (plan.partition === 'early' || namedRows(pages[index].payload) > 0) {
-        for (const [containerId, league] of merged) {
-          if (requestedMasters.has(requestId(league))) { merged.delete(containerId); leagueClocks.delete(containerId); }
-        }
+      const incomingNamed = new Map();
+      for (const league of pages[index].payload.serializedData) {
+        const leagueId = requestId(league);
+        if (leagueId !== '') incomingNamed.set(leagueId, namedLeagueRows(league) > 0);
+      }
+      for (const [containerId, league] of merged) {
+        const leagueId = requestId(league);
+        if (!requestedMasters.has(leagueId)) continue;
+        if (namedLeagueRows(league) > 0 && incomingNamed.get(leagueId) !== true) continue;
+        merged.delete(containerId);
+        leagueClocks.delete(containerId);
       }
       // Every normal response also carries unexpanded shells for the other
       // leagues. Only the requested master IDs have authoritative full rows.
