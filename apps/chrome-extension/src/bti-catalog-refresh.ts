@@ -7,7 +7,11 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const statsKey = '__fieldlineBtiRosterStatsV1';
   const stats = root[statsKey] || (root[statsKey] = { starts: 0, completed: 0, failed: 0,
     teardownVersion: 0, teardownSession: 0, lostSession: 0, paused: 0, fetchNull: 0,
-    partFail: { live: 0, prematch: 0, early: 0 }, startedAtMs: 0, completedAtMs: 0 });
+    partFail: { live: 0, prematch: 0, early: 0 }, startedAtMs: 0, completedAtMs: 0,
+    doneEvents: 0, doneWithin24h: 0, doneLive: 0, donePrematch: 0, doneEarly: 0,
+    gates: { live: '', prematch: '', early: '' },
+    bodyLiveKb: 0, bodyLiveInitKb: 0, bodyPrematchKb: 0,
+    shapes: { live: '', prematch: '', early: '' } });
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   const rosterWorkerKey = '__fieldlineBtiRosterWorkerV10';
   const detailBodiesKey = '__fieldlineBtiDetailBodiesV10';
@@ -171,6 +175,15 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       rosterFetchNull: stats.fetchNull,
       rosterPartFail: 'live:' + stats.partFail.live + ',pre:' + stats.partFail.prematch +
         ',early:' + stats.partFail.early,
+      rosterDoneEvents: stats.doneEvents, rosterDoneWithin24h: stats.doneWithin24h,
+      rosterDoneLive: stats.doneLive, rosterDonePrematch: stats.donePrematch,
+      rosterDoneEarly: stats.doneEarly,
+      rosterGateLive: stats.gates.live, rosterGateToday: stats.gates.prematch,
+      rosterGateEarly: stats.gates.early,
+      rosterBodyLiveKb: stats.bodyLiveKb, rosterBodyLiveInitKb: stats.bodyLiveInitKb,
+      rosterBodyPrematchKb: stats.bodyPrematchKb,
+      rosterShapeLive: stats.shapes.live, rosterShapeToday: stats.shapes.prematch,
+      rosterShapeEarly: stats.shapes.early,
       rosterAgeMs: stats.startedAtMs > 0 ? Date.now() - stats.startedAtMs : null,
       rosterCompletedAgeMs: stats.completedAtMs > 0 ? Date.now() - stats.completedAtMs : null
     });
@@ -242,6 +255,34 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     const candidate = Array.isArray(league) ? league[3] ?? league[0] : null;
     return typeof candidate === 'string' || typeof candidate === 'number' ? String(candidate) : '';
   };
+  // A row that carries two usable names is a roster row; one that does not is a
+  // delta. Measured 2026-09-13: every live and today row reaching the API had no
+  // participants and no display name, so the decoder dropped all 999 of them and
+  // BTI held only All Early - 804 fixtures, none inside 24 hours.
+  const rowHasNames = (event) => {
+    const participants = Array.isArray(event?.[1]) ? event[1] : [];
+    const names = participants.slice(0, 2).map((participant) => {
+      const item = Array.isArray(participant) ? participant : null;
+      const localized = item && item[1] && typeof item[1] === 'object' ? item[1] : {};
+      const fallback = Object.values(localized).find((value) =>
+        typeof value === 'string' && value.trim().length > 0);
+      return String(localized.VI || localized.EN || localized.VN || fallback ||
+        (item ? item[2] : '') || '').trim();
+    });
+    if (names.length === 2 && names.every(Boolean)) return true;
+    const split = String(event?.[2] || '').split(/s+(?:v(?:s.?)?|[-–—])s+/iu)
+      .map((name) => name.trim());
+    return split.length === 2 && split.every(Boolean);
+  };
+  const namedRows = (payload) => {
+    let count = 0;
+    for (const league of Array.isArray(payload?.serializedData) ? payload.serializedData : []) {
+      for (const event of Array.isArray(league?.[12]) ? league[12] : []) {
+        if (rowHasNames(event)) count += 1;
+      }
+    }
+    return count;
+  };
   const hydratePartition = async (plan) => {
     const requestId = (league) => plan.partition === 'early' ? masterId(league) :
       Array.isArray(league) && (typeof league[0] === 'string' || typeof league[0] === 'number') ? String(league[0]) : '';
@@ -253,7 +294,12 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       publishCoverage();
       return null;
     }
-    const hydrationPath = (ids) => plan.canonicalPath +
+    // Live and prematch expose two endpoints under the same league ids: the
+    // bare path answers with changed fields only, the /initial path with whole
+    // roster rows. Expanding through the bare path is what stripped the names.
+    // Early has no such split and keeps answering on its own canonical path.
+    const hydrationPath = (ids) =>
+      (plan.partition === 'early' ? plan.canonicalPath : plan.initialCanonicalPath) +
       (plan.partition === 'early' ? earlyQuery + '&' : '?') + 'leagueIds=' + ids.join(',');
     // Measured 2026-09-12: live and prematch each stopped at exactly ten
     // leagues while early reached 213, because only early ran this expansion.
@@ -269,8 +315,11 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       const expanded = initial.payload.serializedData.map(identify)
         .filter((id) => /^[A-Za-z0-9_-]+$/u.test(id)).slice(0, 10);
       const inventory = expanded.length > 0 ? await fetchList(hydrationPath(expanded)) : null;
+      // More leagues is not more catalog. An expansion that returns a longer
+      // list of rows the decoder cannot name is a loss, not a gain.
       const usable = inventory !== null && Array.isArray(inventory.payload?.serializedData) &&
-        inventory.payload.serializedData.length >= initial.payload.serializedData.length;
+        inventory.payload.serializedData.length >= initial.payload.serializedData.length &&
+        namedRows(inventory.payload) >= namedRows(initial.payload);
       if (usable) initial = inventory;
       else if (plan.partition === 'early') {
         stats.partFail[plan.partition] += 1;
@@ -465,6 +514,14 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     { path: listBase + 'prematch/initial', body: JSON.stringify({
       serializedData: [...today.payload.serializedData, ...early.payload.serializedData].map(compactRosterLeague),
       fieldlineBtiRoster: prematchClock }) }];
+  // Body size decides whether a partition can survive chunked assembly at all.
+  // Kilobytes only, never content.
+  for (const item of listResponses) {
+    const kb = Math.round(item.body.length / 1024);
+    if (item.path.endsWith('/live')) stats.bodyLiveKb = kb;
+    else if (item.path.endsWith('/live/initial')) stats.bodyLiveInitKb = kb;
+    else if (item.path.endsWith('/prematch/initial')) stats.bodyPrematchKb = kb;
+  }
   const eventIds = [];
   const seen = new Set();
   const prematchEventIds = [];
@@ -474,6 +531,55 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       event?.[5] === true ? [String(event[0])] : []))));
   const unnamedShapeCounts = new Map();
   const starts = new Map();
+  // Which partition actually carried events, and how many kick off soon. The
+  // catalog holds 804 fixtures with none inside 24h; this says whether today's
+  // and live's rows were never walked or were walked and then dropped later.
+  const partitionEvents = { live: 0, prematch: 0, early: 0 };
+  let within24h = 0;
+  // The API drops a whole league when its name field is not a plain string,
+  // and an event when its live flag, kickoff or two names fail. Replicate
+  // those four gates here, per partition, so the one that rejects today and
+  // live but not early is named instead of guessed. Counts only.
+  const blank = () => ({ n: 0, f: 0, t: 0, m: 0, ok: 0 });
+  const gates = { live: blank(), prematch: blank(), early: blank() };
+  // Field positions and their types, never their contents: 'a2' is an array of
+  // two, 's31' a string of 31 characters, 'o3' an object with three keys. One
+  // row per partition is enough to see where live and today put the names that
+  // early puts where the decoder looks.
+  const shapes = { live: '', prematch: '', early: '' };
+  const shapeOf = (value) => {
+    if (value === null || value === undefined) return 'z';
+    if (typeof value === 'boolean') return 'b';
+    if (typeof value === 'number') return 'i';
+    if (typeof value === 'string') return 's' + Math.min(999, value.length);
+    if (Array.isArray(value)) return 'a' + Math.min(999, value.length);
+    if (typeof value === 'object') return 'o' + Math.min(99, Object.keys(value).length);
+    return 'u';
+  };
+  const rowShape = (event) => {
+    const head = [];
+    for (let index = 0; index < 13; index += 1) head.push(index + shapeOf(event?.[index]));
+    const participant = Array.isArray(event?.[1]) ? event[1][0] : null;
+    const tail = [];
+    for (let index = 0; index < 4; index += 1) tail.push(index + shapeOf(participant?.[index]));
+    return (head.join(',') + '.P.' + tail.join(',')).slice(0, 200);
+  };
+  const apiText = (value) => typeof value === 'string' ? value.trim() : '';
+  const apiLocalized = (value) => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return '';
+    return apiText(value.VI) || apiText(value.EN) || apiText(value.VN) ||
+      Object.values(value).map(apiText).find((candidate) => candidate !== '') || '';
+  };
+  const apiNames = (event) => {
+    const participants = Array.isArray(event[1]) ? event[1] : [];
+    const names = participants.slice(0, 2).map((participant) => {
+      const item = Array.isArray(participant) ? participant : null;
+      return apiLocalized(item?.[1]) || apiText(item?.[2]);
+    });
+    if (names.length === 2 && names.every((name) => name !== '')) return names;
+    const split = apiText(event[2]).split(/s+(?:v(?:s.?)?|[-–—])s+/iu).map((name) => name.trim());
+    return split.length === 2 && split.every((name) => name !== '') ? split : names;
+  };
   for (const entry of partitions) {
     const payload = entry?.payload;
     const leagues = Array.isArray(payload?.serializedData) ? payload.serializedData : [];
@@ -483,6 +589,22 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         const id = typeof event?.[0] === 'string' || typeof event?.[0] === 'number'
           ? String(event[0]) : '';
         if (!id) continue;
+        partitionEvents[entry.partition] += 1;
+        const gate = gates[entry.partition];
+        const apiLeagueNamed = apiText(league?.[1]) !== '';
+        const apiLiveFlag = event?.[5] === true || event?.[5] === false;
+        const apiTimed = event?.[5] === true || Number.isFinite(Date.parse(apiText(event?.[3])));
+        const apiNamed = apiNames(event).length === 2 && apiNames(event).every((name) => name !== '');
+        if (!apiLeagueNamed) gate.n += 1;
+        else if (!apiLiveFlag) gate.f += 1;
+        else if (!apiTimed) gate.t += 1;
+        else if (!apiNamed) gate.m += 1;
+        else gate.ok += 1;
+        // Record the first row that fails the name gate, and for a partition
+        // with no failures the first row that passes, as the reference shape.
+        if (shapes[entry.partition] === '' && (!apiNamed || gate.ok === 1)) {
+          shapes[entry.partition] = rowShape(event);
+        }
         if (entry?.partition !== 'live' && event?.[5] === false && !liveIds.has(id) && !seenPrematch.has(id)) {
           seenPrematch.add(id);
           prematchEventIds.push(id);
@@ -491,6 +613,9 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         if (seen.has(id)) continue;
         seen.add(id);
         eventIds.push(id);
+        const kickoffMs = Date.parse(String(event?.[3] || ''));
+        if (event?.[5] === true ||
+          (Number.isFinite(kickoffMs) && kickoffMs - now < 86400000)) within24h += 1;
         const participants = Array.isArray(event?.[1]) ? event[1] : [];
         const names = participants.slice(0, 2).map((participant) => {
           const localized = Array.isArray(participant) && participant[1] &&
@@ -531,6 +656,16 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   rosterWorker.coverage.phase = partitions.length === initialPlans.length && partitions.every(Boolean)
     ? 'COMPLETE' : 'FAILED';
   rosterWorker.coverage.events = eventIds.length;
+  stats.doneEvents = eventIds.length;
+  stats.doneWithin24h = within24h;
+  stats.doneLive = partitionEvents.live;
+  stats.donePrematch = partitionEvents.prematch;
+  stats.doneEarly = partitionEvents.early;
+  const gateText = (value) => 'n' + value.n + '.f' + value.f + '.t' + value.t +
+    '.m' + value.m + '.ok' + value.ok;
+  stats.gates = { live: gateText(gates.live), prematch: gateText(gates.prematch),
+    early: gateText(gates.early) };
+  stats.shapes = shapes;
   rosterWorker.coverage.unnamedShapes = [...unnamedShapeCounts]
     .sort((left, right) => right[1] - left[1])
     .map(([shape, count]) => shape + ':' + count).join(',');

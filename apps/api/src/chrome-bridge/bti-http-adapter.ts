@@ -3,7 +3,8 @@ import { footballBinaryMarketSpec, footballCategoricalMarketSpec, footballResult
   type ChromeBridgeEnvelope, type MarketType, type Scope } from "@tool-chenh/contracts";
 import { compactBtiNativeObservation } from "../catalog/bti-native-compaction.js";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
-import { extractBtiCatalogRecords,
+import { btiNameShapeCounts,
+  extractBtiCatalogRecords,
   extractBtiNativeMarketIdentities,
   extractBtiNativeMarketObservations } from "../providers/bti/bti-direct-catalog.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
@@ -302,11 +303,24 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
  * page (52 MB) and three in the catalog, with 135 of 145 complete bodies
  * decoding empty. Names only, no payload value is ever kept.
  */
-export const btiContentRefusals = new Map<string, number>();
+const btiRefusalCounts = new Map<string, number>();
+
+/** Refusals plus the shapes of rows the decoder dropped for missing names. */
+export const btiContentRefusals = {
+  get size(): number { return btiRefusalCounts.size; },
+  has(key: string): boolean { return btiRefusalCounts.has(key); },
+  get(key: string): number | undefined { return btiRefusalCounts.get(key); },
+  set(key: string, value: number): void { btiRefusalCounts.set(key, value); },
+  [Symbol.iterator](): IterableIterator<readonly [string, number]> {
+    return [...btiRefusalCounts, ...btiNameShapeCounts()][Symbol.iterator]() as
+      IterableIterator<readonly [string, number]>;
+  },
+  entries(): IterableIterator<readonly [string, number]> { return this[Symbol.iterator](); }
+};
 
 function noteBtiRefusal(reason: string): readonly [] {
-  if (btiContentRefusals.size < 48 || btiContentRefusals.has(reason)) {
-    btiContentRefusals.set(reason, (btiContentRefusals.get(reason) ?? 0) + 1);
+  if (btiRefusalCounts.size < 48 || btiRefusalCounts.has(reason)) {
+    btiRefusalCounts.set(reason, (btiRefusalCounts.get(reason) ?? 0) + 1);
   }
   return [];
 }

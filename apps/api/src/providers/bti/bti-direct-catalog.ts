@@ -17,6 +17,49 @@ function localized(value: unknown): string {
   return text(values.VI) || text(values.EN) || text(values.VN) ||
     Object.values(values).map(text).find((candidate) => candidate !== "") || "";
 }
+// Measured 2026-09-13: every live and today row this decoder saw failed the
+// two-name rule while every All Early row passed, so BTI held 804 fixtures and
+// none inside 24 hours. Which field those partitions put a name in is the one
+// thing the counts could not say. Field positions and types only, never text.
+const btiNameShapes = new Map<string, number>();
+export function btiNameShapeCounts(): ReadonlyMap<string, number> { return btiNameShapes; }
+function shapeToken(value: unknown): string {
+  if (value === null || value === undefined) return "z";
+  if (typeof value === "boolean") return "b";
+  if (typeof value === "number") return "i";
+  if (typeof value === "string") return value.trim() === "" ? "e" : "s";
+  if (Array.isArray(value)) return "a" + String(Math.min(9, value.length));
+  if (typeof value === "object") return "o" + String(Math.min(9, Object.keys(value).length));
+  return "u";
+}
+function noteNameShape(event: Row, league: Row | null): void {
+  const participants = row(event[1]) ?? [];
+  const first = row(participants[0]);
+  // Types at each filled position, so the field that holds a name can be told
+  // apart from the one that holds a score. "6a2" is an array of two at index 6.
+  const filled = event.map((field, index) => {
+    const token = shapeToken(field);
+    return token === "z" || token === "e" ? null : String(index) + token;
+  }).filter((entry) => entry !== null).join(".");
+  // Key names of the object-valued positions, and the element types inside the
+  // array at 7. Field names are shape; a language code is not a team name.
+  const keysOf = (value: unknown): string => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
+    return Object.keys(value as Record<string, unknown>).slice(0, 8)
+      .map((key) => key.replace(/[^A-Za-z0-9_]/gu, "").slice(0, 12)).join("_");
+  };
+  // The event row carries no name at all, so the league row is the only other
+  // place a name can live. Positions and types, plus key names of its objects.
+  const leagueShape = (league ?? []).slice(0, 20).map((field, index) => {
+    const token = shapeToken(field);
+    return token === "z" || token === "e" ? null : String(index) + token;
+  }).filter((entry) => entry !== null).join(".");
+  const reason = "name-drop-lg" + leagueShape + ".k2" + keysOf(league?.[2]) +
+    ".k3" + keysOf(league?.[3]) + ".k11" + keysOf(league?.[11]);
+  if (btiNameShapes.size < 12 || btiNameShapes.has(reason)) {
+    btiNameShapes.set(reason, (btiNameShapes.get(reason) ?? 0) + 1);
+  }
+}
 function rosterNames(event: Row): readonly string[] {
   const participants = row(event[1]) ?? [];
   const names = participants.slice(0, 2).map((participant) => {
@@ -591,7 +634,12 @@ export function extractBtiCatalogRecords(payload: unknown): readonly SbobetCatal
       const startAtUtcMs = isLive ? null : Date.parse(text(event?.[3]));
       if (eventId === "" || (event?.[5] !== true && event?.[5] !== false) ||
         (!isLive && !Number.isFinite(startAtUtcMs)) || names.length !== 2 ||
-        names.some((name) => name === "")) return [];
+        names.some((name) => name === "")) {
+        if (event !== null && eventId !== "" && (event[5] === true || event[5] === false) &&
+          (isLive || Number.isFinite(startAtUtcMs)) &&
+          (names.length !== 2 || names.some((name) => name === ""))) noteNameShape(event, league);
+        return [];
+      }
       const scoreText = isLive && typeof scores?.[0] === "string" && typeof scores?.[1] === "string"
         ? `${scores[0]} - ${scores[1]}` : null;
       return [{ eventId, leagueName, timeText: isLive ? "LIVE" : "PREMATCH", scoreText,

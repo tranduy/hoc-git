@@ -14,13 +14,19 @@ export interface BtiPageHealth extends BtiPageHealthProbe {
 }
 
 export const BTI_PAGE_HEALTH_EXPRESSION = `(() => {
-  if (document.readyState === 'loading' || !document.body) return { status: 'UNKNOWN', code: null };
+  // The collector writes its coverage on documentElement, which exists long
+  // before body does. Returning early while the document is still loading made
+  // the diagnostic go blind precisely while the page was struggling: BTI sat in
+  // HARD_RECOVERY for ten minutes reporting nothing but status UNKNOWN.
   let rosterCoverage = String(document.documentElement.dataset.fieldlineBtiRosterCoverage || '');
   try {
     if (rosterCoverage.length > 4096) rosterCoverage = '';
     else if (rosterCoverage) rosterCoverage = JSON.stringify({ ...JSON.parse(rosterCoverage),
       ...${BTI_SOURCE_INVENTORY_EXPRESSION} });
   } catch { rosterCoverage = ''; }
+  if (document.readyState === 'loading' || !document.body) {
+    return rosterCoverage ? { status: 'UNKNOWN', code: null, rosterCoverage } : { status: 'UNKNOWN', code: null };
+  }
   const text = String(document.body.innerText || document.body.textContent || '').slice(0, 20000)
     .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D')
     .toLowerCase().replace(/\\s+/g, ' ');
@@ -88,11 +94,15 @@ function parseRosterCoverage(value: unknown): string | null {
     "unnamedEvents", "unnamedWithin24h", "unnamedLater",
     // Why the roster walk keeps restarting instead of finishing: counts only.
     "rosterStarts", "rosterCompleted", "rosterFailed", "rosterLostSession", "rosterPaused",
-    "rosterFetchNull", "rosterAgeMs", "rosterCompletedAgeMs"];
+    "rosterFetchNull", "rosterAgeMs", "rosterCompletedAgeMs",
+    "rosterDoneEvents", "rosterDoneWithin24h", "rosterDoneLive", "rosterDonePrematch",
+    "rosterDoneEarly", "rosterBodyLiveKb", "rosterBodyLiveInitKb", "rosterBodyPrematchKb"];
+  const gateKeys = ["rosterGateLive", "rosterGateToday", "rosterGateEarly"];
+  const shapeKeys = ["rosterShapeLive", "rosterShapeToday", "rosterShapeEarly"];
   const ageKeys = ["detailOldestReceiptAgeMs", "rosterAgeMs", "rosterCompletedAgeMs"];
   const booleans = ["detailCoverageComplete", "rosterRefreshFailed", "requestPaused", "authBlocked", "nativeInventoryTruncated", "nativeTypeCountsTruncated"];
   if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts", "unnamedShapes",
-    "rosterTeardown", "rosterPartFail"].includes(key)) ||
+    "rosterTeardown", "rosterPartFail", ...gateKeys, ...shapeKeys].includes(key)) ||
     !["INITIAL", "HYDRATING", "COMPLETE", "FAILED"].includes(String(candidate.phase))) return null;
   if (booleans.some((key) => candidate[key] !== undefined && typeof candidate[key] !== "boolean")) return null;
   if (candidate.nativeTypeCounts !== undefined && (typeof candidate.nativeTypeCounts !== "string" ||
@@ -100,6 +110,15 @@ function parseRosterCoverage(value: unknown): string | null {
     !/^(?:[A-Z][A-Z0-9_]{0,23}:\d{1,6}(?:,[A-Z][A-Z0-9_]{0,23}:\d{1,6}){0,31})?$/u.test(candidate.nativeTypeCounts))) return null;
   if (candidate.rosterTeardown !== undefined && (typeof candidate.rosterTeardown !== "string" ||
     !/^v\d{1,6}\.s\d{1,6}$/u.test(candidate.rosterTeardown))) return null;
+  for (const key of shapeKeys) {
+    // Type letters, field indexes and lengths only; no provider text can pass.
+    if (candidate[key] !== undefined && (typeof candidate[key] !== "string" ||
+      !/^[0-9a-z,.]{0,200}$/u.test(candidate[key]))) return null;
+  }
+  for (const key of gateKeys) {
+    if (candidate[key] !== undefined && (typeof candidate[key] !== "string" ||
+      !/^n\d{1,6}\.f\d{1,6}\.t\d{1,6}\.m\d{1,6}\.ok\d{1,6}$/u.test(candidate[key]))) return null;
+  }
   if (candidate.rosterPartFail !== undefined && (typeof candidate.rosterPartFail !== "string" ||
     !/^live:\d{1,6},pre:\d{1,6},early:\d{1,6}$/u.test(candidate.rosterPartFail))) return null;
   // Field-index shapes only ("1.2.3.5:900"), never a value. Bounded like the
