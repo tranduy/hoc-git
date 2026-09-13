@@ -612,6 +612,9 @@ interface WsAttachDiagnosticState {
   // mg/9). Counting them apart from mg/1 separates "the corner stream never
   // opens" from "it opens and its frames die before the adapter". Shape only.
   apCornerSockets: number;
+  // Opened without closed is a leak, and a leak here is what restarted the
+  // worker every two or three minutes. Counting only one of them hides it.
+  apCornerSocketsClosed: number;
   apCornerFramesReceived: number;
   apCornerFramesParsed: number;
   ignoredSockets: number;
@@ -1262,6 +1265,7 @@ export class NetworkObserver {
   readonly #apsportLaneCursors = new Map<string, number>();
   readonly #apsportDetailCoverage = new Map<string, ApsportDetailCoverage>();
   readonly #apsportHoldWindows = new Map<string, { open: boolean; changedAtMs: number }>();
+  readonly #apsportCornerSocketRequests = new Set<string>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
   readonly #activeKsportStreams = new Map<string, string>();
@@ -5472,7 +5476,7 @@ export class NetworkObserver {
       sourceGeneration, webSocketCreated: 0, ksportTargets: 0, attachedTargets: 0,
       reconnectAttempts: 0, reconnectOutcomes: "",
       framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
-      apCornerSockets: 0, apCornerFramesReceived: 0, apCornerFramesParsed: 0,
+      apCornerSockets: 0, apCornerSocketsClosed: 0, apCornerFramesReceived: 0, apCornerFramesParsed: 0,
       framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
       framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
       sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
@@ -7051,8 +7055,9 @@ export class NetworkObserver {
       // Corner/card groups ride their own sockets. Reported here rather than
       // as typed counters so the running API needs no restart to show them.
       const d = this.#wsAttachDiagnostic(source);
-      return (`AP_MG[sockets:${d.apCornerSockets};frames:${d.apCornerFramesReceived};` +
-        `parsed:${d.apCornerFramesParsed}] ` + apsportExtraFlagShape() + ` ` +
+      return (`AP_MG[mo:${d.apCornerSockets};dong:${d.apCornerSocketsClosed};` +
+        `frames:${d.apCornerFramesReceived};parsed:${d.apCornerFramesParsed}] ` +
+        apsportExtraFlagShape() + ` ` +
         apsportGroupCensusShape() + ' ' + apsportBodyCensusShape() + ' ' + existing).slice(0, 900);
     }
     if (source.lobby === "BTI") {
@@ -7169,6 +7174,7 @@ export class NetworkObserver {
         framesReceived: diagnostic.framesReceived, framesOrphan: diagnostic.framesOrphan,
         framesForwarded: diagnostic.framesForwarded, ignoredSockets: diagnostic.ignoredSockets,
         apCornerSockets: diagnostic.apCornerSockets,
+        apCornerSocketsClosed: diagnostic.apCornerSocketsClosed,
         apCornerFramesReceived: diagnostic.apCornerFramesReceived,
         apCornerFramesParsed: diagnostic.apCornerFramesParsed,
         framesBinary: diagnostic.framesBinary, framesNotOwner: diagnostic.framesNotOwner,
@@ -7292,6 +7298,7 @@ export class NetworkObserver {
       this.#wsAttachDiagnostic(source).webSocketCreated += 1;
       if (source.lobby === "TSPORT" && isApsportNonMainGroupSocket(String(params.url ?? ""))) {
         this.#wsAttachDiagnostic(source).apCornerSockets += 1;
+        this.#apsportCornerSocketRequests.add(String(params.requestId ?? ""));
       }
       // APSPORT forwards every frame it receives and all of them are heartbeats,
       // so either the football socket was never opened or it was opened and
@@ -7727,6 +7734,9 @@ export class NetworkObserver {
       return;
     }
     if (method === "Network.webSocketClosed" && key) {
+      if (requestId !== null && this.#apsportCornerSocketRequests.delete(requestId)) {
+        this.#wsAttachDiagnostic(source).apCornerSocketsClosed += 1;
+      }
       const directSocket = this.#webSockets.get(key);
       const crossSessionSocket = directSocket === undefined && requestId !== null
         ? this.#sabaSocketAcrossSession(source, requestId) : undefined;
