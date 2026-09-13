@@ -54,3 +54,22 @@ describe("BTI page health coverage", () => {
     expect(/^[-A-Za-z0-9_":{},.]+$/u.test(JSON.stringify(coverage))).toBe(true);
   });
 });
+
+describe("unnamed shape counts", () => {
+  const withShapes = (unnamedShapes: string) => parseBtiPageHealthProbe({
+    status: "HEALTHY", code: null,
+    rosterCoverage: JSON.stringify({ ...coverage, unnamedShapes })
+  });
+
+  it("accepts the shapes the collector actually produces", () => {
+    for (const shapes of ["", "none:12", "1.2.3.5:900", "1.2.3.5.8:4", "13.2:7", "none:3,1.2:9"]) {
+      expect(withShapes(shapes), shapes).not.toBeNull();
+    }
+  });
+
+  it("still refuses anything that is not an index shape", () => {
+    for (const shapes of ["bad:1", "Arsenal:1", "1.2.3.5:9000000", "::"]) {
+      expect(withShapes(shapes), shapes).toBeNull();
+    }
+  });
+});

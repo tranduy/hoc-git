@@ -132,7 +132,7 @@ function parseRosterCoverage(value: unknown): string | null {
   // native type counts above so a malformed page cannot grow the payload.
   if (candidate.unnamedShapes !== undefined && (typeof candidate.unnamedShapes !== "string" ||
     candidate.unnamedShapes.length > 256 ||
-    !/^(?:(?:none|d(?:.d){0,4}):d{1,6}(?:,(?:none|d(?:.d){0,4}):d{1,6}){0,7})?$/u
+    !/^(?:(?:none|\d{1,2}(?:\.\d{1,2}){0,4}):\d{1,6}(?:,(?:none|\d{1,2}(?:\.\d{1,2}){0,4}):\d{1,6}){0,7})?$/u
       .test(candidate.unnamedShapes))) return null;
   for (const key of allowed.slice(1)) {
     if (ageKeys.includes(key) && candidate[key] === null) continue;
