@@ -677,6 +677,18 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         // fault, not quiet: declare the stream gap so the controller runs
         // recovery, which reconnects the socket and yields the reset frame
         // this branch is waiting for.
+        // What the provider is actually sending while we wait. Three sessions
+        // have now treated "the socket reconnects without resending reset" as
+        // established without anyone having seen the rows, and the remedies
+        // built on it have ranged from useless to harmful. Row markers only -
+        // no identifier, no price, no destination.
+        gaugeSaba("starved-rows-seen", (recoveryFrame?.rows as readonly unknown[] | undefined)?.length ?? 0);
+        for (const row of (recoveryFrame?.rows as readonly unknown[] | undefined) ?? []) {
+          const marker = Array.isArray(row)
+            ? String(typeof row[1] === "string" ? row[1] : typeof row[0] === "string" ? row[0] : typeof row[0])
+            : typeof row;
+          noteSaba(`starved-row-${marker.slice(0, 16).replace(/[^A-Za-z0-9_.-]/gu, "_")}`);
+        }
         const starvedSinceMs = this.#baselineStarvedSinceMs.get(epochKey);
         if (starvedSinceMs === undefined) {
           this.#baselineStarvedSinceMs.set(epochKey, envelope.observedAtMs);
@@ -721,6 +733,17 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
           invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_GAP" }];
       }
+      // Does this provider ever re-announce its field table on a live socket?
+      // Everything about SABA turns on the answer. Its rows are positional,
+      // the table is dropped when a stream closes, and a stream that never
+      // carries a new one can never be decoded - so either the table comes
+      // back on its own and the page can be left alone, or it only arrives
+      // with a fresh subscription and nothing short of a new document helps.
+      // Counts only: how many rows announce a table, never its contents.
+      for (const row of (frame?.rows as readonly unknown[] | undefined) ?? []) {
+        if (Array.isArray(row) && row[0] === "f") noteSaba("field-table-row-seen");
+      }
+      noteSaba(this.#decoders.has(decoderKey) ? "decoder-held" : "decoder-absent");
       let decoder = this.#decoders.get(decoderKey);
       if (decoder === undefined) {
         decoder = new SabaPushDecoder();
