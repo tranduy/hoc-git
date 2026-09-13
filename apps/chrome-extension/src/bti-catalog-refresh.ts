@@ -1070,11 +1070,16 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
           detailWorker.lanes += 1;
           void runDetailLane().catch(() => undefined).finally(() => {
             detailWorker.lanes -= 1;
-            if (detailWorker.lanes === 0) {
-              if (root[detailWorkerKey] === detailWorker) delete root[detailWorkerKey];
-              detailWorker.publishCoverage();
-            }
+            detailWorker.start();
           });
+        }
+        // Nothing left to do and nobody left doing it: retire, so the next
+        // pump builds a fresh worker rather than finding an idle one. A worker
+        // that never launched a lane has to retire here too, or it would sit
+        // in the page forever holding the key.
+        if (detailWorker.lanes === 0) {
+          if (root[detailWorkerKey] === detailWorker) delete root[detailWorkerKey];
+          detailWorker.publishCoverage();
         }
       };
       detailWorker.update(nextJob);

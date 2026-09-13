@@ -2647,12 +2647,18 @@ export class NetworkObserver {
     if (room <= 0) return;
     const due = [...active.hiddenDetailEventIds].filter(id =>
       scheduler.due(id, null) && APSPORT_WALK_TIERS.has(scheduler.policy(id).tier));
-    // Fixtures whose extra books can outlive one lap go first; the rest still
-    // run, on whatever the tier above leaves, so nothing is abandoned.
-    const lasting = due.filter(id =>
-      scheduler.policy(id).quoteMaxAgeMs >= APSPORT_DETAIL_USABLE_QUOTE_AGE_MS);
-    const fleeting = due.filter(id =>
-      scheduler.policy(id).quoteMaxAgeMs < APSPORT_DETAIL_USABLE_QUOTE_AGE_MS);
+    // A fixture the plan marked urgent is one the comparison is watching right
+    // now, and there are only ever a handful; those keep their place at the
+    // front whatever their quotes cost to keep fresh. After them come the
+    // fixtures whose extra books can outlive one lap, and then the rest, which
+    // still run on whatever is left - nothing is abandoned.
+    const first = (id: string): boolean => {
+      const policy = scheduler.policy(id);
+      return policy.tier === "URGENT" ||
+        policy.quoteMaxAgeMs >= APSPORT_DETAIL_USABLE_QUOTE_AGE_MS;
+    };
+    const lasting = due.filter(first);
+    const fleeting = due.filter(id => !first(id));
     const ordered = [...scheduler.sort(lasting), ...scheduler.sort(fleeting)];
     for (const id of ordered.slice(0, room)) {
       this.#scheduleApsportEventDetail(source, id, active.rosterLeagueIds.get(id));
