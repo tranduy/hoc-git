@@ -60,31 +60,31 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
   }
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
-    if (!this.fingerprint(envelope)) return [];
+    if (!this.fingerprint(envelope)) return noteBtiRefusal("fingerprint-unmatched");
     const isDetail = envelope.request.pathnameClass.startsWith("/api/eventpage/events/");
     const generation = parseGeneration(envelope.request.streamId);
-    if (generation === null) return [];
+    if (generation === null) return noteBtiRefusal("generation-unparsable");
     const retained = this.#parts.get(envelope.sourceId);
     const latestComparison = retained?.latestGeneration == null ? 1 :
       compareGeneration(generation.order, retained.latestGeneration);
     // Continuous replay repairs a lost forward or API restart. Once this
     // decoder has committed a list, repeating its large body cannot update it.
     if (latestComparison < 0 || (!isDetail && latestComparison === 0 &&
-      (envelope.request.pathnameClass !== OPTIONAL_LIST_PATH || retained!.lists.has(OPTIONAL_LIST_PATH)))) return [];
+      (envelope.request.pathnameClass !== OPTIONAL_LIST_PATH || retained!.lists.has(OPTIONAL_LIST_PATH)))) return noteBtiRefusal("generation-already-committed");
     let payload: unknown;
-    try { payload = JSON.parse(envelope.payload.body); } catch { return []; }
-    if (isDetail && latestComparison === 0 && retainedDetailReplay(payload, envelope, generation.order, retained!)) return [];
+    try { payload = JSON.parse(envelope.payload.body); } catch { return noteBtiRefusal("body-not-json"); }
+    if (isDetail && latestComparison === 0 && retainedDetailReplay(payload, envelope, generation.order, retained!)) return noteBtiRefusal("detail-replay-of-committed-generation");
     if (isDetail) payload = hydrateDetailIdentity(payload, retained?.lists);
     const root = typeof payload === "object" && payload !== null && !Array.isArray(payload)
       ? payload as Record<string, unknown> : null;
     const rosterClock = root?.fieldlineBtiRoster === undefined ? null :
       parseClock(root.fieldlineBtiRoster, envelope, generation.order);
-    if (!isDetail && root?.fieldlineBtiRoster !== undefined && rosterClock === null) return [];
+    if (!isDetail && root?.fieldlineBtiRoster !== undefined && rosterClock === null) return noteBtiRefusal("roster-clock-unparsable");
     if (!isDetail && rosterClock !== null) {
       const complete = (root!.fieldlineBtiRoster as Record<string, unknown>).complete;
       // Raw league pages share the refresh generation but are not authoritative
       // roster partitions. Wait for the collector's fully hydrated partition.
-      if (complete !== undefined && complete !== true) return [];
+      if (complete !== undefined && complete !== true) return noteBtiRefusal("roster-partition-not-complete");
     }
     const records = extractBtiCatalogRecords(payload);
     const resolvedEventIds = new Set(records.map((record) => record.eventId));
@@ -98,7 +98,7 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
     const payloadState = btiPayloadState(payload, isDetail);
     const rawListedEventIds = isDetail ? new Set<string>() : btiListEventIds(payload);
     if (payloadState === "INVALID" || (records.length === 0 && payloadState !== "EMPTY" &&
-      (isDetail ? closedEventIds.size === 0 && nativeMarketObservations.length === 0 : rawListedEventIds.size === 0))) return [];
+      (isDetail ? closedEventIds.size === 0 && nativeMarketObservations.length === 0 : rawListedEventIds.size === 0))) return noteBtiRefusal("payload-carries-no-records");
     const parts = this.#parts.get(envelope.sourceId) ?? {
       lists: new Map<string, BtiPart>(), details: new Map<string, BtiPart>(),
       pending: new Map<string, PendingGeneration>(), listedEventIds: new Set<string>(),
@@ -122,7 +122,7 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
       // A hydrated BTI roster legitimately contains event shells whose full
       // markets only exist on /eventpage/events/:id. Keep those identities so
       // the correlated detail queue can enrich every advertised event.
-      if (normalized.events.length === 0) return [];
+      if (normalized.events.length === 0) return noteBtiRefusal("normalized-to-no-events");
       part = {
         ...part, rejectedMarketCount: normalized.diagnostics.length,
         events: normalized.events, markets: normalized.markets, quotes: normalized.quotes,
@@ -179,7 +179,7 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
           detailEntries.push([id, detail ?? part]);
         }
       }
-      if (parts.latestGeneration !== null && compareGeneration(generation.order, parts.latestGeneration) < 0) return [];
+      if (parts.latestGeneration !== null && compareGeneration(generation.order, parts.latestGeneration) < 0) return noteBtiRefusal("part-older-than-committed");
       const targetsCurrent = parts.latestGeneration !== null &&
         compareGeneration(generation.order, parts.latestGeneration) === 0;
       if (targetsCurrent) {
@@ -193,9 +193,9 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
           accepted = true;
           parts.details.set(detailEventId, preserveClosureHistory(previous, detail));
         }
-        if (!accepted) return [];
+        if (!accepted) return noteBtiRefusal("part-not-accepted");
       } else {
-        if (!acceptNewestGeneration(parts, generation.order)) return [];
+        if (!acceptNewestGeneration(parts, generation.order)) return noteBtiRefusal("not-newest-generation");
         const pending = parts.pending.get(generation.id) ?? {
           order: generation.order, lists: new Map<string, BtiPart>(),
           details: new Map<string, BtiPart>(), listedEventIds: new Set<string>()
@@ -213,10 +213,10 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
     } else {
       const latestComparison = parts.latestGeneration === null ? 1 :
         compareGeneration(generation.order, parts.latestGeneration);
-      if (latestComparison < 0) return [];
+      if (latestComparison < 0) return noteBtiRefusal("older-than-latest");
       if (latestComparison === 0) {
         if (envelope.request.pathnameClass !== OPTIONAL_LIST_PATH ||
-          parts.lists.has(OPTIONAL_LIST_PATH)) return [];
+          parts.lists.has(OPTIONAL_LIST_PATH)) return noteBtiRefusal("optional-list-already-held");
         parts.lists.set(OPTIONAL_LIST_PATH, part);
         for (const eventId of rawListedEventIds) parts.listedEventIds.add(eventId);
       } else {
@@ -225,12 +225,12 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
           lists: new Map<string, BtiPart>(),
           details: new Map<string, BtiPart>(), listedEventIds: new Set<string>() };
         const previous = pending.lists.get(envelope.request.pathnameClass);
-        if (previous !== undefined && comparePartClock(part, previous) <= 0) return [];
+        if (previous !== undefined && comparePartClock(part, previous) <= 0) return noteBtiRefusal("part-clock-not-newer");
         pending.lists.set(envelope.request.pathnameClass, part);
         for (const eventId of rawListedEventIds) pending.listedEventIds.add(eventId);
         parts.pending.set(generation.id, pending);
         this.#parts.set(envelope.sourceId, parts);
-        if ([...LIST_PATHS].some((path) => !pending.lists.has(path))) return [];
+        if ([...LIST_PATHS].some((path) => !pending.lists.has(path))) return noteBtiRefusal("awaiting-remaining-list-partitions");
         const currentEventIds = pending.listedEventIds;
         for (const eventId of parts.details.keys()) {
           if (!currentEventIds.has(eventId)) parts.details.delete(eventId);
@@ -257,7 +257,7 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
       else if (resolved !== detail) parts.details.set(eventId, resolved);
     }
     this.#parts.set(envelope.sourceId, parts);
-    if (parts.lists.size === 0) return [];
+    if (parts.lists.size === 0) return noteBtiRefusal("no-list-partition-yet");
     const all = [...parts.lists.values(), ...[...parts.details.values()].flatMap((detail) =>
       [...(detail.closureHistory?.values() ?? []), detail])];
     const mergedMarkets = mergeMarketParts(all);
@@ -294,7 +294,7 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
 export const btiContentRefusals = new Map<string, number>();
 
 function noteBtiRefusal(reason: string): readonly [] {
-  if (btiContentRefusals.size < 24 || btiContentRefusals.has(reason)) {
+  if (btiContentRefusals.size < 48 || btiContentRefusals.has(reason)) {
     btiContentRefusals.set(reason, (btiContentRefusals.get(reason) ?? 0) + 1);
   }
   return [];
