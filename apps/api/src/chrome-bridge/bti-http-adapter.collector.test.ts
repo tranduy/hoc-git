@@ -139,7 +139,14 @@ describe("BTI private collector to HTTP adapter", () => {
 
     await vi.advanceTimersByTimeAsync(2_000);
     const cached = await h.refresh();
-    expect(cached).toEqual(changedResult);
+    // The replayed payload must be identical. The coverage string beside it is
+    // a live diagnostic whose ages advance with the clock, so it is not payload
+    // and must not make an unchanged replay look changed.
+    const payloadOf = (value: unknown): unknown => {
+      const { coverage: _diagnostic, ...rest } = value as Record<string, unknown>;
+      return rest;
+    };
+    expect(payloadOf(cached)).toEqual(payloadOf(changedResult));
     const reconnected = decode(new BtiHttpCatalogAdapter(), cached, "chrome:BTI:2");
     expect(quote(reconnected, "hidden-over")).toMatchObject({ rawOdds: "0.75", receivedMonotonicMs: 13_100 });
     expect(quote(reconnected, "main-home")).toMatchObject({ rawOdds: "0.82", receivedMonotonicMs: 26_100 });

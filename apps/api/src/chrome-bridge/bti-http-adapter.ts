@@ -244,9 +244,16 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
             .sort().join("+")}`);
         }
         const currentEventIds = pending.listedEventIds;
+        // Corner and card books live only in event detail. Every commit that
+        // drops a detail drops that event's corner book with it, and BTI's
+        // corner count was seen swinging 92 -> 4 -> 82 -> 10 between
+        // generations. Say how many go, and why.
+        let droppedUnlisted = 0;
         for (const eventId of parts.details.keys()) {
-          if (!currentEventIds.has(eventId)) parts.details.delete(eventId);
+          if (!currentEventIds.has(eventId)) { parts.details.delete(eventId); droppedUnlisted += 1; }
         }
+        if (droppedUnlisted > 0) noteBtiRefusal(`detail-dropped-not-listed-${bucket(droppedUnlisted)}`);
+        noteBtiRefusal(`commit-listed-events-${bucket(currentEventIds.size)}`);
         for (const [eventId, detail] of pending.details) {
           if (!currentEventIds.has(eventId)) continue;
           const previous = parts.details.get(eventId);
@@ -263,11 +270,13 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
       }
     }
     const rosterEvents = rosterByEvent(parts.lists);
+    let droppedMismatch = 0;
     for (const [eventId, detail] of parts.details) {
       const resolved = resolvePendingDetail(detail, parts.lists);
-      if (!detailMatchesRoster(resolved, rosterEvents)) parts.details.delete(eventId);
+      if (!detailMatchesRoster(resolved, rosterEvents)) { parts.details.delete(eventId); droppedMismatch += 1; }
       else if (resolved !== detail) parts.details.set(eventId, resolved);
     }
+    if (droppedMismatch > 0) noteBtiRefusal(`detail-dropped-roster-mismatch-${bucket(droppedMismatch)}`);
     this.#parts.set(envelope.sourceId, parts);
     if (parts.lists.size === 0) return noteBtiRefusal("no-list-partition-yet");
     const all = [...parts.lists.values(), ...[...parts.details.values()].flatMap((detail) =>
@@ -317,6 +326,15 @@ export const btiContentRefusals = {
   },
   entries(): IterableIterator<readonly [string, number]> { return this[Symbol.iterator](); }
 };
+
+/** Order of magnitude only, so a per-commit count cannot grow the reason set. */
+function bucket(value: number): string {
+  if (value <= 0) return "0";
+  if (value < 10) return "1-9";
+  if (value < 100) return "10-99";
+  if (value < 1000) return "100-999";
+  return "1000+";
+}
 
 function noteBtiRefusal(reason: string): readonly [] {
   if (btiRefusalCounts.size < 48 || btiRefusalCounts.has(reason)) {
