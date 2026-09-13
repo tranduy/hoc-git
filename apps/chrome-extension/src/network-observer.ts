@@ -7128,11 +7128,25 @@ export class NetworkObserver {
 
   async probeBtiPageHealth(source: ObservedSource): Promise<ReturnType<typeof parseBtiPageHealthProbe>> {
     if (source.lobby !== "BTI") return null;
-    const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
-      "Runtime.evaluate", { expression: BTI_PAGE_HEALTH_EXPRESSION, returnByValue: true }))
-      .catch(() => null);
-    return parseBtiPageHealthProbe(nestedValue(evaluation, "result", "value")) ??
-      { status: "UNKNOWN", code: null };
+    const read = async (params: Record<string, unknown>, sessionId?: string):
+      Promise<ReturnType<typeof parseBtiPageHealthProbe>> => {
+      const evaluation = await this.#withFrameCommandTimeout(sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, sessionId)).catch(() => null);
+      return parseBtiPageHealthProbe(nestedValue(evaluation, "result", "value"));
+    };
+    const top = await read({ expression: BTI_PAGE_HEALTH_EXPRESSION, returnByValue: true });
+    if (top?.rosterCoverage !== undefined) return top;
+    // The collector runs in whichever frame owns the provider API, and writes
+    // its coverage on that frame's document. Probing only the top frame left
+    // BTI reporting status UNKNOWN and nothing else for ten minutes at a time,
+    // exactly while it was failing. Ask the frames the collector itself uses.
+    for (const world of [...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])].slice(0, 4)) {
+      const probe = await read({ expression: BTI_PAGE_HEALTH_EXPRESSION,
+        contextId: world.contextId, returnByValue: true }, world.sessionId);
+      if (probe?.rosterCoverage !== undefined) return probe;
+    }
+    return top ?? { status: "UNKNOWN", code: null };
   }
 
   async emitWorkHealth(source: ObservedSource, health: {
