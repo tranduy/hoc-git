@@ -373,7 +373,9 @@ const extraFlagState = { preferred: true, learned: false, probesLeft: 24, gained
  * report how many markets each one answers with. Counts only, no market
  * content, and it runs once per worker session.
  */
-const groupCensus = { eventsLeft: 3, counts: new Map<number, number>(), seen: new Set<number>() };
+// One fixture a session is enough to notice if the provider ever starts
+// honouring mg again; twelve requests is a price worth paying for that.
+const groupCensus = { eventsLeft: 1, counts: new Map<number, number>(), seen: new Set<number>() };
 const CENSUS_GROUPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const;
 export function apsportGroupCensusShape(): string {
   if (groupCensus.counts.size === 0) return "AP_GROUPS[chua-do]";
@@ -381,7 +383,7 @@ export function apsportGroupCensusShape(): string {
     .map(([group, count]) => `${group}:${count}`).join(",")}]`;
 }
 export function resetApsportGroupCensusForTests(): void {
-  groupCensus.eventsLeft = 3; groupCensus.counts.clear(); groupCensus.seen.clear();
+  groupCensus.eventsLeft = 1; groupCensus.counts.clear(); groupCensus.seen.clear();
 }
 export function apsportExtraFlagShape(): string {
   return `AP_EXTRA[flag:${extraFlagState.preferred};learned:${extraFlagState.learned};` +

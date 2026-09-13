@@ -144,7 +144,13 @@ type SabaPublicDiscoveryFailureCategory = typeof SABA_PUBLIC_DISCOVERY_FAILURE_C
 type SabaPublicDiscoveryFailureCounts = Record<SabaPublicDiscoveryFailureCategory, number>;
 const APSPORT_PAGE_REQUEST_TIMEOUT_MS = 30_000;
 const APSPORT_DETAIL_DELAY_MS = 500;
-const APSPORT_DETAIL_MARKET_GROUPS = [1, 4, 9] as const;
+// Measured 2026-09-13: group ids one through twelve each answered with the
+// same sixty-one markets on every fixture probed. The provider ignores mg on
+// this endpoint, so asking for corners and cards separately sent three
+// identical requests per fixture and spent three times the budget of a
+// provider that answers 429 beyond three lanes. One request carries
+// everything it is going to carry.
+const APSPORT_DETAIL_MARKET_GROUPS = [1] as const;
 // The corner (mg/4) and card (mg/9) books stream on their own sockets, which
 // the page opens only while a human is looking at those tabs. Measured
 // 2026-09-11: 79 corner frames arrived and 71 parsed in the minute one was
