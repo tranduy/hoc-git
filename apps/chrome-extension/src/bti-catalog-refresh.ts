@@ -302,8 +302,13 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     return count;
   };
   const hydratePartition = async (plan) => {
-    const requestId = (league) => plan.partition === 'early' ? masterId(league) :
-      Array.isArray(league) && (typeof league[0] === 'string' || typeof league[0] === 'number') ? String(league[0]) : '';
+    // Every partition is addressed by master id, never by container id.
+    // Measured 2026-09-13: asked for 72 live leagues and 267 of today's by
+    // container id, the roster endpoint answered with its own default ten each
+    // time, while early - which already asked by master id - was given all 156
+    // it asked for. The rows carry both: index 0 is the container the merge is
+    // keyed on, index 3 is the id the endpoint answers to.
+    const requestId = (league) => masterId(league);
     let initial = await fetchList(plan.requestPath);
     if (!initial || !Array.isArray(initial.payload?.serializedData)) {
       stats.partFail[plan.partition] += 1;

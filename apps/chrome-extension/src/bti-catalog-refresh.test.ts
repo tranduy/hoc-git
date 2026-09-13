@@ -892,3 +892,38 @@ describe("BTI private collector regression", () => {
     ]);
   });
 });
+
+describe("BTI league addressing", () => {
+  it("asks every partition by master id, never by container id", async () => {
+    const root = { dataset: {} };
+    const requested: string[] = [];
+    const named = (id: string) => [id, [["h", { EN: "Home" }], ["a", { EN: "Away" }]], "Home vs Away",
+      "2027-09-07T12:00:00Z", null, false];
+    // Index 0 is the container the merge is keyed on; index 3 is the id the
+    // provider answers to. Asking by index 0 got the default ten leagues back
+    // however many were requested.
+    const league = (master: string) => {
+      const value = Array(13).fill(null);
+      value[0] = `container-${master}`;
+      value[1] = "League";
+      value[3] = master;
+      value[12] = [named(`e-${master}`)];
+      return value;
+    };
+    const fetcher = async (path: string) => {
+      requested.push(path);
+      if (path.startsWith("/api/eventpage")) return new Promise(() => {});
+      if (path.includes("/early")) return { ok: true, text: async () => '{"serializedData":[]}' };
+      const ids = path.includes("leagueIds=01") ? ["m1", "m2"]
+        : new URL(path, "https://bti.test").searchParams.get("leagueIds")!.split(",")
+          .map((id) => id.replace(/^container-/u, ""));
+      return { ok: true, text: async () => JSON.stringify({ serializedData: ids.map(league) }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`);
+    await evaluate({ documentElement: root },
+      { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" }, fetcher, { getItem: () => null });
+    expect(requested.some((path) => path.includes("leagueIds=container-"))).toBe(false);
+    expect(requested.some((path) => /leagueIds=m1(?:,|$)/u.test(path))).toBe(true);
+  });
+});
