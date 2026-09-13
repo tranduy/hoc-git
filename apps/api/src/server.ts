@@ -41,6 +41,7 @@ import { ProviderAuthorityCoordinator } from "./chrome-bridge/provider-authority
 import { chromeBridgeSourceIdentity } from "./chrome-bridge/chrome-bridge-account.js";
 import { PipelineTelemetry } from "./diagnostics/pipeline-telemetry.js";
 import { providerFeedPolicies } from "./chrome-bridge/provider-feed-policies.js";
+import { describeProviderReset, providerResetFailure, resetProviderSources } from "./catalog-reset.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -572,10 +573,16 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       reader: sessionServices.catalogReader,
       chrome: chromeCatalogDataPlane
     });
+  const maintenanceJournal = new MaintenanceJournal({ nowMs: Date.now },
+    join(localAppData, "tool-chenh", "maintenance", "events.jsonl"));
+  // Bound after the targeted refresh exists: Reset must drive every book back
+  // into collection, not relaunch the browser side and wait for six new tabs.
+  let resetAttachedSources: (() => Promise<void>) | null = null;
   const maintenance = new SessionRefreshControl({ refresh: async () => {
     // Only the explicit Reset button enters this path. Automatic 03:00
     // maintenance was removed because it destroyed healthy provider sockets;
     // normal per-source recovery owns stale/dead feeds without a global reset.
+    if (resetAttachedSources !== null) return resetAttachedSources();
     return refreshCatalogSources({
       legacyRefresh: () => sessionServices.refreshAll(),
       ...(chromeBridgeControlPlane === null ? {} : {
@@ -600,9 +607,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       statuses: () => catalogAccess.sources.listStatuses(),
       ...(chromeBridgeRegistry === null ? {} : { bridgeSources: () => chromeBridgeRegistry.listActiveSources() })
     });
-  },
-    journal: new MaintenanceJournal({ nowMs: Date.now },
-      join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
+  }, journal: maintenanceJournal });
   const targetedProviderRefresh = chromeBridgeControlPlane === null || providerFeeds === null ? null
     : createTargetedProviderRefresh({
       restore: (lobby) => chromeBridgeControlPlane.restoreLobby(lobby),
@@ -621,6 +626,22 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     });
   const refreshProvider = targetedProviderRefresh === null ? undefined
     : targetedProviderRefresh.refresh;
+  if (refreshProvider !== undefined) {
+    resetAttachedSources = async (): Promise<void> => {
+      const outcomes = await resetProviderSources({
+        refresh: refreshProvider,
+        onOutcome: (outcome) => {
+          maintenanceJournal.record(outcome.failure === null ? "INFO" : "WARN",
+            outcome.failure === null
+              ? `Reset sàn: ${outcome.provider} đã lấy kèo lại`
+              : `Reset sàn: ${outcome.provider} chưa lấy lại được (${outcome.failure})`);
+        }
+      });
+      maintenanceJournal.record("INFO", describeProviderReset(outcomes));
+      const failure = providerResetFailure(outcomes);
+      if (failure !== null) throw failure;
+    };
+  }
   const isRecoverySuppressed = (accountId: string): boolean => maintenance.status().running ||
     targetedProviderRefresh?.isRecoverySuppressed(accountId) === true;
   const automaticSourceRecovery = chromeBridgeControlPlane !== null && providerFeeds !== null
