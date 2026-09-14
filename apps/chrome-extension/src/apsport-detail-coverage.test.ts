@@ -83,8 +83,10 @@ describe("never read", () => {
     // something asks specifically for the ones nobody has read.
     expect(coverage.neverRead("fresh")).toBe(true);
     expect(coverage.neverRead("old")).toBe(false);
-    // Already on its way: asking again would double the request.
-    expect(coverage.neverRead("queued")).toBe(false);
+    // Queued is what the roster sweep marks before it stands down, not proof
+    // anyone owns the request; the job map is what stops a duplicate.
+    expect(coverage.neverRead("queued")).toBe(true);
+    // In flight is a real owner.
     expect(coverage.neverRead("inflight")).toBe(false);
     expect(coverage.neverRead("absent")).toBe(false);
   });

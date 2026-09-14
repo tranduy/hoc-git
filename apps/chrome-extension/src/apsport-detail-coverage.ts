@@ -71,10 +71,17 @@ export class ApsportDetailCoverage {
     state.latestFailed = true;
   }
 
-  /** A fixture nobody has read yet, as opposed to one whose read is merely old. */
+  /**
+   * A fixture nobody has read yet, as opposed to one whose read is merely old.
+   * Deliberately blind to the queued flag: the roster sweep marks every
+   * candidate queued before standing down for the scheduler, so 196 unread
+   * fixtures sat queued-but-unowned and a first-read pass that respected the
+   * flag found nothing to do. What actually prevents a duplicate request is
+   * the job map, which the caller checks.
+   */
   neverRead(eventId: string): boolean {
     const state = this.#events.get(eventId);
-    return state !== undefined && state.successAtMs === null && !state.inFlight && !state.queued;
+    return state !== undefined && state.successAtMs === null && !state.inFlight;
   }
 
   removeEvent(eventId: string): void {
