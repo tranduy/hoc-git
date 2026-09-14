@@ -2513,10 +2513,39 @@ Ghi chú cùng nội dung đã đặt ngay tại chỗ `completed()` trong
 request. Và **đừng** gán kèo More của nhóm sang trận khác trong nhóm — đó là
 "giá cũ hiện ra như giá hiện tại" ở dạng khác.
 
-Một manh mối cho việc khác: kho lưu cho thấy CMD phát hành **kèo góc thành giải
-riêng** (`... - CORNERS`, `... - BOOKINGS`, `... - SPECIFIC 15 MINS`,
-`... - SINGLE TEAM OVER/UNDER`), và chúng đang bị loại bằng
-`CMD_CATALOG_EVENT_UNSUPPORTED` — 189 nhóm trong lần đo đó.
+### Kèo góc CMD: đang đúng, đã đo chứ không còn đoán
+
+Kho lưu cho thấy CMD phát hành **kèo góc thành giải riêng** (`... - CORNERS`,
+`... - BOOKINGS`) và 189 nhóm bị loại bằng `CMD_CATALOG_EVENT_UNSUPPORTED`. Nghi
+ngờ ban đầu: bộ chuẩn hoá đòi **cả hai** tên đội mang đúng hậu tố
+`(No. of Corners)`, quá chặt.
+
+Đo trên roster sống:
+
+```
+cornerRows:25  cornerSuffixOk:16    bookingRows:9  bookingSuffixOk:6
+cornerLooseOk:0  cornerOneSided:0  cornerNoParen:0
+cornerShapes: (1st Corner)
+```
+
+9 dòng bị loại **toàn bộ là `(1st Corner)`** — cược "đội nào đá phạt góc đầu
+tiên", **không phải** kèo tài/xỉu hay chấp phạt góc. Dòng 237 của
+`cmd-normalizer.ts` loại nó có chủ đích. **Loại là đúng**: đem nó so với kèo chấp
+góc của sàn khác chính là chế ra chênh lệch ảo.
+
+Khớp chéo với danh mục sống: 16 nhận được → **17 trận có kèo góc**; 6 → **6 trận có
+kèo thẻ**. Không có gì hỏng.
+
+Bộ đếm để lại làm chốt canh: nếu CMD đổi sang hậu tố khác, `cornerShapes` sẽ **gọi
+tên** nó thay vì lặng lẽ rụng trận. Mẫu chỉ lấy phần trong ngoặc, tối đa 6 dạng,
+không bao giờ kèm tên đội.
+
+### Bẫy: biểu thức trang dùng `String.raw`
+
+`buildCmdNativeCatalogRefreshExpression` trả về `String.raw`, nên **một** dấu gạch
+chéo trong file là **một** dấu khi chạy. Đây là lý do bốn lần guard lên production
+với dấu gạch chéo bị nuốt. Đừng đọc bằng mắt — viết test **lái biểu thức đã dựng**
+bằng dữ liệu đúng hình dạng.
 
 ### Còn lại thật sự
 
