@@ -9,7 +9,8 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
   for (const name of ["todayRows", "earlyRows", "runningRows", "groups", "done", "pending",
     "due", "waiting", "started", "passive", "unplanned", "rebuilt", "rebuiltCollected",
     "sharedEvents", "multiEventGroups", "groupsOneMatch", "groupsSeveralMatches", "partialGroups",
-    "rowsNotSport", "rowsLiveGroup", "eventsDiscovered", "failed",
+    "rowsNotSport", "rowsLiveGroup", "eventsDiscovered",
+    "groupsCoveredTwice", "partialWanted", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -186,6 +187,19 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
           return s && typeof s.snapshot === 'function' ? s.snapshot().revision : -1; })(),
         partialGroups: owners.filter((owner) => owner.doneAt > 0 &&
           (owner.covered?.size ?? 0) < owner.events.size).length,
+        // Whether asking the same group again ever moves the provider onto its
+        // other event. If this stays 0 over many repeats, the uncovered events
+        // have no More to fetch and re-asking would only spend request budget.
+        groupsCoveredTwice: owners.filter((owner) => (owner.covered?.size ?? 0) > 1).length,
+        // And whether anything uncovered is even wanted: an uncovered event no
+        // other book carries is not a gap.
+        partialWanted: owners.filter((owner) => {
+          if (!(owner.doneAt > 0) || (owner.covered?.size ?? 0) >= owner.events.size) return false;
+          const scheduler = root.__fieldlineCollectionSchedulerV1;
+          if (!scheduler || typeof scheduler.dueReason !== 'function') return false;
+          return [...owner.events].some((id) => !owner.covered?.has(id) &&
+            scheduler.dueReason(id, null) !== 'UNPLANNED');
+        }).length,
         failed: owners.filter((owner) => owner.failed).length, active: state.active.size,
         rosterActive: state.rosterActive, rosterFailed: state.rosterFailed, rosterAtMs: state.rosterAtMs,
         requestPaused: paused(), requestStatus: state.requestStatus,

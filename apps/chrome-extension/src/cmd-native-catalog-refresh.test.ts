@@ -71,6 +71,33 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(2);
   });
 
+  it("separates a group the provider moved on from one it answered twice the same way", () => {
+    // Decides whether asking a partially covered group again is worth a request
+    // at all, and whether anything uncovered is even wanted.
+    const h = harness();
+    const root = (h.globals.document as any).documentElement;
+    const unplanned = new Set(["2"]);
+    root.__fieldlineCollectionSchedulerV1 = {
+      dueReason: (id: string) => unplanned.has(id) ? "UNPLANNED" : null,
+      due: () => true, policy: () => ({ refreshMs: 10_000 }),
+      sort: (ids: string[]) => [...ids], completed: vi.fn()
+    };
+    h.tick();
+    h.commit([row(1, group(1)), row(2, group(1)), row(3, group(3)), row(4, group(3))], []);
+    const first = h.more().find((r) => JSON.parse(r.body).m_groupId === group(1))!;
+    const second = h.more().find((r) => JSON.parse(r.body).m_groupId === group(3))!;
+    h.complete(first, 1);
+    h.complete(second, 3);
+    // Group 1 hides only an unplanned event; group 3 hides a wanted one.
+    expect(h.tick()).toMatchObject({ partialGroups: 2, partialWanted: 1, groupsCoveredTwice: 0 });
+
+    // The provider answers for group 3's other event on a later read.
+    vi.setSystemTime(START + 20_000);
+    h.tick();
+    h.complete(h.more().filter((r) => JSON.parse(r.body).m_groupId === group(3)).at(-1)!, 4);
+    expect(h.tick()).toMatchObject({ groupsCoveredTwice: 1, partialWanted: 0 });
+  });
+
   it("reports a missing plan as -1 rather than omitting it", () => {
     // An absent field reads the same as a plan of zero events, which is how a
     // plan that never reached the page would hide behind unplanned groups.
