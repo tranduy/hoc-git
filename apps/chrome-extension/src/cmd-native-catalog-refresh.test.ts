@@ -71,6 +71,22 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(2);
   });
 
+  it("counts events carried by more than one group, and groups carrying more than one event", () => {
+    // A More response covers one event but marks every event in its group
+    // collected, so a second group holding the same event is never due again.
+    // Measured: 202 groups reading as collected against 97 actually fetched.
+    const h = harness();
+    h.tick();
+    h.commit([row(1, group(1)), row(2, group(2))], []);
+    expect(h.tick()).toMatchObject({ sharedEvents: 0, multiEventGroups: 0 });
+
+    vi.setSystemTime(START + 30_000);
+    h.tick();
+    // Event 1 now appears under two groups, and group 2 carries two events.
+    h.commit([row(1, group(1)), row(1, group(2)), row(2, group(2))], []);
+    expect(h.tick()).toMatchObject({ sharedEvents: 1, multiEventGroups: 1 });
+  });
+
   it("counts an owner rebuilt after it was already collected apart from one never collected", () => {
     // A replaced owner loses doneAt while the scheduler keeps its receipt, so
     // the group reads as collected while carrying nothing. 1,618 More responses
