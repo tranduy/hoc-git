@@ -2325,14 +2325,33 @@ Thêm bộ đếm cổng (`drive`) thì nó tự khai, trong 5 phút:
        err=SABA_COLLECTOR_MORE_RESTORE_ACTION_UNCONFIRMED
 ```
 
-**Một trận không đóng lại được nút "More" là giết luôn kèo ẩn SABA cho đến lần nạp
-lại extension tiếp theo.** Bộ thu đóng băng, driver đánh dấu `finished`, và
+**Bất cứ một lần đóng băng nào cũng giết luôn kèo ẩn SABA cho đến lần nạp lại
+extension tiếp theo.** Bộ thu đóng băng, driver đánh dấu `finished`, và
 `resumeAfterVerifiedTodayRestore` — đường hồi phục duy nhất — chỉ được gọi trong
 nhánh `if (!restored)`, tức là **không với tới được đúng lúc trang vẫn còn lành**.
 
-Sửa: `resumeScheduledAfterVerifiedTodayRestore` nhận cùng một bằng chứng khôi phục
-Today mà walk danh sách đã chấp nhận, bỏ lại trận hỏng (2 lần/trận), tối đa 64 lần
-hồi phục mỗi bộ thu — hết ngần đó thì vẫn báo hỏng, không quay vòng vô hạn.
+Có hai nguồn đóng băng, và cái thứ hai mới là cái giết cả buổi chiều:
+
+1. **Một trận không mở/đóng được nút "More"** → `ADAPTER_ERROR`.
+2. **Danh sách Today nhúc nhích trong lúc walk** → `TODAY_RESTORE_UNCONFIRMED`.
+   Walk danh sách chính tự chứng minh bằng cách khôi phục Today rồi đòi danh sách
+   khôi phục **trùng khít** danh sách vừa đi qua. Một trận lăn bóng giữa chừng là
+   đủ hỏng. Đo được: `restore=c5.r1.m1.e0` — 5 lần kiểm, 1 lần từ chối, lệch đúng
+   **1 trận thiếu, 0 trận thừa**.
+
+Sửa:
+
+- `resumeScheduledAfterVerifiedTodayRestore` nhận cùng bằng chứng khôi phục Today
+  mà walk danh sách đã chấp nhận, bỏ lại trận hỏng (2 lần/trận), tối đa 64 lần.
+- Danh sách lệch thì **đi lại từ đầu**, không đóng băng (tối đa 8 lần). Trùng khít
+  chưa bao giờ là thứ chứng minh đúng khung nhìn — adapter đã đòi tab Today đang
+  mở và đọc hai lần giống nhau rồi. Khung nhìn không dính dáng gì tới walk, hoặc
+  có id của kỳ Sớm, thì vẫn từ chối thẳng.
+- Đi lại thì phải **xoá danh sách đã công bố**. Không xoá thì lát kế tiếp rơi vào
+  nhánh lịch trên các kỳ vừa bị dọn sạch: không trận, không mở, không tiến.
+
+Kết quả đo sau khi sửa, 8 phút liên tục: `drive=e30.i0.f0.a29.p0.u0` — **0 lát bị
+đuổi về, 0 lát mất khung nhìn**, `frozen=-`. Trước đó: chết trong 3 phút.
 
 ### Cửa im lặng thứ tư
 
@@ -2344,9 +2363,11 @@ gạch chéo, khác đường vào.
 
 ### Nhưng mở được cũng chưa ra kèo
 
-9/9 lần mở nút "More" đều trả `NO_STRUCTURAL_CHANGE`: không thêm dòng, không thêm
-nhóm, không thêm mã kèo. Sửa đóng băng là để walk sống, **không phải** để có kèo ẩn.
-Còn phải đo tiếp trên mẫu lớn xem SABA thật sự giấu gì sau nút đó.
+Cộng dồn trong ngày **34/34 lần mở nút "More" đều trả `NO_STRUCTURAL_CHANGE`**:
+không thêm dòng, không thêm nhóm, không thêm mã kèo. Bộ nhận diện không mù — nó
+so id trận, id kèo, loại kèo gốc, số nhóm và cả panel mới. Sửa đóng băng là để walk
+sống, **không phải** để có kèo ẩn. Cứ để walk chạy và đọc lại `o` với `n`: chừng
+nào `n` còn bằng `o` thì sau nút "More" của SABA không có gì cả.
 
 ### Kèo góc SABA: không có trong feed
 
