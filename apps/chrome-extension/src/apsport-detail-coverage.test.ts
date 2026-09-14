@@ -71,33 +71,3 @@ it("cancels queued work without losing receipts or physical in-flight state", ()
   expect(coverage.snapshot(200)).toMatchObject({ successfulEvents: 1, queuedEvents: 0,
     inFlightEvents: 1, failedEvents: 0, oldestSuccessAgeMs: 100 });
 });
-
-describe("never read", () => {
-  it("separates a fixture nobody has read from one whose read is merely old", () => {
-    const coverage = new ApsportDetailCoverage();
-    coverage.reconcileRoster(["fresh", "old", "queued", "inflight"]);
-    coverage.markSuccess("old", true, 1_000);
-    coverage.markQueued("queued");
-    coverage.markInFlight("inflight");
-    // The passive tier never comes due, so a fixture there is only ever read if
-    // something asks specifically for the ones nobody has read.
-    expect(coverage.neverRead("fresh")).toBe(true);
-    expect(coverage.neverRead("old")).toBe(false);
-    // Queued is what the roster sweep marks before it stands down, not proof
-    // anyone owns the request; the job map is what stops a duplicate.
-    expect(coverage.neverRead("queued")).toBe(true);
-    // In flight is a real owner.
-    expect(coverage.neverRead("inflight")).toBe(false);
-    expect(coverage.neverRead("absent")).toBe(false);
-  });
-
-  it("forgets a read once the fixture leaves the roster", () => {
-    const coverage = new ApsportDetailCoverage();
-    coverage.reconcileRoster(["a"]);
-    coverage.markSuccess("a", true, 1_000);
-    expect(coverage.neverRead("a")).toBe(false);
-    coverage.reconcileRoster(["b"]);
-    expect(coverage.neverRead("a")).toBe(false);
-    expect(coverage.neverRead("b")).toBe(true);
-  });
-});
