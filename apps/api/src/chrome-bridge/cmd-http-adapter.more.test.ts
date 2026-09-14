@@ -334,6 +334,34 @@ describe("CMD authenticated native More", () => {
     expect(adapter.decode(envelope(foreign, 2, true))).toEqual([]);
   });
 
+  it("names which condition refused a More response instead of one label for all of them", () => {
+    // Measured in production: 210 More responses discarded under a single
+    // "more-scope-unproven", which cannot say whether the walk is racing the
+    // roster or answering for a document that is already gone.
+    const adapter = new CmdHttpCatalogAdapter();
+    adapter.decode(envelope(main(), 1));
+    const refusal = (sequence: number, changes: Record<string, unknown>) => {
+      expect(adapter.decode(envelope(fixture.body, sequence, true, changes))).toEqual([]);
+      return adapter.takeIgnoreReason();
+    };
+    expect(refusal(2, { providerGroupId: "00000000-0000-0000-0000-000000000000" }))
+      .toBe("more-scope-unproven/group-mismatch");
+    expect(refusal(3, { requestDocumentKey: "old-doc" })).toBe("more-scope-unproven/document-changed");
+    expect(refusal(4, { requestFrameKey: "other-frame" })).toBe("more-scope-unproven/frame-changed");
+    expect(refusal(5, { reconcileCutoffSequence: undefined })).toBe("more-scope-unproven/no-cutoff");
+
+    // A body that does not parse never reaches this decision: the fingerprint
+    // already parsed it, and refuses it under its own name.
+    expect(adapter.decode(envelope({ d: "not-a-tuple" }, 6, true))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("fingerprint-refused");
+
+    // Nothing here is the catch-all: that would mean the label drifted from the
+    // decision it describes.
+    const unproven = new CmdHttpCatalogAdapter();
+    expect(unproven.decode(envelope(fixture.body, 1, true))).toEqual([]);
+    expect(unproven.takeIgnoreReason()).toBe("more-scope-unproven/no-main-rows");
+  });
+
   it("replaces only More's own markets, withdraws closed pairs, and refuses late responses", () => {
     const adapter = new CmdHttpCatalogAdapter();
     const original = catalog(adapter.decode(envelope(main(), 1)));

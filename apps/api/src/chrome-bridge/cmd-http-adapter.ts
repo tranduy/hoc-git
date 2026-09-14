@@ -412,7 +412,9 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
       cutoff === undefined || cutoff >= envelope.sequence || native.groupId !== envelope.request.providerGroupId?.toLowerCase() ||
       main.baselineObservation?.requestFrameKey !== observation.requestFrameKey ||
       main.sourceEpoch !== envelope.sourceEpoch || main.baselineObservation?.requestDocumentKey !== observation.requestDocumentKey ||
-      main.baselineObservation?.observerSessionId !== observation.observerSessionId) return this.#ignore("more-scope-unproven");
+      main.baselineObservation?.observerSessionId !== observation.observerSessionId) {
+      return this.#ignore(`more-scope-unproven/${moreScopeRefusal(main, native, observation, envelope, cutoff)}`);
+    }
     const retained = this.#combinedRows(envelope.sourceId, main).get(native.eventId);
     const owner = retained === undefined ? null : decodeRecord(retained.row);
     const admission = this.#ownerAdmissions.get(envelope.sourceId)?.get(native.eventId);
@@ -632,6 +634,31 @@ function publicText(value: unknown, max: number): string | null {
  * of the moment: decodeRecord drops a market whose odds read this way, so the
  * fixture loses that line instead of keeping the price it last had.
  */
+/**
+ * Which condition refused a More response. Descriptive only: the decision above
+ * owns the refusal, and this repeats its order so one label over thirteen
+ * conditions stops hiding whether the walk is racing the roster, answering for a
+ * retired document, or sending bodies that do not parse.
+ */
+function moreScopeRefusal(main: SourceState | undefined, native: CmdNativeMore | null,
+  observation: Omit<BaselineObservation, "providerVersion"> | null, envelope: ChromeBridgeEnvelope,
+  cutoff: number | undefined): string {
+  if (main?.rows === undefined || main.rows === null) return "no-main-rows";
+  if (main.generation === null) return "no-generation";
+  if (main.gap) return "main-gap";
+  if (native === null) return "body-unparsable";
+  if (observation === null) return "no-observation";
+  if (envelope.request.requestFrameKey === undefined) return "no-request-frame";
+  if (cutoff === undefined) return "no-cutoff";
+  if (cutoff >= envelope.sequence) return "older-than-cutoff";
+  if (native.groupId !== envelope.request.providerGroupId?.toLowerCase()) return "group-mismatch";
+  if (main.sourceEpoch !== envelope.sourceEpoch) return "epoch-changed";
+  if (main.baselineObservation?.requestFrameKey !== observation.requestFrameKey) return "frame-changed";
+  if (main.baselineObservation?.requestDocumentKey !== observation.requestDocumentKey) return "document-changed";
+  if (main.baselineObservation?.observerSessionId !== observation.observerSessionId) return "session-changed";
+  return "unknown";
+}
+
 function closedMarketValue(value: unknown): boolean {
   return value === -999 || value === "-999";
 }
