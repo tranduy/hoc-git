@@ -11,7 +11,8 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
     "sharedEvents", "multiEventGroups", "groupsOneMatch", "groupsSeveralMatches", "partialGroups",
     "rowsNotSport", "rowsLiveGroup", "eventsDiscovered",
     "groupsCoveredTwice", "partialWanted",
-    "cornerRows", "cornerSuffixOk", "bookingRows", "bookingSuffixOk", "failed",
+    "cornerRows", "cornerSuffixOk", "cornerLooseOk", "cornerOneSided", "cornerNoParen",
+    "bookingRows", "bookingSuffixOk", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -58,6 +59,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     state.groupsOneMatch ??= 0; state.groupsSeveralMatches ??= 0;
     state.rowsNotSport ??= 0; state.rowsLiveGroup ??= 0; state.eventsDiscovered ??= 0;
     state.cornerRows ??= 0; state.cornerSuffixOk ??= 0;
+    state.cornerLooseOk ??= 0; state.cornerOneSided ??= 0; state.cornerNoParen ??= 0;
     state.bookingRows ??= 0; state.bookingSuffixOk ??= 0;
     const retire = () => {
       state.owners.clear(); state.queue = []; state.cycle = null; state.nextRosterAt = 0;
@@ -180,6 +182,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         sharedEvents: state.sharedEvents, multiEventGroups: state.multiEventGroups,
         groupsOneMatch: state.groupsOneMatch, groupsSeveralMatches: state.groupsSeveralMatches,
         cornerRows: state.cornerRows, cornerSuffixOk: state.cornerSuffixOk,
+        cornerLooseOk: state.cornerLooseOk, cornerOneSided: state.cornerOneSided,
+        cornerNoParen: state.cornerNoParen,
         bookingRows: state.bookingRows, bookingSuffixOk: state.bookingSuffixOk,
         rowsNotSport: state.rowsNotSport, rowsLiveGroup: state.rowsLiveGroup,
         eventsDiscovered: state.eventsDiscovered,
@@ -365,19 +369,31 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       const bookingLeague = /\s-\sBOOKINGS\s*$/i;
       const cornerTeam = /\(\s*No\.?\s*of\s+Corners\s*\)\s*$/i;
       const bookingTeam = /\(\s*Total\s+Bookings\s*\)\s*$/i;
+      // What shape the refused ones actually have, so the strict suffix can be
+      // widened to exactly what the provider writes and nothing more.
+      const cornerLoose = /\((?:No\.?\s*of\s+)?Corners?\)\s*$/i;
+      const anyParen = /\([^)]*\)\s*$/;
       let cornerRows = 0, cornerSuffix = 0, bookingRows = 0, bookingSuffix = 0;
+      let cornerLooseOk = 0, cornerOneSided = 0, cornerNoParen = 0;
       for (const row of [...today, ...early]) {
         const league = String(row[37]);
         const teams = [String(row[38]), String(row[39])];
         if (cornerLeague.test(league)) {
           cornerRows += 1;
           if (teams.every((team) => cornerTeam.test(team))) cornerSuffix += 1;
+          else {
+            if (teams.every((team) => cornerLoose.test(team))) cornerLooseOk += 1;
+            else if (teams.some((team) => cornerTeam.test(team))) cornerOneSided += 1;
+            else if (!teams.some((team) => anyParen.test(team))) cornerNoParen += 1;
+          }
         } else if (bookingLeague.test(league)) {
           bookingRows += 1;
           if (teams.every((team) => bookingTeam.test(team))) bookingSuffix += 1;
         }
       }
       state.cornerRows = cornerRows; state.cornerSuffixOk = cornerSuffix;
+      state.cornerLooseOk = cornerLooseOk; state.cornerOneSided = cornerOneSided;
+      state.cornerNoParen = cornerNoParen;
       state.bookingRows = bookingRows; state.bookingSuffixOk = bookingSuffix;
       state.rowsNotSport = notSport;
       state.rowsLiveGroup = inLiveGroup;

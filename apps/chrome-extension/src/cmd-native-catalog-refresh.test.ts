@@ -120,7 +120,10 @@ describe("CMD native catalog collector", () => {
       shaped(6, "PREMIER LEAGUE", "Arsenal", "Chelsea")
     ], []);
     expect(h.tick()).toMatchObject({ cornerRows: 3, cornerSuffixOk: 1,
-      bookingRows: 2, bookingSuffixOk: 1 });
+      bookingRows: 2, bookingSuffixOk: 1,
+      // "(Corners)" is a shape the strict suffix refuses but a widened one
+      // would take; bare team names are a different refusal entirely.
+      cornerLooseOk: 1, cornerOneSided: 0, cornerNoParen: 1 });
   });
 
   it("reports a missing plan as -1 rather than omitting it", () => {
