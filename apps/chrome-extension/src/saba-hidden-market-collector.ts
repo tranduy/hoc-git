@@ -500,7 +500,11 @@ export class SabaHiddenMarketCollector {
   }
 
   #restartMainRoster(): void {
+    this.#mainSequence += 1;
     this.#mainPeriodIndex = 0;
+    // Without this the next slice finds a published roster and walks owners that
+    // were just thrown away - a scheduled walk over empty periods.
+    this.#mainRosterItems = undefined;
     this.#candidateItems.splice(0);
     for (const period of PERIODS) {
       this.#periods[period] = { roster: null, cursor: 0, complete: false, validatedNoGrowthPending: false };

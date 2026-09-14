@@ -602,6 +602,17 @@ describe("SABA freeze reason", () => {
 
   // A frozen walk reported "no error" for as long as the guard only knew the
   // page adapter prefix. The collector freezes under its own unprefixed names.
+  it("reports the collector freeze reason in its own field", () => {
+    const frozen = (value: string) => ({ nativeReady: false, schemaContextReady: false,
+      catalogUsable: true, discoveryPending: false, discoveryAttempted: true,
+      collectorState: "FINISHED", domBlocked: false, probeBlocked: false,
+      currentPeriod: "EARLY", lastErrorCode: "SABA_COLLECTOR_MORE_OWNER_ABSENT", frozen: value });
+    expect(sabaCollectorDiagnosticForTests(frozen("TODAY_RESTORE_UNCONFIRMED")))
+      .toMatchObject({ frozen: "TODAY_RESTORE_UNCONFIRMED",
+        lastErrorCode: "SABA_COLLECTOR_MORE_OWNER_ABSENT" });
+    expect(sabaCollectorDiagnosticForTests(frozen("whatever"))?.frozen).toBeUndefined();
+  });
+
   it("keeps the collector freeze reasons the observer forwards", () => {
     for (const code of ["OWNER_CAPTURE_UNSAFE", "TODAY_RESTORE_UNCONFIRMED", "ROSTER_UNCONFIRMED",
       "ADAPTER_ERROR", "BINDING_CHANGED", "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT"]) {

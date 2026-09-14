@@ -714,6 +714,8 @@ interface SabaCollectorDiagnostic {
   readonly drive?: string;
   /** Today restorations checked, refused, the id gap each way, and walks restarted. */
   readonly restore?: string;
+  /** Why the collector is frozen, if it is. */
+  readonly frozen?: string;
 }
 
 /** Exposed so the guard can be pinned against the strings the collector emits. */
@@ -749,6 +751,8 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     // The page adapter reports SABA_COLLECTOR_* codes, but the collector's own
     // terminal errors carry no prefix. A guard that only knew the prefix reported
     // every frozen walk as "no error" - the same silent door as an eaten backslash.
+    ...(typeof entry.frozen === "string" && SABA_COLLECTOR_ADVANCE_ERRORS.includes(entry.frozen)
+      ? { frozen: entry.frozen } : {}),
     lastErrorCode: typeof entry.lastErrorCode === "string" &&
       (/^SABA_COLLECTOR_[A-Z_]{1,70}$/u.test(entry.lastErrorCode) ||
         SABA_COLLECTOR_ADVANCE_ERRORS.includes(entry.lastErrorCode))

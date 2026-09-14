@@ -7279,6 +7279,8 @@ export class NetworkObserver {
           captures: this.#sabaCollectors.get(source.sourceId)?.collector.captureCounts() ?? "",
           drive: sabaDriveCounts(this.#sabaCollectors.get(source.sourceId)?.drive),
           restore: this.#sabaCollectors.get(source.sourceId)?.collector.restoreCounts() ?? "",
+          // Why the walk is frozen, which the page adapter's sticky code hides.
+          frozen: this.#sabaCollectors.get(source.sourceId)?.collector.terminalError ?? null,
           lastErrorCode: this.#sabaCollectors.get(source.sourceId)?.lastErrorCode() ??
             this.#sabaCollectors.get(source.sourceId)?.collector.terminalError ?? null,
           currentPeriod: this.#sabaCollectors.get(source.sourceId)?.collector.currentPeriod ?? null,

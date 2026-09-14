@@ -198,7 +198,7 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
       drive: "e1.i0.f0.a1.p0.u0",
       // Today restorations checked and refused, with the id gap each way. One
       // verified restoration, nothing refused.
-      restore: "c1.r0.m0.e0.w0",
+      restore: "c1.r0.m0.e0.w0", frozen: null,
       domBlocked: false, probeBlocked: false, lastErrorCode: null, currentPeriod: "TODAY",
       mainRosterComplete: true, hiddenMarketsComplete: false });
   });
