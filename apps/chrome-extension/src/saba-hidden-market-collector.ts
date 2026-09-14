@@ -282,6 +282,18 @@ function stableOwnerIdentity(owner: SabaCollectorRosterOwner): string {
     kickoffDate.kind, kickoffDate.kind === "EXPLICIT" ? kickoffDate.isoDate : null]);
 }
 
+/**
+ * What cannot change about a fixture without it being a different fixture. The
+ * rest of stableOwnerIdentity is display and state: a More control appearing,
+ * a kickoff time being corrected, a league being renamed. Those move on their
+ * own and used to freeze the whole walk.
+ */
+function ownerIdentityCore(owner: SabaCollectorRosterOwner): string {
+  const { record } = owner;
+  return JSON.stringify([owner.ownerMatchId, record.sportId, record.matchId,
+    record.leagueId, [...record.teamNames]]);
+}
+
 function continuationAllowed(shouldContinue: (() => boolean) | undefined): boolean {
   if (shouldContinue === undefined) return true;
   try { return shouldContinue() === true; } catch { return false; }
@@ -797,10 +809,25 @@ export class SabaHiddenMarketCollector {
         return this.#freeze("SAFE_ERROR", "ROSTER_UNCONFIRMED", emitted);
       }
       const currentOwners = new Map(result.owners.map((owner) => [owner.ownerMatchId, owner]));
-      if (state.roster?.some((owner) => {
+      const moved = (state.roster ?? []).filter((owner) => {
         const current = currentOwners.get(owner.ownerMatchId);
         return current === undefined || stableOwnerIdentity(current) !== stableOwnerIdentity(owner);
+      });
+      // One id standing for two different fixtures is never drift.
+      if (moved.some((owner) => {
+        const current = currentOwners.get(owner.ownerMatchId);
+        return current !== undefined && ownerIdentityCore(current) !== ownerIdentityCore(owner);
       })) return this.#freeze("SAFE_ERROR", "ROSTER_UNCONFIRMED", emitted);
+      if (moved.length > 0) {
+        // Measured: a fixture losing its More control mid-walk froze a walk that
+        // had already opened 21 owners, and only a collector rebuild revived it.
+        if (this.#mainRosterRestarts >= MAIN_ROSTER_RESTART_LIMIT) {
+          return this.#freeze("SAFE_ERROR", "ROSTER_UNCONFIRMED", emitted);
+        }
+        this.#mainRosterRestarts += 1;
+        this.#restartMainRoster();
+        return this.#result("INCOMPLETE", emitted);
+      }
       const knownIds = new Set(state.roster?.map(({ ownerMatchId }) => ownerMatchId) ?? []);
       const additions = result.owners.filter(({ ownerMatchId }) => !knownIds.has(ownerMatchId));
       state.roster = [...(state.roster ?? []), ...additions];

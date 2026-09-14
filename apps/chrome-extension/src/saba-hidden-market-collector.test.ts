@@ -55,6 +55,43 @@ function refreshed(value: SabaCollectorRosterOwner, clock: number,
 }
 
 describe("SabaHiddenMarketCollector", () => {
+  it("walks again when a row loses its More control, and refuses a swapped fixture", async () => {
+    // Measured: a walk that had already opened 21 owners froze on
+    // ROSTER_UNCONFIRMED because one row's control flipped, and only a
+    // collector rebuild revived it. Control and kickoff text are state.
+    const walk = (mutate: (read: number) => { control: SabaCollectorRosterOwner["control"];
+      matchId: string }) => {
+      let reads = 0, clock = 0;
+      const page = adapter([], [], {
+        readRoster: async (period) => {
+          if (period !== "TODAY") return { binding: BINDING, period, selectedPrematch: true, owners: [] };
+          const shape = mutate(++reads);
+          return { binding: BINDING, period, selectedPrematch: true,
+            owners: [{ ...owner("a", shape.control, ++clock),
+              record: { ...record(shape.matchId), matchId: shape.matchId,
+                providerTimezoneOffsetMinutes: 420 } }] };
+        },
+        restoreToday: async () => ({ binding: BINDING, selectedPrematch: true, rosterMatchIds: ["a"] })
+      });
+      return new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+        binding: BINDING, adapter: page, publishMainRosterFirst: true,
+        shouldCaptureOwner: () => false, nowMs: () => 1_788_800_001_000 });
+    };
+
+    const moved = walk((read) => ({ matchId: "a",
+      control: read === 1 ? "ELIGIBLE_MORE" : "NO_ELIGIBLE_CONTROL" }));
+    expect((await moved.advance(1)).status).toBe("INCOMPLETE");
+    expect(moved.terminalError).toBeNull();
+    expect(moved.restoreCounts()).toBe("c0.r0.m0.e0.w1");
+
+    // The same id standing for a different fixture is not state moving.
+    const swapped = walk((read) => ({ control: "ELIGIBLE_MORE",
+      matchId: read === 1 ? "a" : "other" }));
+    expect(await swapped.advance(1)).toMatchObject({ status: "SAFE_ERROR",
+      error: "ROSTER_UNCONFIRMED" });
+    expect(swapped.restoreCounts()).toBe("c0.r0.m0.e0.w0");
+  });
+
   it("walks the main roster again when the Today list moved under it", async () => {
     // Measured in production: the collector froze on TODAY_RESTORE_UNCONFIRMED
     // after three advances and then refused 64 slices in a row, never once
