@@ -7246,6 +7246,7 @@ export class NetworkObserver {
           discoveryAttempted: this.#sabaNavigationProbeAttempts.has(source.sourceId),
           collectorState: this.#sabaCollectors.has(source.sourceId)
             ? this.#sabaCollectors.get(source.sourceId)!.finished ? "FINISHED" : "RUNNING" : "NONE",
+          owners: this.#sabaCollectors.get(source.sourceId)?.collector.ownerCounts() ?? "",
           lastErrorCode: this.#sabaCollectors.get(source.sourceId)?.lastErrorCode() ??
             this.#sabaCollectors.get(source.sourceId)?.collector.terminalError ?? null,
           currentPeriod: this.#sabaCollectors.get(source.sourceId)?.collector.currentPeriod ?? null,

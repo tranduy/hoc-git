@@ -186,6 +186,10 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
       .find((body) => body.kind === "WS_ATTACH");
     expect(heartbeat.sabaCollector).toEqual({ nativeReady: false, schemaContextReady: false, catalogUsable: true,
       discoveryPending: false, discoveryAttempted: true, collectorState: "RUNNING",
+      // Per period: roster size, fixtures offering a More control, and how many
+      // are due: this fixture loads two owners a period, both with a More
+      // control and both waiting their turn.
+      owners: "t2.m2.d2,e2.m2.d2",
       domBlocked: false, probeBlocked: false, lastErrorCode: null, currentPeriod: "TODAY",
       mainRosterComplete: true, hiddenMarketsComplete: false });
   });

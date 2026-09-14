@@ -333,6 +333,27 @@ export class SabaHiddenMarketCollector {
     return this.#schedule.shouldCaptureOwner !== undefined && (this.#schedule.isSchedulingEnabled?.() ?? true);
   }
 
+  /**
+   * Roster size, how many of those fixtures expose a More control at all, and
+   * how many are waiting their turn - per period. Counts only. Without it the
+   * difference between "the walk is behind" and "the page offers nothing to
+   * walk" cannot be told apart from outside.
+   */
+  ownerCounts(): string {
+    return PERIODS.map((period) => {
+      const roster = this.#periods[period].roster ?? [];
+      const more = roster.filter((owner) => owner.control === "ELIGIBLE_MORE");
+      let due = 0;
+      if (this.#schedule.shouldCaptureOwner !== undefined) {
+        try {
+          due = more.filter((owner) => this.#schedule.shouldCaptureOwner!(period, owner,
+            this.#lastVisits.get(`${period}:${owner.ownerMatchId}`) ?? null)).length;
+        } catch { due = -1; }
+      }
+      return `${period === "TODAY" ? "t" : "e"}${roster.length}.m${more.length}.d${due}`;
+    }).join(",");
+  }
+
   get mainRosterComplete(): boolean { return this.#mainRosterItems !== undefined; }
   get hiddenMarketsComplete(): boolean { return this.#terminalEmitted; }
   get terminalError(): SabaCollectorAdvanceError | null { return this.#frozen?.error ?? null; }

@@ -702,6 +702,8 @@ interface SabaCollectorDiagnostic {
   readonly probeBlocked: boolean;
   readonly currentPeriod: "TODAY" | "EARLY" | null;
   readonly lastErrorCode: string | null;
+  /** Per period: roster size, fixtures offering a More control, and how many are due. */
+  readonly owners?: string;
 }
 
 function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | undefined {
@@ -718,6 +720,9 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     ...(typeof entry.hiddenMarketsComplete === "boolean" ? { hiddenMarketsComplete: entry.hiddenMarketsComplete } : {}),
     domBlocked: entry.domBlocked as boolean, probeBlocked: entry.probeBlocked as boolean,
     currentPeriod: entry.currentPeriod === "TODAY" || entry.currentPeriod === "EARLY" ? entry.currentPeriod : null,
+    ...(typeof entry.owners === "string" &&
+      /^t-?d{1,5}.m-?d{1,5}.d-?d{1,5},e-?d{1,5}.m-?d{1,5}.d-?d{1,5}$/u.test(entry.owners)
+      ? { owners: entry.owners } : {}),
     lastErrorCode: typeof entry.lastErrorCode === "string" && /^SABA_COLLECTOR_[A-Z_]{1,70}$/u.test(entry.lastErrorCode)
       ? entry.lastErrorCode : null };
 }
