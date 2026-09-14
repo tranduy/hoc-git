@@ -1265,6 +1265,8 @@ export class NetworkObserver {
   readonly #apsportLaneCursors = new Map<string, number>();
   readonly #apsportDetailCoverage = new Map<string, ApsportDetailCoverage>();
   readonly #apsportHoldWindows = new Map<string, { open: boolean; changedAtMs: number }>();
+  readonly #apsportPumpState = new Map<string, { reason: string; jobs: number;
+    dueCount: number; atMs: number }>();
   readonly #apsportCornerSocketRequests = new Set<string>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
@@ -2634,17 +2636,30 @@ export class NetworkObserver {
   }
 
   #pumpApsportCollection(source: ObservedSource): void {
+    // Measured 2026-09-14: 156 of 326 fixtures read, 170 waiting, nothing in
+    // flight and nothing failing, for six minutes. The walk had simply stopped
+    // pumping and no count said why. Every reason it can decline now names
+    // itself, because guessing here cost two wrong fixes on the BTI queue the
+    // night before.
+    const note = (reason: string, jobs: number, dueCount: number): void => {
+      this.#apsportPumpState.set(source.sourceId, { reason, jobs, dueCount, atMs: this.#now() });
+    };
     const scheduler = this.#collectionSchedulers.get(source.sourceId);
     const active = this.#apsportActiveCatalogs.get(source.sourceId);
     // A roster refresh no longer owns the whole provider lane, so the walk does
     // not have to stand down for the tens of seconds one takes. Detail work that
     // loses its event in the incoming roster is still dropped by isCurrent().
-    if (scheduler === undefined || active === undefined ||
-      (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) > this.#now()) return;
+    if (scheduler === undefined) { note("no-scheduler", 0, 0); return; }
+    if (active === undefined) { note("no-roster", 0, 0); return; }
+    const retryInMs = (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) - this.#now();
     const outstanding = [...this.#apsportEventDetailJobs.keys()]
       .filter(id => id.startsWith(`${source.sourceId}\u0000`)).length;
+    if (retryInMs > 0) {
+      note(`backoff-${Math.round(retryInMs / 1000)}s`, outstanding, 0);
+      return;
+    }
     const room = APSPORT_DETAIL_MAX_JOBS - outstanding;
-    if (room <= 0) return;
+    if (room <= 0) { note("no-room", outstanding, 0); return; }
     const due = [...active.hiddenDetailEventIds].filter(id =>
       scheduler.due(id, null) && APSPORT_WALK_TIERS.has(scheduler.policy(id).tier));
     // A fixture the plan marked urgent is one the comparison is watching right
@@ -2660,6 +2675,7 @@ export class NetworkObserver {
     const lasting = due.filter(first);
     const fleeting = due.filter(id => !first(id));
     const ordered = [...scheduler.sort(lasting), ...scheduler.sort(fleeting)];
+    note(due.length === 0 ? "nothing-due" : "pumping", outstanding, due.length);
     for (const id of ordered.slice(0, room)) {
       this.#scheduleApsportEventDetail(source, id, active.rosterLeagueIds.get(id));
     }
@@ -7061,7 +7077,11 @@ export class NetworkObserver {
       // Corner/card groups ride their own sockets. Reported here rather than
       // as typed counters so the running API needs no restart to show them.
       const d = this.#wsAttachDiagnostic(source);
-      return (`AP_MG[mo:${d.apCornerSockets};dong:${d.apCornerSocketsClosed};` +
+      const pump = this.#apsportPumpState.get(source.sourceId);
+      const walk = pump === undefined ? "AP_WALK[chua-bom] "
+        : `AP_WALK[${pump.reason};jobs:${pump.jobs};due:${pump.dueCount};` +
+          `ageMs:${this.#now() - pump.atMs}] `;
+      return (walk + `AP_MG[mo:${d.apCornerSockets};dong:${d.apCornerSocketsClosed};` +
         `frames:${d.apCornerFramesReceived};parsed:${d.apCornerFramesParsed}] ` +
         apsportExtraFlagShape() + ` ` +
         apsportGroupCensusShape() + ' ' + apsportBodyCensusShape() + ' ' + existing).slice(0, 900);
