@@ -823,22 +823,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     let dueIds = selected.filter((eventId) => deadline(eventId, cachedById.get(eventId)) <= Date.now())
       .sort((left, right) => (cachedById.get(left)?.observedAtMs || 0) - (cachedById.get(right)?.observedAtMs || 0));
     if (root.__fieldlineCollectionSchedulerV1) dueIds = root.__fieldlineCollectionSchedulerV1.sort(dueIds);
-    // A fixture more than 72 hours out has no refresh interval, so it is never
-    // due, so it is never read even once. Measured 2026-09-14: 396 fixtures
-    // wanted, 161 held, 235 with no body at all and four due - and 774 of BTI's
-    // fixtures sit beyond 72 hours with no detail between them.
-    //
-    // Worth reading here in a way it is not on APSPORT, which carries no corner
-    // book that far out: BTI does, on 38 of the 92 it has read between 24 and
-    // 72 hours. One read each and never a second, since nothing out there comes
-    // due again, and strictly behind everything already due so it cannot delay
-    // a price that still moves.
-    const queuedIds = new Set(dueIds);
-    const firstReads = selected.filter((eventId) =>
-      !queuedIds.has(eventId) && !cachedById.has(eventId) &&
-      (detailState.failures.get(eventId)?.retryAtMs || 0) <= Date.now());
-    const nextJob = { generation, headers: { ...listHeaders }, eventIds: selected,
-      dueIds: [...dueIds, ...firstReads], publishCoverage };
+    const nextJob = { generation, headers: { ...listHeaders }, eventIds: selected, dueIds, publishCoverage };
     const currentWorker = root[detailWorkerKey];
     // A worker without start() is from a build that could not top its lanes
     // back up. It keeps the key while its last lane hangs, so update() lands on
