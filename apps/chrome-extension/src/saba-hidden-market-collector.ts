@@ -315,6 +315,11 @@ export class SabaHiddenMarketCollector {
   readonly #ownerResumeCounts = new Map<string, number>();
   readonly #scheduledFailures = new Map<string, number>();
   #scheduledResumes = 0;
+  // A Today restoration that disagrees with the walked roster freezes the whole
+  // collector before it ever publishes. Whether that disagreement is a list that
+  // drifted by a fixture or a view that is simply not Today cannot be told apart
+  // without these: restorations checked, refused, and by how many ids each way.
+  readonly #restoreTally = { checks: 0, refused: 0, missing: 0, extra: 0 };
   #tail: Promise<void> = Promise.resolve();
 
   constructor(options: SabaHiddenMarketCollectorOptions) {
@@ -365,6 +370,12 @@ export class SabaHiddenMarketCollector {
       }
       return `${period === "TODAY" ? "t" : "e"}${roster.length}.m${more.length}.d${due}`;
     }).join(",");
+  }
+
+  /** Today restorations checked, refused, and the id gap each way when refused. */
+  restoreCounts(): string {
+    const tally = this.#restoreTally;
+    return `c${tally.checks}.r${tally.refused}.m${tally.missing}.e${tally.extra}`;
   }
 
   /**
@@ -770,6 +781,7 @@ export class SabaHiddenMarketCollector {
     }
     const todayIds = this.#periods.TODAY.roster!.map(({ ownerMatchId }) => ownerMatchId);
     const earlyIds = this.#periods.EARLY.roster!.map(({ ownerMatchId }) => ownerMatchId);
+    this.#recordRestoreCheck(restoration.rosterMatchIds, todayIds);
     if (restoration.selectedPrematch !== true || !sameRosterMembership(restoration.rosterMatchIds, todayIds)) {
       return this.#freeze("SAFE_ERROR", "TODAY_RESTORE_UNCONFIRMED", emitted);
     }
@@ -791,6 +803,17 @@ export class SabaHiddenMarketCollector {
       .map(owner => `${period}:${owner.ownerMatchId}`)));
     for (const key of this.#lastVisits.keys()) if (!active.has(key)) this.#lastVisits.delete(key);
     return { ...this.#result("INCOMPLETE", emitted), mainRosterChanged: true };
+  }
+
+  /** Counts only. Never decides anything; the caller owns the refusal. */
+  #recordRestoreCheck(restored: readonly string[], known: readonly string[]): void {
+    this.#restoreTally.checks += 1;
+    if (sameRosterMembership(restored, known)) return;
+    const restoredIds = new Set(restored);
+    const knownIds = new Set(known);
+    this.#restoreTally.refused += 1;
+    this.#restoreTally.missing += known.filter((value) => !restoredIds.has(value)).length;
+    this.#restoreTally.extra += restored.filter((value) => !knownIds.has(value)).length;
   }
 
   #capture(period: SabaCollectorPeriod, ownerMatchId: string,
@@ -826,6 +849,7 @@ export class SabaHiddenMarketCollector {
       return this.#freeze("STALE_BINDING", "BINDING_CHANGED", emitted);
     }
     const todayIds = this.#periods.TODAY.roster!.map(({ ownerMatchId }) => ownerMatchId);
+    this.#recordRestoreCheck(restoration.rosterMatchIds, todayIds);
     if (restoration.selectedPrematch !== true ||
       !sameRosterMembership(restoration.rosterMatchIds, todayIds)) {
       return this.#freeze("SAFE_ERROR", "TODAY_RESTORE_UNCONFIRMED", emitted);

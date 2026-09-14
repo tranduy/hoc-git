@@ -7278,6 +7278,7 @@ export class NetworkObserver {
           owners: this.#sabaCollectors.get(source.sourceId)?.collector.ownerCounts() ?? "",
           captures: this.#sabaCollectors.get(source.sourceId)?.collector.captureCounts() ?? "",
           drive: sabaDriveCounts(this.#sabaCollectors.get(source.sourceId)?.drive),
+          restore: this.#sabaCollectors.get(source.sourceId)?.collector.restoreCounts() ?? "",
           lastErrorCode: this.#sabaCollectors.get(source.sourceId)?.lastErrorCode() ??
             this.#sabaCollectors.get(source.sourceId)?.collector.terminalError ?? null,
           currentPeriod: this.#sabaCollectors.get(source.sourceId)?.collector.currentPeriod ?? null,

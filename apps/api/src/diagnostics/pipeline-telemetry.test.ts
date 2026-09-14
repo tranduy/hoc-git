@@ -572,6 +572,27 @@ describe("SABA capture counts", () => {
   });
 });
 
+describe("SABA Today restore counts", () => {
+  const collector = (restore: string) => ({
+    nativeReady: false, schemaContextReady: false, catalogUsable: true,
+    discoveryPending: false, discoveryAttempted: true, collectorState: "FINISHED",
+    domBlocked: false, probeBlocked: false, currentPeriod: "TODAY", lastErrorCode: null,
+    owners: "t98.m93.d1,e170.m130.d54", captures: "o0.n0.a0.g0.r0.x0.s0", restore
+  });
+
+  it("accepts the restore gaps the collector emits", () => {
+    for (const restore of ["c0.r0.m0.e0", "c3.r1.m2.e0", "c12.r4.m97.e98"]) {
+      expect(sabaCollectorDiagnosticForTests(collector(restore)), restore).toMatchObject({ restore });
+    }
+  });
+
+  it("refuses a gap whose digits were eaten, without losing the record", () => {
+    const parsed = sabaCollectorDiagnosticForTests(collector("cd.rd.md.ed"));
+    expect(parsed?.restore).toBeUndefined();
+    expect(parsed).toMatchObject({ owners: "t98.m93.d1,e170.m130.d54" });
+  });
+});
+
 describe("SABA freeze reason", () => {
   const collector = (lastErrorCode: string) => ({
     nativeReady: false, schemaContextReady: false, catalogUsable: true,

@@ -105,8 +105,10 @@ describe("SabaHiddenMarketCollector", () => {
     await collector.advance(1);
     expect(await collector.advance(1)).toMatchObject({ status: "SAFE_ERROR", error: "ADAPTER_ERROR" });
     const ids = today.map(({ ownerMatchId }) => ownerMatchId);
+    // A view that is not the prematch list is never proof, whatever it lists.
     expect(collector.resumeScheduledAfterVerifiedTodayRestore({ binding: BINDING,
-      selectedPrematch: false, rosterMatchIds: ids })).toBe(false);
+      selectedPrematch: false, rosterMatchIds: ids } as unknown as
+      Parameters<typeof collector.resumeScheduledAfterVerifiedTodayRestore>[0])).toBe(false);
     expect(collector.resumeScheduledAfterVerifiedTodayRestore({
       binding: { ...BINDING, documentKey: "other" }, selectedPrematch: true, rosterMatchIds: ids })).toBe(false);
     expect(collector.terminalError).toBe("ADAPTER_ERROR");

@@ -196,6 +196,9 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
       // Walk slices entered, and which gate declined each: one slice entered,
       // none refused, one advance actually ran.
       drive: "e1.i0.f0.a1.p0.u0",
+      // Today restorations checked and refused, with the id gap each way. One
+      // verified restoration, nothing refused.
+      restore: "c1.r0.m0.e0",
       domBlocked: false, probeBlocked: false, lastErrorCode: null, currentPeriod: "TODAY",
       mainRosterComplete: true, hiddenMarketsComplete: false });
   });

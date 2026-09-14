@@ -712,6 +712,8 @@ interface SabaCollectorDiagnostic {
   readonly captures?: string;
   /** Walk slices entered, and which gate declined each one. */
   readonly drive?: string;
+  /** Today restorations checked, refused, and the id gap each way when refused. */
+  readonly restore?: string;
 }
 
 /** Exposed so the guard can be pinned against the strings the collector emits. */
@@ -741,6 +743,9 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     ...(typeof entry.drive === "string" &&
       /^e\d{1,7}\.i\d{1,7}\.f\d{1,7}\.a\d{1,7}\.p\d{1,7}\.u\d{1,7}$/u.test(entry.drive)
       ? { drive: entry.drive } : {}),
+    ...(typeof entry.restore === "string" &&
+      /^c\d{1,7}\.r\d{1,7}\.m\d{1,7}\.e\d{1,7}$/u.test(entry.restore)
+      ? { restore: entry.restore } : {}),
     // The page adapter reports SABA_COLLECTOR_* codes, but the collector's own
     // terminal errors carry no prefix. A guard that only knew the prefix reported
     // every frozen walk as "no error" - the same silent door as an eaten backslash.
