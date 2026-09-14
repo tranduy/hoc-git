@@ -192,7 +192,10 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
       owners: "t2.m2.d2,e2.m2.d2",
       // opened, opened-to-nothing, alternate rows, expanded groups, groups
       // returned. Nothing captured yet on this first heartbeat.
-      captures: "o0.n0.a0.g0.r0",
+      captures: "o0.n0.a0.g0.r0.x0.s0",
+      // Walk slices entered, and which gate declined each: one slice entered,
+      // none refused, one advance actually ran.
+      drive: "e1.i0.f0.a1.p0.u0",
       domBlocked: false, probeBlocked: false, lastErrorCode: null, currentPeriod: "TODAY",
       mainRosterComplete: true, hiddenMarketsComplete: false });
   });

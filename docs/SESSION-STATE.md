@@ -2307,6 +2307,59 @@ giải mã được (99,5%)**, worker đứng yên, walk không suy suyển. B�
    (p90 4,17%). Quy đổi vào là chế ra chênh lệch ảo đúng cỡ một kèo thơm. Lệnh cấm
    trong `football-comparison-equivalents.ts` là đúng, nay đã có bằng chứng kèm.
 
+## SABA: kèo ẩn chết vì một trận, không phải vì cả sàn
+
+Bộ thu kèo ẩn của SABA đứng im hàng giờ. Ba con số đầu tiên nói "không bao giờ mở":
+
+```
+owners  : t98.m97.d23,e170.m130.d0     268 trận, 227 có nút "More", 23 đến lượt
+captures: o0.n0.a0.g0.r0               mở được 0
+```
+
+Thêm bộ đếm cổng (`drive`) thì nó tự khai, trong 5 phút:
+
+```
+18:47  o9 ... drive=e16.i0.f0.a16.p0.u0   walk chạy, mở 9 trận
+18:48  o9 ... drive=e22.i0.f3.a19.p0.u1   1 lát không khôi phục được → FINISHED
+18:52  o9 ... drive=e81.i0.f62.a19.p0.u1   62 lát bị cổng "finished" đuổi về, 0 việc
+       err=SABA_COLLECTOR_MORE_RESTORE_ACTION_UNCONFIRMED
+```
+
+**Một trận không đóng lại được nút "More" là giết luôn kèo ẩn SABA cho đến lần nạp
+lại extension tiếp theo.** Bộ thu đóng băng, driver đánh dấu `finished`, và
+`resumeAfterVerifiedTodayRestore` — đường hồi phục duy nhất — chỉ được gọi trong
+nhánh `if (!restored)`, tức là **không với tới được đúng lúc trang vẫn còn lành**.
+
+Sửa: `resumeScheduledAfterVerifiedTodayRestore` nhận cùng một bằng chứng khôi phục
+Today mà walk danh sách đã chấp nhận, bỏ lại trận hỏng (2 lần/trận), tối đa 64 lần
+hồi phục mỗi bộ thu — hết ngần đó thì vẫn báo hỏng, không quay vòng vô hạn.
+
+### Cửa im lặng thứ tư
+
+`lastErrorCode` chỉ nhận `/^SABA_COLLECTOR_[A-Z_]+$/`. Nhưng bộ thu đóng băng bằng
+tên **không có tiền tố**: `OWNER_CAPTURE_UNSAFE`, `ADAPTER_ERROR`,
+`TODAY_RESTORE_UNCONFIRMED`, `ROSTER_UNCONFIRMED`, `BINDING_CHANGED`. Mọi lần chết
+vì mấy lý do đó đều hiện ra là "không có lỗi". Cùng loại cửa với ba lần bị nuốt dấu
+gạch chéo, khác đường vào.
+
+### Nhưng mở được cũng chưa ra kèo
+
+9/9 lần mở nút "More" đều trả `NO_STRUCTURAL_CHANGE`: không thêm dòng, không thêm
+nhóm, không thêm mã kèo. Sửa đóng băng là để walk sống, **không phải** để có kèo ẩn.
+Còn phải đo tiếp trên mẫu lớn xem SABA thật sự giấu gì sau nút đó.
+
+### Kèo góc SABA: không có trong feed
+
+Đo trên danh mục sống: **181 trận, 1.200 kèo, 0 kèo góc.** Không phải chuẩn hoá bỏ
+sót — `saba-football-normalizer.ts` có đủ `CORNER_FT_AH/TOTAL/ODD_EVEN`, nhận qua
+hậu tố `- CORNERS`. Đơn giản là **không có giải góc nào về tới feed**, tiếng Anh lẫn
+tiếng Việt (đã dò cả `PHAT GOC`).
+
+Một cái bẫy ngủ đông cần nhớ: sảnh đang chạy tiếng Việt, mà cả `- CORNERS` lẫn bộ
+lọc tên đội `(No. of Corners)` đều là **tiếng Anh**. Nếu có ngày giải góc về bằng
+tiếng Việt, nó sẽ lọt vào như kèo bàn thắng của một trận trùng tên — chế ra chênh
+lệch ảo cỡ lớn. Chưa xảy ra; đừng để xảy ra.
+
 ## Tài liệu liên quan
 
 - `docs/apsport-handoff-codex.md` — nguyên nhân gốc APSPORT (adapter xoá record socket

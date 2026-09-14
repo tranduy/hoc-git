@@ -689,6 +689,10 @@ export class PipelineTelemetry {
   }
 }
 
+/** The collector's own freeze reasons, which carry no SABA_COLLECTOR_ prefix. */
+const SABA_COLLECTOR_ADVANCE_ERRORS: readonly string[] = ["BINDING_CHANGED", "ADAPTER_ERROR",
+  "ROSTER_UNCONFIRMED", "OWNER_CAPTURE_UNSAFE", "TODAY_RESTORE_UNCONFIRMED"];
+
 interface SabaCollectorDiagnostic {
   readonly nativeReady: boolean;
   readonly schemaContextReady: boolean;
@@ -704,8 +708,10 @@ interface SabaCollectorDiagnostic {
   readonly lastErrorCode: string | null;
   /** Per period: roster size, fixtures offering a More control, and how many are due. */
   readonly owners?: string;
-  /** opened, opened-to-nothing, alternate rows, expanded groups, groups returned. */
+  /** opened, opened-to-nothing, alternate rows, expanded groups, groups returned, failed, resumed. */
   readonly captures?: string;
+  /** Walk slices entered, and which gate declined each one. */
+  readonly drive?: string;
 }
 
 /** Exposed so the guard can be pinned against the strings the collector emits. */
@@ -731,8 +737,16 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
       /^t-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5},e-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5}$/u.test(entry.owners)
       ? { owners: entry.owners } : {}),
     ...(typeof entry.captures === "string" &&
-      /^o\d{1,6}\.n\d{1,6}\.a\d{1,6}\.g\d{1,6}\.r\d{1,7}$/u.test(entry.captures) ? { captures: entry.captures } : {}),
-    lastErrorCode: typeof entry.lastErrorCode === "string" && /^SABA_COLLECTOR_[A-Z_]{1,70}$/u.test(entry.lastErrorCode)
+      /^o\d{1,6}\.n\d{1,6}\.a\d{1,6}\.g\d{1,6}\.r\d{1,7}\.x\d{1,6}\.s\d{1,6}$/u.test(entry.captures) ? { captures: entry.captures } : {}),
+    ...(typeof entry.drive === "string" &&
+      /^e\d{1,7}\.i\d{1,7}\.f\d{1,7}\.a\d{1,7}\.p\d{1,7}\.u\d{1,7}$/u.test(entry.drive)
+      ? { drive: entry.drive } : {}),
+    // The page adapter reports SABA_COLLECTOR_* codes, but the collector's own
+    // terminal errors carry no prefix. A guard that only knew the prefix reported
+    // every frozen walk as "no error" - the same silent door as an eaten backslash.
+    lastErrorCode: typeof entry.lastErrorCode === "string" &&
+      (/^SABA_COLLECTOR_[A-Z_]{1,70}$/u.test(entry.lastErrorCode) ||
+        SABA_COLLECTOR_ADVANCE_ERRORS.includes(entry.lastErrorCode))
       ? entry.lastErrorCode : null };
 }
 

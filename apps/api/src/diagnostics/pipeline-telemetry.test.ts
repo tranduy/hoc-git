@@ -559,7 +559,7 @@ describe("SABA capture counts", () => {
   });
 
   it("accepts the tallies the collector emits", () => {
-    for (const captures of ["o0.n0.a0.g0.r0", "o25.n25.a0.g0.r0", "o25.n3.a12.g10.r418"]) {
+    for (const captures of ["o0.n0.a0.g0.r0.x0.s0", "o25.n25.a0.g0.r0.x1.s1", "o25.n3.a12.g10.r418.x2.s9"]) {
       expect(sabaCollectorDiagnosticForTests(collector(captures)), captures)
         .toMatchObject({ captures });
     }
@@ -569,5 +569,49 @@ describe("SABA capture counts", () => {
     const parsed = sabaCollectorDiagnosticForTests(collector("on.na.ag.gr.r"));
     expect(parsed?.captures).toBeUndefined();
     expect(parsed).toMatchObject({ owners: "t88.m88.d25,e161.m129.d0" });
+  });
+});
+
+describe("SABA freeze reason", () => {
+  const collector = (lastErrorCode: string) => ({
+    nativeReady: false, schemaContextReady: false, catalogUsable: true,
+    discoveryPending: false, discoveryAttempted: true, collectorState: "FINISHED",
+    domBlocked: false, probeBlocked: false, currentPeriod: "EARLY", lastErrorCode
+  });
+
+  // A frozen walk reported "no error" for as long as the guard only knew the
+  // page adapter prefix. The collector freezes under its own unprefixed names.
+  it("keeps the collector freeze reasons the observer forwards", () => {
+    for (const code of ["OWNER_CAPTURE_UNSAFE", "TODAY_RESTORE_UNCONFIRMED", "ROSTER_UNCONFIRMED",
+      "ADAPTER_ERROR", "BINDING_CHANGED", "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT"]) {
+      expect(sabaCollectorDiagnosticForTests(collector(code)), code).toMatchObject({ lastErrorCode: code });
+    }
+  });
+
+  it("still refuses a reason it does not recognise", () => {
+    for (const code of ["Arsenal v Chelsea", "owner_capture_unsafe", "https://example.test"]) {
+      expect(sabaCollectorDiagnosticForTests(collector(code))?.lastErrorCode, code).toBeNull();
+    }
+  });
+});
+
+describe("SABA walk drive counts", () => {
+  const collector = (drive: string) => ({
+    nativeReady: false, schemaContextReady: false, catalogUsable: true,
+    discoveryPending: false, discoveryAttempted: true, collectorState: "FINISHED",
+    domBlocked: false, probeBlocked: false, currentPeriod: "EARLY", lastErrorCode: null,
+    owners: "t98.m97.d23,e170.m130.d0", captures: "o0.n0.a0.g0.r0.x0.s0", drive
+  });
+
+  it("accepts the gate counts the observer emits", () => {
+    for (const drive of ["e0.i0.f0.a0.p0.u0", "e412.i0.f411.a1.p0.u1", "e9.i3.f0.a6.p2.u0"]) {
+      expect(sabaCollectorDiagnosticForTests(collector(drive)), drive).toMatchObject({ drive });
+    }
+  });
+
+  it("refuses a gate count whose digits were eaten, without losing the record", () => {
+    const parsed = sabaCollectorDiagnosticForTests(collector("ed.id.fd.ad.pd.ud"));
+    expect(parsed?.drive).toBeUndefined();
+    expect(parsed).toMatchObject({ captures: "o0.n0.a0.g0.r0.x0.s0" });
   });
 });

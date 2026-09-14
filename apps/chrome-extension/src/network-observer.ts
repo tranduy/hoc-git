@@ -328,6 +328,19 @@ export interface CatalogRefreshOptions {
   readonly rosterOnly?: boolean;
 }
 
+/**
+ * Walk slices entered, and which gate turned each one away: a busy slice, an
+ * already-finished collector, an advance that ran, a deferred Today restore,
+ * and a slice abandoned because the view could not be restored. Counts only.
+ */
+function sabaDriveCounts(drive: { readonly entries: number; readonly inFlight: number;
+  readonly finished: number; readonly advanced: number; readonly pending: number;
+  readonly unrestored: number } | undefined): string {
+  if (drive === undefined) return "";
+  return `e${drive.entries}.i${drive.inFlight}.f${drive.finished}.a${drive.advanced}` +
+    `.p${drive.pending}.u${drive.unrestored}`;
+}
+
 function isSabaChildTargetUrl(rawUrl: string, targetType: string): boolean {
   if (targetType !== "iframe" && targetType !== "worker" && targetType !== "shared_worker") return false;
   try {
@@ -1334,6 +1347,10 @@ export class NetworkObserver {
     restorePending: boolean;
     finished: boolean;
     mainRosterPublished: boolean;
+    // Which gate declines a walk slice. Counts only: without them "the walk is
+    // idle" cannot be told apart from "the walk is refused before it starts".
+    readonly drive: { entries: number; inFlight: number; finished: number;
+      advanced: number; pending: number; unrestored: number };
     publicMarketSampleKinds: Set<string>;
   }>();
   readonly #sabaDomObserversCleaned = new Set<string>();
@@ -3229,6 +3246,7 @@ export class NetworkObserver {
             return diagnostic;
           },
           adapter, inFlight: false, restorePending: false, finished: false, mainRosterPublished: false,
+          drive: { entries: 0, inFlight: 0, finished: 0, advanced: 0, pending: 0, unrestored: 0 },
           publicMarketSampleKinds: new Set(),
           collector: new SabaHiddenMarketCollector({ binding, adapter, publishMainRosterFirst: true,
             shouldCaptureOwner: (_period, owner, lastVisitAtMs) => {
@@ -3270,9 +3288,10 @@ export class NetworkObserver {
       this.#retireSabaHiddenCollector(source.sourceId);
       return !this.#sabaProbePublicationBlocks.has(source.sourceId);
     }
-    if (state.inFlight) return false;
+    state.drive.entries += 1;
+    if (state.inFlight) { state.drive.inFlight += 1; return false; }
     if (state.finished && state.collector.scheduledCollection && !state.collector.terminalError) state.finished = false;
-    if (state.finished && !this.#sabaCollectorDomBlocks.has(source.sourceId)) return true;
+    if (state.finished && !this.#sabaCollectorDomBlocks.has(source.sourceId)) { state.drive.finished += 1; return true; }
     state.inFlight = true;
     try {
     // Only DOM publication is gated. Native WS frames keep their existing
@@ -3290,6 +3309,7 @@ export class NetworkObserver {
       maxOwners, () => current() && this.#monotonicNow() < sliceDeadlineMs &&
         (!state.collector.mainRosterComplete || state.mainRosterPublished),
       { maxPassiveOwnersPerSlice: 512 });
+    if (result !== null) state.drive.advanced += 1;
     if (!current()) return false;
     if (result?.mainRosterChanged) state.mainRosterPublished = false;
     const collectionErrorCode = state.lastErrorCode();
@@ -3305,17 +3325,24 @@ export class NetworkObserver {
       result.items.some((item) => item.kind === "OWNER_COMPLETE" && item.period === "TODAY" &&
         item.restored === true && item.safeControlOutcome !== "NO_ELIGIBLE_CONTROL"));
     let retryRestored = false;
-    if (!restored) {
+    // A frozen collector whose view is already restored never reached the resume
+    // path, so one unsafe owner ended hidden collection until the next extension
+    // reload. Take the same Today proof for that case and carry the walk on.
+    const frozenWithRestoredView = restored && result?.status === "SAFE_ERROR" &&
+      state.collector.terminalError !== null;
+    if (!restored || frozenWithRestoredView) {
       try {
         const restoration = await state.adapter.restoreToday();
-        restored = current() && restoration.selectedPrematch === true &&
+        const verified = current() && restoration.selectedPrematch === true &&
           restoration.binding.sourceEpoch === state.binding.sourceEpoch &&
           restoration.binding.frameKey === state.binding.frameKey &&
           restoration.binding.documentKey === state.binding.documentKey;
-        if (restored && (state.finished || result?.status === "SAFE_ERROR")) {
-          retryRestored = state.collector.resumeAfterVerifiedTodayRestore(restoration);
+        if (!restored) restored = verified;
+        if (verified && (state.finished || result?.status === "SAFE_ERROR")) {
+          retryRestored = state.collector.resumeAfterVerifiedTodayRestore(restoration) ||
+            state.collector.resumeScheduledAfterVerifiedTodayRestore(restoration);
         }
-      } catch { restored = false; }
+      } catch { if (!frozenWithRestoredView) restored = false; }
     }
     if (!current()) return false;
     if (restored && !state.mainRosterPublished && result?.mainRosterItems !== undefined) {
@@ -3360,6 +3387,7 @@ export class NetworkObserver {
     }
     if (!restored && (restorePendingAtEntry || result?.status === "INCOMPLETE")) {
       const firstPendingAttempt = !restorePendingAtEntry;
+      state.drive.pending += 1;
       state.restorePending = true;
       if (firstPendingAttempt) {
         await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
@@ -3381,6 +3409,7 @@ export class NetworkObserver {
       return true;
     }
     if (!restored || (result !== null && result.status !== "INCOMPLETE" && result.status !== "COMPLETE")) {
+      state.drive.unrestored += 1;
       state.finished = true;
       await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
         kind: "SABA_HIDDEN_COLLECTOR", status: "INCOMPLETE", viewRestored: restored,
@@ -7248,6 +7277,7 @@ export class NetworkObserver {
             ? this.#sabaCollectors.get(source.sourceId)!.finished ? "FINISHED" : "RUNNING" : "NONE",
           owners: this.#sabaCollectors.get(source.sourceId)?.collector.ownerCounts() ?? "",
           captures: this.#sabaCollectors.get(source.sourceId)?.collector.captureCounts() ?? "",
+          drive: sabaDriveCounts(this.#sabaCollectors.get(source.sourceId)?.drive),
           lastErrorCode: this.#sabaCollectors.get(source.sourceId)?.lastErrorCode() ??
             this.#sabaCollectors.get(source.sourceId)?.collector.terminalError ?? null,
           currentPeriod: this.#sabaCollectors.get(source.sourceId)?.collector.currentPeriod ?? null,

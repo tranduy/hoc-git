@@ -201,6 +201,12 @@ type ResumableOperation = {
 };
 
 const PERIODS: readonly SabaCollectorPeriod[] = ["TODAY", "EARLY"];
+// An owner whose More control cannot be opened and closed safely twice is left
+// alone for the life of this collector; a walk must never die on one fixture.
+const SCHEDULED_FAILURE_LIMIT = 2;
+// Unfreezing is recovery, not a retry loop. Past this many the collector stays
+// frozen so a page that is broken end to end still reports as broken.
+const SCHEDULED_RESUME_LIMIT = 64;
 const RESUMABLE_FRAME_COMMAND_TIMEOUT = "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT";
 const RESUMABLE_OPERATION_DEADLINE = "SABA_COLLECTOR_OPERATION_DEADLINE";
 const RESUMABLE_OWNER_PREPARATION_TIMEOUT = "SABA_COLLECTOR_OWNER_PREPARATION_TIMEOUT";
@@ -307,6 +313,8 @@ export class SabaHiddenMarketCollector {
   #frozen: { status: "SAFE_ERROR" | "STALE_BINDING"; error: SabaCollectorAdvanceError } | null = null;
   #resumableOperation: ResumableOperation | null = null;
   readonly #ownerResumeCounts = new Map<string, number>();
+  readonly #scheduledFailures = new Map<string, number>();
+  #scheduledResumes = 0;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(options: SabaHiddenMarketCollectorOptions) {
@@ -359,10 +367,15 @@ export class SabaHiddenMarketCollector {
     }).join(",");
   }
 
-  /** opened, opened-to-nothing, alternate rows, expanded groups, rows returned. */
+  /**
+    * opened, opened-to-nothing, alternate rows, expanded groups, rows returned,
+    * owner captures that failed, and walks resumed after a verified restore.
+    */
   captureCounts(): string {
     const tally = this.#captureTally;
-    return `o${tally.opened}.n${tally.empty}.a${tally.alternate}.g${tally.groups}.r${tally.rows}`;
+    const failures = [...this.#scheduledFailures.values()].reduce((total, count) => total + count, 0);
+    return `o${tally.opened}.n${tally.empty}.a${tally.alternate}.g${tally.groups}.r${tally.rows}` +
+      `.x${failures}.s${this.#scheduledResumes}`;
   }
 
   get mainRosterComplete(): boolean { return this.#mainRosterItems !== undefined; }
@@ -427,6 +440,32 @@ export class SabaHiddenMarketCollector {
     this.#frozen = null;
     this.#resumableOperation = null;
     return true;
+  }
+
+  /**
+   * One owner whose More control could not be opened and closed safely used to
+   * end hidden collection for the life of the tab: the collector froze, the
+   * driver marked it finished, and nothing but an extension reload revived it.
+   * Verified Today restoration is the same proof the roster walk already
+   * accepts, so take it here too and leave that owner behind.
+   */
+  resumeScheduledAfterVerifiedTodayRestore(restoration: SabaCollectorTodayRestoreResult): boolean {
+    if (this.#terminalEmitted || !this.scheduledCollection) return false;
+    if (this.#frozen?.status !== "SAFE_ERROR") return false;
+    if (this.#frozen.error !== "ADAPTER_ERROR" && this.#frozen.error !== "OWNER_CAPTURE_UNSAFE") return false;
+    if (!sameBinding(restoration.binding, this.#binding) || restoration.selectedPrematch !== true) return false;
+    const restoredIds = restoration.rosterMatchIds;
+    if (new Set(restoredIds).size !== restoredIds.length) return false;
+    if (this.#scheduledResumes >= SCHEDULED_RESUME_LIMIT) return false;
+    this.#scheduledResumes += 1;
+    this.#frozen = null;
+    this.#resumableOperation = null;
+    return true;
+  }
+
+  #recordScheduledFailure(period: SabaCollectorPeriod, ownerMatchId: string): void {
+    const key = `${period}:${ownerMatchId}`;
+    this.#scheduledFailures.set(key, (this.#scheduledFailures.get(key) ?? 0) + 1);
   }
 
   async #advance(maxOwnersPerSlice: number,
@@ -588,7 +627,8 @@ export class SabaHiddenMarketCollector {
     const visits: { period: SabaCollectorPeriod; ownerMatchId: string }[] = [];
     const complete: SabaCollectorOwnerCompleteItem[] = [];
     const eligible = PERIODS.flatMap(period => (this.#periods[period].roster ?? [])
-      .filter(owner => owner.control === "ELIGIBLE_MORE")
+      .filter(owner => owner.control === "ELIGIBLE_MORE" &&
+        (this.#scheduledFailures.get(`${period}:${owner.ownerMatchId}`) ?? 0) < SCHEDULED_FAILURE_LIMIT)
       .map(owner => ({ period, owner })));
     const due = ({ period, owner }: typeof eligible[number]) => this.#schedule.shouldCaptureOwner!(
       period, owner, this.#lastVisits.get(`${period}:${owner.ownerMatchId}`) ?? null);
@@ -610,7 +650,10 @@ export class SabaHiddenMarketCollector {
       try {
         if (!due(candidate)) continue;
         result = await this.#adapter.captureOwner(period, owner);
-      } catch { return this.#freeze("SAFE_ERROR", "ADAPTER_ERROR", emitted); }
+      } catch {
+        this.#recordScheduledFailure(period, owner.ownerMatchId);
+        return this.#freeze("SAFE_ERROR", "ADAPTER_ERROR", emitted);
+      }
       if (!sameBinding(result.binding, this.#binding)) return this.#freeze("STALE_BINDING", "BINDING_CHANGED", emitted);
       const structural = result.safeControlOutcome === "ALTERNATE_ROWS_ADDED" ||
         result.safeControlOutcome === "OWNER_GROUPS_EXPANDED";
@@ -621,6 +664,7 @@ export class SabaHiddenMarketCollector {
       if (result.period !== period || result.ownerMatchId !== owner.ownerMatchId ||
         !result.controlOpened || result.terminalControlState !== "RESTORED_CLOSED" || !result.restored ||
         structural !== validCapture || (!structural && result.safeControlOutcome !== "NO_STRUCTURAL_CHANGE")) {
+        this.#recordScheduledFailure(period, owner.ownerMatchId);
         return this.#freeze("SAFE_ERROR", "OWNER_CAPTURE_UNSAFE", emitted);
       }
       visits.push({ period, ownerMatchId: owner.ownerMatchId });
@@ -635,6 +679,7 @@ export class SabaHiddenMarketCollector {
       // Older adapters lack a clock for empty structural reads, so do not fabricate one.
       const receipt = capture?.capturedAtMs ?? result.observedAtMs;
       if (receipt === undefined || !validWallClock(receipt)) {
+        this.#recordScheduledFailure(period, owner.ownerMatchId);
         return this.#freeze("SAFE_ERROR", "OWNER_CAPTURE_UNSAFE", emitted);
       }
       if (receipt !== undefined && validWallClock(receipt)) {

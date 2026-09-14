@@ -55,6 +55,63 @@ function refreshed(value: SabaCollectorRosterOwner, clock: number,
 }
 
 describe("SabaHiddenMarketCollector", () => {
+  it("carries the walk past an owner whose More control cannot be closed safely", async () => {
+    // One unsafe owner used to end hidden collection for the life of the tab:
+    // the collector froze, the driver marked it finished, and only an extension
+    // reload revived it. Measured in production as o9 opened then nothing for
+    // hours, with the driver turning every later slice away.
+    const today = ["bad", "good"].map((id, index) => ({ ...owner(id, "ELIGIBLE_MORE", index + 1),
+      record: { ...record(id), providerTimezoneOffsetMinutes: 420 } }));
+    let now = 1_788_800_001_000, mono = 100;
+    const page = adapter(today, [], { captureOwner: async (period, value) => {
+      if (value.ownerMatchId === "bad") throw new Error("SABA_COLLECTOR_MORE_RESTORE_ACTION_UNCONFIRMED");
+      return { binding: BINDING, period, ownerMatchId: value.ownerMatchId, controlOpened: true,
+        terminalControlState: "RESTORED_CLOSED", restored: true,
+        safeControlOutcome: "NO_STRUCTURAL_CHANGE", observedAtMs: now };
+    } });
+    const capture = vi.spyOn(page, "captureOwner");
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true,
+      shouldCaptureOwner: () => true, sortOwners: ids => [...ids], nowMs: () => now });
+    await collector.advance(1);
+    expect(collector.mainRosterComplete).toBe(true);
+
+    expect(await collector.advance(1)).toMatchObject({ status: "SAFE_ERROR", error: "ADAPTER_ERROR" });
+    const restoration = { binding: BINDING, selectedPrematch: true as const,
+      rosterMatchIds: today.map(({ ownerMatchId }) => ownerMatchId) };
+    expect(collector.resumeScheduledAfterVerifiedTodayRestore(restoration)).toBe(true);
+    expect(collector.terminalError).toBeNull();
+
+    // The second attempt spends the owner's budget; the third slice must reach
+    // the healthy owner instead of stopping on the same fixture again.
+    mono += 1;
+    expect(await collector.advance(1)).toMatchObject({ status: "SAFE_ERROR", error: "ADAPTER_ERROR" });
+    expect(collector.resumeScheduledAfterVerifiedTodayRestore(restoration)).toBe(true);
+    const third = await collector.advance(1);
+    expect(third.scheduledVisits?.map(({ ownerMatchId }) => ownerMatchId)).toEqual(["good"]);
+    expect(capture.mock.calls.map(([, value]) => value.ownerMatchId)).toEqual(["bad", "bad", "good"]);
+    expect(collector.captureCounts()).toBe("o1.n1.a0.g0.r0.x2.s2");
+  });
+
+  it("refuses to resume a scheduled walk on an unverified Today view", async () => {
+    const today = [{ ...owner("bad", "ELIGIBLE_MORE", 1),
+      record: { ...record("bad"), providerTimezoneOffsetMinutes: 420 } }];
+    const page = adapter(today, [], { captureOwner: async () => {
+      throw new Error("SABA_COLLECTOR_MORE_RESTORE_ACTION_UNCONFIRMED");
+    } });
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true,
+      shouldCaptureOwner: () => true, nowMs: () => 1_788_800_001_000 });
+    await collector.advance(1);
+    expect(await collector.advance(1)).toMatchObject({ status: "SAFE_ERROR", error: "ADAPTER_ERROR" });
+    const ids = today.map(({ ownerMatchId }) => ownerMatchId);
+    expect(collector.resumeScheduledAfterVerifiedTodayRestore({ binding: BINDING,
+      selectedPrematch: false, rosterMatchIds: ids })).toBe(false);
+    expect(collector.resumeScheduledAfterVerifiedTodayRestore({
+      binding: { ...BINDING, documentKey: "other" }, selectedPrematch: true, rosterMatchIds: ids })).toBe(false);
+    expect(collector.terminalError).toBe("ADAPTER_ERROR");
+  });
+
   it("reconciles new main owners on a bounded cadence before scheduled visits", async () => {
     let now = 100_000, mono = 0, ids = ["one"];
     const page = adapter([], [], {
