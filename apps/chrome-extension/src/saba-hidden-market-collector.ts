@@ -210,7 +210,9 @@ const SCHEDULED_RESUME_LIMIT = 64;
 // The Today list loses fixtures as they kick off, so a roster walked minutes ago
 // will not match a fresh read of it. That drift is not proof of a wrong view -
 // the adapter already proved the Today tab is the active one - so walk it again
-// instead of ending collection. Past this many restarts something else is wrong.
+// instead of ending collection. The budget counts restarts that never reached a
+// published roster: a list that keeps moving over hours is normal, a list that
+// will not hold still long enough to publish once is not.
 const MAIN_ROSTER_RESTART_LIMIT = 8;
 const RESUMABLE_FRAME_COMMAND_TIMEOUT = "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT";
 const RESUMABLE_OPERATION_DEADLINE = "SABA_COLLECTOR_OPERATION_DEADLINE";
@@ -338,6 +340,7 @@ export class SabaHiddenMarketCollector {
   // without these: restorations checked, refused, and by how many ids each way.
   readonly #restoreTally = { checks: 0, refused: 0, missing: 0, extra: 0 };
   #mainRosterRestarts = 0;
+  #restartsSincePublish = 0;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(options: SabaHiddenMarketCollectorOptions) {
@@ -509,6 +512,12 @@ export class SabaHiddenMarketCollector {
     if (restored.some((value) => early.has(value))) return false;
     const known = new Set(todayIds);
     return restored.some((value) => known.has(value));
+  }
+
+  #recordMainRosterRestart(): void {
+    this.#mainRosterRestarts += 1;
+    this.#restartsSincePublish += 1;
+    this.#restartMainRoster();
   }
 
   #restartMainRoster(): void {
@@ -821,11 +830,10 @@ export class SabaHiddenMarketCollector {
       if (moved.length > 0) {
         // Measured: a fixture losing its More control mid-walk froze a walk that
         // had already opened 21 owners, and only a collector rebuild revived it.
-        if (this.#mainRosterRestarts >= MAIN_ROSTER_RESTART_LIMIT) {
+        if (this.#restartsSincePublish >= MAIN_ROSTER_RESTART_LIMIT) {
           return this.#freeze("SAFE_ERROR", "ROSTER_UNCONFIRMED", emitted);
         }
-        this.#mainRosterRestarts += 1;
-        this.#restartMainRoster();
+        this.#recordMainRosterRestart();
         return this.#result("INCOMPLETE", emitted);
       }
       const knownIds = new Set(state.roster?.map(({ ownerMatchId }) => ownerMatchId) ?? []);
@@ -855,11 +863,10 @@ export class SabaHiddenMarketCollector {
       // list itself. Publishing a roster this read disagrees with would be a
       // lie, so throw the accumulation away and read it again.
       if (!this.#driftedTodayRoster(restoration.rosterMatchIds, todayIds, earlyIds) ||
-        this.#mainRosterRestarts >= MAIN_ROSTER_RESTART_LIMIT) {
+        this.#restartsSincePublish >= MAIN_ROSTER_RESTART_LIMIT) {
         return this.#freeze("SAFE_ERROR", "TODAY_RESTORE_UNCONFIRMED", emitted);
       }
-      this.#mainRosterRestarts += 1;
-      this.#restartMainRoster();
+      this.#recordMainRosterRestart();
       return this.#result("INCOMPLETE", emitted);
     }
     const collectorGeneration = `${this.#generation}:main${this.#mainSequence === 0 ? "" : `:${this.#mainSequence}`}`;
@@ -875,6 +882,9 @@ export class SabaHiddenMarketCollector {
         todayRestoration: { selected: true, rosterMatchIds: todayIds, rosterCount: todayIds.length },
         hiddenMarketsComplete: false }
     ];
+    // A published roster is the proof the list held still long enough. Whatever
+    // it took to get here does not count against the next publication.
+    this.#restartsSincePublish = 0;
     this.#nextMainRefreshAtMs = this.#now() + 30_000;
     const active = new Set(PERIODS.flatMap(period => (this.#periods[period].roster ?? [])
       .map(owner => `${period}:${owner.ownerMatchId}`)));

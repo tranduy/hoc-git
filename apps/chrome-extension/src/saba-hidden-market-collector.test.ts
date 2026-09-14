@@ -55,6 +55,62 @@ function refreshed(value: SabaCollectorRosterOwner, clock: number,
 }
 
 describe("SabaHiddenMarketCollector", () => {
+  it("spends the restart budget only on walks that never published", async () => {
+    // A Today list that moves every few minutes is normal and must not run a
+    // collector out of restarts over an evening. A list that will not hold
+    // still long enough to publish once must still give up.
+    let reads = 0, clock = 0, drift = true;
+    const page = adapter([], [], {
+      readRoster: async (period) => {
+        if (period !== "TODAY") return { binding: BINDING, period, selectedPrematch: true, owners: [] };
+        reads += 1;
+        const control: SabaCollectorRosterOwner["control"] =
+          drift && reads % 2 === 0 ? "NO_ELIGIBLE_CONTROL" : "ELIGIBLE_MORE";
+        return { binding: BINDING, period, selectedPrematch: true,
+          owners: [{ ...owner("a", control, ++clock),
+            record: { ...record("a"), providerTimezoneOffsetMinutes: 420 } }] };
+      },
+      restoreToday: async () => ({ binding: BINDING, selectedPrematch: true, rosterMatchIds: ["a"] })
+    });
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true,
+      shouldCaptureOwner: () => false, nowMs: () => 1_788_800_001_000 });
+
+    // Eight restarts without a publication is the whole budget.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      expect((await collector.advance(1)).status, `attempt ${attempt}`).toBe("INCOMPLETE");
+    }
+    expect(collector.terminalError).toBeNull();
+    expect(await collector.advance(1)).toMatchObject({ status: "SAFE_ERROR",
+      error: "ROSTER_UNCONFIRMED" });
+  });
+
+  it("gives the restart budget back once a roster actually publishes", async () => {
+    let reads = 0, clock = 0;
+    const page = adapter([], [], {
+      readRoster: async (period) => {
+        if (period !== "TODAY") return { binding: BINDING, period, selectedPrematch: true, owners: [] };
+        reads += 1;
+        // Only the second read of the very first walk moves.
+        const control: SabaCollectorRosterOwner["control"] =
+          reads === 2 ? "NO_ELIGIBLE_CONTROL" : "ELIGIBLE_MORE";
+        return { binding: BINDING, period, selectedPrematch: true,
+          owners: [{ ...owner("a", control, ++clock),
+            record: { ...record("a"), providerTimezoneOffsetMinutes: 420 } }] };
+      },
+      restoreToday: async () => ({ binding: BINDING, selectedPrematch: true, rosterMatchIds: ["a"] })
+    });
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true,
+      shouldCaptureOwner: () => false, nowMs: () => 1_788_800_001_000 });
+    expect((await collector.advance(1)).status).toBe("INCOMPLETE");
+    expect((await collector.advance(1)).mainRosterChanged).toBe(true);
+    expect(collector.mainRosterComplete).toBe(true);
+    // One restart happened and it is still counted, but it no longer costs the
+    // next walk anything.
+    expect(collector.restoreCounts()).toBe("c1.r0.m0.e0.w1");
+  });
+
   it("walks again when a row loses its More control, and refuses a swapped fixture", async () => {
     // Measured: a walk that had already opened 21 owners froze on
     // ROSTER_UNCONFIRMED because one row's control flipped, and only a
