@@ -2679,10 +2679,28 @@ export class NetworkObserver {
     };
     const lasting = due.filter(first);
     const fleeting = due.filter(id => !first(id));
+    // A fixture more than 72 hours out sits in the passive tier: no refresh
+    // interval, so it is never due, so it is never read even once. Measured
+    // 2026-09-14: 55 fixtures had no detail at all, 45 of them beyond 72
+    // hours, and the walk reported nothing-due while they waited.
+    //
+    // None of them carries a corner book - 259 fixtures beyond 24 hours, not
+    // one with corners - so this buys secondary markets, not the corner
+    // arbitrage. It is worth a slot anyway because it costs one read each and
+    // never a second: their quotes stay usable for seventy-five minutes, so
+    // nothing here ever comes due again. Strictly last in the queue, so it can
+    // never take a slot from a fixture whose price still moves.
+    const coverage = this.#apsportDetailCoverage.get(source.sourceId);
+    const queued = new Set(due);
+    const firstEver = coverage === undefined ? [] : [...active.hiddenDetailEventIds]
+      .filter(id => !queued.has(id) && coverage.neverRead(id));
     const ordered = [...scheduler.sort(lasting), ...scheduler.sort(fleeting)];
-    note(due.length === 0 ? "nothing-due" : "pumping", outstanding, due.length);
-    for (const id of ordered.slice(0, room)) {
-      this.#scheduleApsportEventDetail(source, id, active.rosterLeagueIds.get(id));
+    const queue = [...ordered, ...firstEver];
+    note(queue.length === 0 ? "nothing-due"
+      : ordered.length === 0 ? "first-read-only" : "pumping", outstanding, queue.length);
+    for (const id of queue.slice(0, room)) {
+      this.#scheduleApsportEventDetail(source, id, active.rosterLeagueIds.get(id),
+        !ordered.includes(id));
     }
   }
 
@@ -4688,7 +4706,8 @@ export class NetworkObserver {
     }
   }
 
-  #scheduleApsportEventDetail(source: ObservedSource, eventId: string, leagueId?: string): void {
+  #scheduleApsportEventDetail(source: ObservedSource, eventId: string, leagueId?: string,
+    firstRead = false): void {
     const active = this.#apsportActiveCatalogs.get(source.sourceId);
     if (source.lobby !== "TSPORT" || eventId.trim() === "" || eventId.length > 128 ||
       active === undefined || !active.hiddenDetailEventIds.has(eventId) ||
@@ -4696,7 +4715,13 @@ export class NetworkObserver {
     const key = `${source.sourceId}\u0000${eventId}`;
     if (this.#apsportEventDetailJobs.has(key)) return;
     const scheduler = this.#collectionSchedulers.get(source.sourceId);
-    if (scheduler !== undefined && (!scheduler.due(eventId, null) ||
+    // A fixture in the passive tier is never due, by design - it has no refresh
+    // interval. That is the right answer for a re-read and the wrong one for a
+    // fixture nobody has read yet, and this gate was discarding the whole
+    // first-read pass in silence: the pump reported 186 to read and not one
+    // job was ever created. Backoff, the job ceiling and the duplicate check
+    // still apply; they protect the provider rather than pace the walk.
+    if (scheduler !== undefined && ((!firstRead && !scheduler.due(eventId, null)) ||
       (this.#apsportScheduledRetryAtMs.get(source.sourceId) ?? 0) > this.#now() ||
       [...this.#apsportEventDetailJobs.keys()].filter(id => id.startsWith(`${source.sourceId}\u0000`)).length >= APSPORT_DETAIL_MAX_JOBS)) return;
     const token = Symbol(eventId);
