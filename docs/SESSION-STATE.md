@@ -2449,6 +2449,40 @@ phải mất mát. **Không cần sửa gì.**
 
 Cách đếm: vân tay `leagueName|home|away` dựng trong closure, chỉ số đếm đi ra.
 
+### 35 trận kẹt sau một nhóm dùng chung
+
+Chạy **bộ ghép production** (`buildComparisonEvents`) trên đúng 4 danh mục sống:
+nó ghép **505/606** trận CMD. Trong số trận trong 72h không có More, **52 đã được
+ghép** — tức là nằm trong kế hoạch, đáng lẽ phải thu. Nên nghi ngờ "do khâu ghép"
+của tôi là **sai**.
+
+Kế hoạch cũng không hỏng: `planEvents:515`, revision mới tinh — khớp con số 505 ở
+trên.
+
+Cơ chế thật, đo bằng bộ đếm:
+
+```
+partialGroups:55      nhóm đã lấy mà chưa phủ hết trận của nó
+partialWanted:35      trong đó, trận chưa phủ CÓ trong kế hoạch
+groupsCoveredTwice:0  hỏi lại KHÔNG BAO GIỜ làm nhà cái trả trận khác
+```
+
+Một nhóm mang ~1,7 trận; `GetAllOdds` chỉ nhận `m_groupId` và luôn trả về **đúng
+một** trận (`d[1]`), còn walk đánh dấu **cả nhóm** đã thu. **35 trận** nằm ở phần
+còn lại của nhóm và không có đường nào lấy qua request này.
+
+`groupsCoveredTwice:0` là câu trả lời cho "hỏi lại có được không": **không**. Đừng
+viết vòng lặp hỏi lại — chỉ tốn ngân sách request.
+
+Ba giả thuyết khác đã chết bằng đo:
+- **CMD liệt kê một trận thành hai fixture** — nới sai số giờ tới 6 tiếng: 2/155.
+- **Bộ lọc roster loại chúng** — `rowsNotSport:0 rowsLiveGroup:0`,
+  `eventsDiscovered:1196` (tất cả đều vào tầm nhìn của walk).
+- **Kế hoạch chưa tới trang** — `planEvents:515`.
+
+Đường duy nhất còn lại: tìm request CMD nhận **event id** thay vì group id. Chưa
+tìm ra, chưa làm.
+
 ### Còn lại thật sự
 
 Độ phủ đã đứng yên ở **160 trận có More**:
