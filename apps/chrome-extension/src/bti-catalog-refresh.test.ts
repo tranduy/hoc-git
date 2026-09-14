@@ -970,3 +970,38 @@ describe("BTI detail lanes", () => {
     release();
   });
 });
+
+describe("BTI first read", () => {
+  it("fetches a fixture with no body even when nothing says it is due", async () => {
+    const root: Record<string, unknown> & { dataset: Record<string, string> } = { dataset: {} };
+    const fetched: string[] = [];
+    const named = (id: string, startAtUtcMs: string) => [id,
+      [["h", { EN: "Home" }], ["a", { EN: "Away" }]], "Home vs Away", startAtUtcMs, null, false];
+    const league = (rows: unknown[]) => {
+      const value = Array(13).fill(null);
+      value[0] = "L"; value[1] = "League"; value[3] = "L"; value[12] = rows;
+      return value;
+    };
+    // Far enough out that every refresh tier declines it: without a first-read
+    // pass this fixture is never fetched at all.
+    const far = new Date(Date.now() + 120 * 3_600_000).toISOString();
+    const fetcher = async (path: string) => {
+      if (path.startsWith("/api/eventpage")) {
+        fetched.push(decodeURIComponent(path.slice("/api/eventpage/events/".length).split("?")[0]!));
+        return { ok: true, text: async () => JSON.stringify({ data: [] }) };
+      }
+      if (path.includes("/early") || path.includes("/live")) {
+        return { ok: true, text: async () => '{"serializedData":[]}' };
+      }
+      return { ok: true, text: async () => JSON.stringify({
+        serializedData: [league([named("e-far", far)])] }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`);
+    await evaluate({ documentElement: root },
+      { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" },
+      fetcher, { getItem: () => null });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetched).toContain("e-far");
+  });
+});
