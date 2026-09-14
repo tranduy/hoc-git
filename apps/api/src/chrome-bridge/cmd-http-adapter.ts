@@ -402,6 +402,13 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     return materialize(rows, observedAtMs, parts, this.#normalizedRows);
   }
 
+  /**
+   * The cutoff names the sequence the next envelope will take when the request
+   * was issued, so a response carrying exactly that sequence is the healthy
+   * case: nothing else reached the wire in between. Refusing it cost about a
+   * third of every More response fetched - 203 in one eight-minute window.
+   * Only a sequence genuinely below the cutoff, which a replay can carry, is old.
+   */
   #decodeMore(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     const main = this.#states.get(envelope.sourceId);
     const observation = boundBaselineObservation(envelope);
@@ -409,7 +416,7 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     const native = parseCmdNativeMore(envelope.payload.body);
     if (main?.rows === undefined || main.rows === null || main.generation === null || main.gap ||
       observation === null || native === null || envelope.request.requestFrameKey === undefined ||
-      cutoff === undefined || cutoff >= envelope.sequence || native.groupId !== envelope.request.providerGroupId?.toLowerCase() ||
+      cutoff === undefined || cutoff > envelope.sequence || native.groupId !== envelope.request.providerGroupId?.toLowerCase() ||
       main.baselineObservation?.requestFrameKey !== observation.requestFrameKey ||
       main.sourceEpoch !== envelope.sourceEpoch || main.baselineObservation?.requestDocumentKey !== observation.requestDocumentKey ||
       main.baselineObservation?.observerSessionId !== observation.observerSessionId) {
@@ -650,7 +657,7 @@ function moreScopeRefusal(main: SourceState | undefined, native: CmdNativeMore |
   if (observation === null) return "no-observation";
   if (envelope.request.requestFrameKey === undefined) return "no-request-frame";
   if (cutoff === undefined) return "no-cutoff";
-  if (cutoff >= envelope.sequence) return "older-than-cutoff";
+  if (cutoff > envelope.sequence) return "older-than-cutoff";
   if (native.groupId !== envelope.request.providerGroupId?.toLowerCase()) return "group-mismatch";
   if (main.sourceEpoch !== envelope.sourceEpoch) return "epoch-changed";
   if (main.baselineObservation?.requestFrameKey !== observation.requestFrameKey) return "frame-changed";

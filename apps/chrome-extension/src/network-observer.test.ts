@@ -1526,6 +1526,44 @@ describe("NetworkObserver", () => {
     expect(JSON.stringify(requests)).not.toContain("private-account");
   });
 
+  it("stamps a CMD More cutoff below the sequence its own response is given", async () => {
+    // The API refuses a More response whose cutoff is at or past its own
+    // sequence. Stamping the counter's next value means a More response that is
+    // the next thing on the wire refuses itself. Measured in production: 203
+    // refusals in eight minutes, about a third of every More response fetched.
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const group = "fa97fe7b-13d3-4b03-96db-68aca62dd73f";
+    const frameTree = { frameTree: { frame: { id: "odds", loaderId: "loader",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx" } } };
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return frameTree;
+      if (method === "Network.getResponseBody") {
+        return { body: JSON.stringify({ d: [group, 25403104, [], []] }), base64Encoded: false };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const paths = ["/Member/BetsView/BetLight/DataOdds.ashx", "/Member/BetsView/BetLight/DataOdds.asmx/GetAllOdds"];
+    const bodies = ["fc=6&TimeFilter=0&m_gameType=S_&SingleDouble=double&m_sp=0&m_LeagueList=&fav=&keywords=&exlist=0",
+      JSON.stringify({ m_groupId: group, isPar: 0, m_accId: "private-account" })];
+    for (let index = 0; index < paths.length; index += 1) {
+      const url = "https://cgnew.fts368.com" + paths[index];
+      const requestId = "cmd-cutoff-" + index;
+      await observer.handleEvent(cmd, "Network.requestWillBeSent", { requestId, frameId: "odds",
+        loaderId: "loader", type: "XHR", request: { url, method: "POST", postData: bodies[index] } });
+      await observer.handleEvent(cmd, "Network.responseReceived", { requestId, type: "XHR",
+        response: { url, status: 200 } });
+      await observer.handleEvent(cmd, "Network.loadingFinished", { requestId });
+    }
+    for (const [envelope] of forward.mock.calls) {
+      expect(envelope.request.reconcileCutoffSequence, JSON.stringify({
+        path: envelope.request.pathnameClass, sequence: envelope.sequence,
+        cutoff: envelope.request.reconcileCutoffSequence
+      })).toBeLessThanOrEqual(envelope.sequence);
+    }
+  });
+
   it("keeps CMD fallback and recovery quiet for the native request cooldown", async () => {
     const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
     let nowMs = 1_000;

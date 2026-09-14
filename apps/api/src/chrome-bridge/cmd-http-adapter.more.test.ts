@@ -334,6 +334,22 @@ describe("CMD authenticated native More", () => {
     expect(adapter.decode(envelope(foreign, 2, true))).toEqual([]);
   });
 
+  it("accepts a More response carrying exactly its own cutoff, and refuses one below it", () => {
+    // The cutoff names the sequence the next envelope will take. A More response
+    // that is the next thing on the wire carries exactly that sequence, and
+    // refusing it discarded about a third of every More response fetched.
+    const adapter = new CmdHttpCatalogAdapter();
+    adapter.decode(envelope(main(), 1));
+    const atCutoff = envelope(fixture.body, 2, true, { reconcileCutoffSequence: 2 });
+    expect(adapter.decode(atCutoff).length).toBe(1);
+    expect(adapter.takeIgnoreReason()).toBeNull();
+
+    // A sequence genuinely below its cutoff is what a replay carries.
+    const belowCutoff = envelope(fixture.body, 3, true, { reconcileCutoffSequence: 4 });
+    expect(adapter.decode(belowCutoff)).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("more-scope-unproven/older-than-cutoff");
+  });
+
   it("names which condition refused a More response instead of one label for all of them", () => {
     // Measured in production: 210 More responses discarded under a single
     // "more-scope-unproven", which cannot say whether the walk is racing the
