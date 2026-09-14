@@ -176,6 +176,28 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     const worker = root[detailWorkerKey];
     const cachedById = new Map(cached.map((item) => [item.eventId, item]));
     const due = [...detailState.desired].filter((eventId) => deadline(eventId, cachedById.get(eventId)) <= Date.now()).length;
+    // 235 fixtures held no body at all while the scheduler called three of them
+    // due. By its own rule a fixture nobody has read is always due, so one of
+    // its earlier refusals fires first and the count cannot say which. Sort the
+    // unread by the reason that applies, without changing what gets read.
+    const unread = { passive: 0, started: 0, backoff: 0, unplanned: 0, due: 0 };
+    const scheduler = root.__fieldlineCollectionSchedulerV1;
+    for (const eventId of detailState.desired) {
+      if (cachedById.has(eventId)) continue;
+      if ((detailState.failures.get(eventId)?.retryAtMs || 0) > Date.now()) { unread.backoff += 1; continue; }
+      if (!scheduler) { unread.due += 1; continue; }
+      const policy = scheduler.policy(eventId);
+      const start = detailState.starts.get(eventId);
+      if (policy.refreshMs === null) { unread.passive += 1; continue; }
+      if (Number.isFinite(start) && start < Date.now()) { unread.started += 1; continue; }
+      // Nothing above explains it, so the plan the scheduler holds does not
+      // contain this fixture even though the roster selected it from that plan.
+      if (!scheduler.due(eventId, null, Number.isFinite(start) ? start : undefined, false)) {
+        unread.unplanned += 1;
+        continue;
+      }
+      unread.due += 1;
+    }
     Object.assign(rosterWorker.coverage, {
       detailRosterEvents: detailState.desired.size,
       detailCachedEvents: cached.length,
@@ -218,6 +240,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       rosterAnsweredEarly: stats.answered.early,
       rosterLane: 'f' + stats.lane.fetched + '.nd' + stats.lane.notDesired +
         '.nq' + stats.lane.notDue + '.s' + stats.lane.started + '.e' + stats.lane.ended,
+      rosterUnread: 'p' + unread.passive + '.s' + unread.started + '.b' + unread.backoff +
+        '.u' + unread.unplanned + '.d' + unread.due,
       rosterAgeMs: stats.startedAtMs > 0 ? Date.now() - stats.startedAtMs : null,
       rosterCompletedAgeMs: stats.completedAtMs > 0 ? Date.now() - stats.completedAtMs : null
     });
