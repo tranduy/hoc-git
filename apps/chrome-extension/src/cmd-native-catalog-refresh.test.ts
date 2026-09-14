@@ -71,6 +71,16 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(2);
   });
 
+  it("reports a missing plan as -1 rather than omitting it", () => {
+    // An absent field reads the same as a plan of zero events, which is how a
+    // plan that never reached the page would hide behind unplanned groups.
+    expect(formatCmdNativeCatalogDiagnostic({ planEvents: -1, planRevision: -1 }))
+      .toBe("CMD_NATIVE[planEvents:-1;planRevision:-1]");
+    expect(formatCmdNativeCatalogDiagnostic({ planEvents: 505, planRevision: 12 }))
+      .toBe("CMD_NATIVE[planEvents:505;planRevision:12]");
+    expect(formatCmdNativeCatalogDiagnostic({ planEvents: -2 })).toBe("CMD_NATIVE[]");
+  });
+
   it("counts roster rows lost to each filter, and the events that survived", () => {
     // 52 paired fixtures inside 72 hours carried no More while the walk said
     // nothing was due. "pending" cannot tell a group never discovered from one

@@ -14,6 +14,12 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
   }
+  // A page holding no scheduler reports -1 rather than nothing: an absent field
+  // reads the same as a plan of zero, and that is how a missing plan hides.
+  for (const name of ["planEvents", "planRevision"]) {
+    const count = status[name];
+    if (typeof count === "number" && Number.isSafeInteger(count) && count >= -1) fields.push(`${name}:${count}`);
+  }
   for (const name of ["rosterFailed", "requestPaused"]) {
     if (typeof status[name] === "boolean") fields.push(`${name}:${status[name] ? 1 : 0}`);
   }
@@ -171,6 +177,13 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         groupsOneMatch: state.groupsOneMatch, groupsSeveralMatches: state.groupsSeveralMatches,
         rowsNotSport: state.rowsNotSport, rowsLiveGroup: state.rowsLiveGroup,
         eventsDiscovered: state.eventsDiscovered,
+        // A group reads as unplanned when the plan has not reached this page.
+        // Without the plan's own size that is indistinguishable from a fixture
+        // no other book carries.
+        planEvents: (() => { const s = root.__fieldlineCollectionSchedulerV1;
+          return s && typeof s.snapshot === 'function' ? s.snapshot().events : -1; })(),
+        planRevision: (() => { const s = root.__fieldlineCollectionSchedulerV1;
+          return s && typeof s.snapshot === 'function' ? s.snapshot().revision : -1; })(),
         partialGroups: owners.filter((owner) => owner.doneAt > 0 &&
           (owner.covered?.size ?? 0) < owner.events.size).length,
         failed: owners.filter((owner) => owner.failed).length, active: state.active.size,
