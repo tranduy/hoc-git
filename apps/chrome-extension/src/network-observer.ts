@@ -2674,8 +2674,24 @@ export class NetworkObserver {
     };
     const lasting = due.filter(first);
     const fleeting = due.filter(id => !first(id));
-    const ordered = [...scheduler.sort(lasting), ...scheduler.sort(fleeting)];
-    note(due.length === 0 ? "nothing-due" : "pumping", outstanding, due.length);
+    // A fixture more than 72 hours out sits in the passive tier: no refresh
+    // interval, so it is never due, so it is never read even once. Measured
+    // 2026-09-14: 55 fixtures had no detail at all, 45 of them beyond 72
+    // hours, and the walk reported nothing-due while they waited.
+    //
+    // None of them carries a corner book - 259 fixtures beyond 24 hours, not
+    // one with corners - so this buys secondary markets, not the corner
+    // arbitrage. It is worth a slot anyway because it costs one read each and
+    // never a second: their quotes stay usable for seventy-five minutes, so
+    // nothing here ever comes due again. Strictly last in the queue, so it can
+    // never take a slot from a fixture whose price still moves.
+    const coverage = this.#apsportDetailCoverage.get(source.sourceId);
+    const queued = new Set(due);
+    const firstEver = coverage === undefined ? [] : [...active.hiddenDetailEventIds]
+      .filter(id => !queued.has(id) && coverage.neverRead(id));
+    const ordered = [...scheduler.sort(lasting), ...scheduler.sort(fleeting), ...firstEver];
+    note(ordered.length === 0 ? "nothing-due"
+      : due.length === 0 ? "first-read-only" : "pumping", outstanding, ordered.length);
     for (const id of ordered.slice(0, room)) {
       this.#scheduleApsportEventDetail(source, id, active.rosterLeagueIds.get(id));
     }

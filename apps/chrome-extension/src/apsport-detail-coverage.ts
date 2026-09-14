@@ -71,6 +71,12 @@ export class ApsportDetailCoverage {
     state.latestFailed = true;
   }
 
+  /** A fixture nobody has read yet, as opposed to one whose read is merely old. */
+  neverRead(eventId: string): boolean {
+    const state = this.#events.get(eventId);
+    return state !== undefined && state.successAtMs === null && !state.inFlight && !state.queued;
+  }
+
   removeEvent(eventId: string): void {
     this.#events.delete(eventId);
   }
