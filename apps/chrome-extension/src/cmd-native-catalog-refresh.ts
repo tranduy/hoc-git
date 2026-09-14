@@ -258,9 +258,20 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
             if (valid) {
               requestSucceeded(job.startedAtMs);
               owner.doneAt = Date.now();
-              // Which event the provider actually answered for. Asking the same
-              // group again may or may not move it; without this the walk cannot
-              // tell a group it has covered from one it has only touched.
+              // Which event the provider actually answered for.
+              //
+              // Every event in the group is marked collected below even though
+              // the answer names one. That is deliberate and must stay: the
+              // provider's own page has exactly one More call, LoadExtraBoxData,
+              // and it sends m_groupId with no field naming an event or soc id -
+              // LoadOtherBet reads both socId and listId off the button and uses
+              // listId. There is no per-event request to make, and measured
+              // groupsCoveredTwice stayed 0 across every repeat, so asking the
+              // same group again never moves the provider onto its other event.
+              //
+              // Leaving those events uncollected would make the group due
+              // forever and spend the request budget on an answer that cannot
+              // change. partialWanted counts what is unreachable instead.
               (owner.covered ??= new Set()).add(String(value.d[1]));
               for (const event of owner.events) root.__fieldlineCollectionSchedulerV1?.completed(event, owner.doneAt);
               // Keep the latest bounded sports tuple for native/API coverage

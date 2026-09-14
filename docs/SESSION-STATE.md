@@ -2480,8 +2480,43 @@ Ba giả thuyết khác đã chết bằng đo:
   `eventsDiscovered:1196` (tất cả đều vào tầm nhìn của walk).
 - **Kế hoạch chưa tới trang** — `planEvents:515`.
 
-Đường duy nhất còn lại: tìm request CMD nhận **event id** thay vì group id. Chưa
-tìm ra, chưa làm.
+### Không có request nào nhận event id — đã soi xong
+
+Soi trên **bản lưu sẵn** của chính file JS trang CMD
+(`.run/parallel-hidden-markets-2026-09-08/cmd/public-assets-1788862672001.json`,
+400 KB, `BetViewHdpOU.min.141210.js`). Không chạm tab, không chạm mạng.
+
+Trang mở More bằng:
+
+```js
+function LoadOtherBet(L){ var G=$(L).attr("socId"); var K=$(L).attr("listId"); ...
+  LoadExtraBoxData(K) }
+function LoadExtraBoxData(F){
+  var A={"m_accType":C,"c":B,"m_groupId":F,"m_accId":D,"isPar":ISPARLAYBETVIEW};
+  callWebService(".../DataOdds.asmx/GetAllOdds", ...) }
+```
+
+Nút More mang **cả hai** id — `socId` (trận) và `listId` (nhóm) — mà request chỉ
+gửi `listId`. Trong toàn bộ file:
+
+- đúng **một** `callWebService` cho More: `GetAllOdds`
+- tham số: `m_groupId, m_accType, m_accId, c, isPar` — **không trường nào là id trận**
+- nhánh push `exbetPushOddsSubscribeThrottle(F)` cũng chỉ nhận nhóm
+
+**Kết luận: nhà cái không phơi ra đường lấy More theo trận.** 35 trận kia không lấy
+được bằng bất cứ request nào chính trang nó dùng. Đây là **trần của nhà cái**, không
+phải lỗi của walk.
+
+Ghi chú cùng nội dung đã đặt ngay tại chỗ `completed()` trong
+`cmd-native-catalog-refresh.ts`. **Đừng biến nó thành vòng lặp hỏi lại**:
+`groupsCoveredTwice` đo được **0** qua mọi lần lặp, hỏi lại chỉ tốn ngân sách
+request. Và **đừng** gán kèo More của nhóm sang trận khác trong nhóm — đó là
+"giá cũ hiện ra như giá hiện tại" ở dạng khác.
+
+Một manh mối cho việc khác: kho lưu cho thấy CMD phát hành **kèo góc thành giải
+riêng** (`... - CORNERS`, `... - BOOKINGS`, `... - SPECIFIC 15 MINS`,
+`... - SINGLE TEAM OVER/UNDER`), và chúng đang bị loại bằng
+`CMD_CATALOG_EVENT_UNSUPPORTED` — 189 nhóm trong lần đo đó.
 
 ### Còn lại thật sự
 
