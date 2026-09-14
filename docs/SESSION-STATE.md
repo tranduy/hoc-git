@@ -2381,6 +2381,63 @@ lọc tên đội `(No. of Corners)` đều là **tiếng Anh**. Nếu có ngày
 tiếng Việt, nó sẽ lọt vào như kèo bàn thắng của một trận trùng tên — chế ra chênh
 lệch ảo cỡ lớn. Chưa xảy ra; đừng để xảy ra.
 
+## CMD: kèo More tự từ chối chính nó
+
+`more-scope-unproven` gộp 13 điều kiện vào một nhãn. Tách ra thì nó khai ngay:
+`older-than-cutoff` — **203 lần trong 8 phút**, khoảng một phần ba mọi phản hồi
+More lấy về.
+
+Lỗi lệch một:
+
+```
+cutoff = số thứ tự mà gói TIẾP THEO sẽ nhận   (đóng dấu lúc gửi request)
+API từ chối khi   cutoff >= sequence của chính gói đó
+```
+
+Phản hồi More nào là **thứ tiếp theo lên dây** thì mang đúng số đó và tự từ chối
+mình. Test chứng minh thẳng: `cutoff 0, sequence 0`. SBOBET trừ 1 ở chỗ tương
+đương; CMD thì không. Chỉ CMD dùng đường so sánh này nên đổi `>=` thành `>`.
+
+### Sửa xong được gì
+
+| mốc giờ bóng lăn | trước | sau |
+|---|---:|---:|
+| `<24h` | 90/124 | 86/115 |
+| **`24-72h`** | **0/132** | **75/132** |
+| `>72h` | 0/326 | 0/326 |
+
+Đỉnh đo được: **200/202 nhóm đủ điều kiện**, kèo More 1.072 → 2.154. Mốc 1-3 ngày
+từ **không có gì** thành có.
+
+### "665 pending" không phải 665 trận bị bỏ
+
+Bộ đếm mới (`due/waiting/started/passive/unplanned`) chia ra:
+
+```
+groups:755  unplanned:246  passive:306  waiting:196  due:7
+```
+
+- **246** không sàn nào khác có → không có gì để ghép → cắt đúng luật.
+- **306** quá 72h → chính sách `refreshMs: null`. Đây là **lựa chọn**, không phải
+  lỗi: muốn phủ mốc đó thì phải nới tầng PASSIVE.
+- Thực sự đủ điều kiện chỉ **~202 nhóm**.
+
+`done` không phải số phủ: nó reset mỗi khi roster dựng lại đối tượng nhóm.
+
+### Ba giả thuyết bị chính bộ đếm giết
+
+Đừng đi lại ba đường này:
+
+1. **More bị vứt sau khi giữ** — chụp 2 lần cách 5 phút: giữ 88, thêm 2, **mất 0**.
+2. **Đối tượng nhóm bị dựng lại làm mất biên nhận** — `rebuilt:5 rebuiltCollected:2`.
+3. **Hai nhóm dùng chung một trận nên chặn nhau** — `sharedEvents:0`.
+
+### Còn mở
+
+`multiEventGroups:216` — 216/741 nhóm mang **nhiều hơn một trận**, mà một phản hồi
+More chỉ phủ một trận (`d[1]`) rồi `completed()` đánh dấu **toàn bộ** trận trong
+nhóm. Chưa rõ những trận còn lại trong nhóm có More riêng hay không.
+
 ## Tài liệu liên quan
 
 - `docs/apsport-handoff-codex.md` — nguyên nhân gốc APSPORT (adapter xoá record socket
