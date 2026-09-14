@@ -98,6 +98,31 @@ describe("CMD native catalog collector", () => {
     expect(h.tick()).toMatchObject({ groupsCoveredTwice: 1, partialWanted: 0 });
   });
 
+  it("counts corner and booking leagues apart from the team suffix they must carry", () => {
+    // The normalizer admits a "- CORNERS" league only when both team names end
+    // with an exact "(No. of Corners)" suffix and drops the whole fixture
+    // otherwise. A league count far above the suffix count means the suffix is
+    // the door. Backslashes in this expression have been eaten four times, so
+    // the assertion drives the built expression rather than reading it.
+    const h = harness();
+    const shaped = (id: number, league: string, home: string, away: string) => {
+      const value = row(id, group(id));
+      value[37] = league; value[38] = home; value[39] = away;
+      return value;
+    };
+    h.tick();
+    h.commit([
+      shaped(1, "PREMIER LEAGUE - CORNERS", "Arsenal (No. of Corners)", "Chelsea (No. of Corners)"),
+      shaped(2, "PREMIER LEAGUE - CORNERS", "Arsenal (Corners)", "Chelsea (Corners)"),
+      shaped(3, "PREMIER LEAGUE - CORNERS", "Arsenal", "Chelsea"),
+      shaped(4, "PREMIER LEAGUE - BOOKINGS", "Arsenal (Total Bookings)", "Chelsea (Total Bookings)"),
+      shaped(5, "PREMIER LEAGUE - BOOKINGS", "Arsenal", "Chelsea"),
+      shaped(6, "PREMIER LEAGUE", "Arsenal", "Chelsea")
+    ], []);
+    expect(h.tick()).toMatchObject({ cornerRows: 3, cornerSuffixOk: 1,
+      bookingRows: 2, bookingSuffixOk: 1 });
+  });
+
   it("reports a missing plan as -1 rather than omitting it", () => {
     // An absent field reads the same as a plan of zero events, which is how a
     // plan that never reached the page would hide behind unplanned groups.

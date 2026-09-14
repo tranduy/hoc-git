@@ -10,7 +10,8 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
     "due", "waiting", "started", "passive", "unplanned", "rebuilt", "rebuiltCollected",
     "sharedEvents", "multiEventGroups", "groupsOneMatch", "groupsSeveralMatches", "partialGroups",
     "rowsNotSport", "rowsLiveGroup", "eventsDiscovered",
-    "groupsCoveredTwice", "partialWanted", "failed",
+    "groupsCoveredTwice", "partialWanted",
+    "cornerRows", "cornerSuffixOk", "bookingRows", "bookingSuffixOk", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -56,6 +57,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     state.sharedEvents ??= 0; state.multiEventGroups ??= 0;
     state.groupsOneMatch ??= 0; state.groupsSeveralMatches ??= 0;
     state.rowsNotSport ??= 0; state.rowsLiveGroup ??= 0; state.eventsDiscovered ??= 0;
+    state.cornerRows ??= 0; state.cornerSuffixOk ??= 0;
+    state.bookingRows ??= 0; state.bookingSuffixOk ??= 0;
     const retire = () => {
       state.owners.clear(); state.queue = []; state.cycle = null; state.nextRosterAt = 0;
       state.todayRows = 0; state.earlyRows = 0; state.runningRows = 0; state.rosterAtMs = 0;
@@ -176,6 +179,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         rebuilt: state.rebuilt, rebuiltCollected: state.rebuiltCollected,
         sharedEvents: state.sharedEvents, multiEventGroups: state.multiEventGroups,
         groupsOneMatch: state.groupsOneMatch, groupsSeveralMatches: state.groupsSeveralMatches,
+        cornerRows: state.cornerRows, cornerSuffixOk: state.cornerSuffixOk,
+        bookingRows: state.bookingRows, bookingSuffixOk: state.bookingSuffixOk,
         rowsNotSport: state.rowsNotSport, rowsLiveGroup: state.rowsLiveGroup,
         eventsDiscovered: state.eventsDiscovered,
         // A group reads as unplanned when the plan has not reached this page.
@@ -352,6 +357,28 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       }
       state.groupsOneMatch = sameMatch;
       state.groupsSeveralMatches = severalMatches;
+      // The normalizer admits a "- CORNERS" league only when BOTH team names
+      // carry an exact "(No. of Corners)" suffix, and drops the whole fixture
+      // otherwise. Count the two separately: a league count far above the
+      // suffix count means the suffix shape is the door, not the league.
+      const cornerLeague = /\s-\sCORNERS\s*$/i;
+      const bookingLeague = /\s-\sBOOKINGS\s*$/i;
+      const cornerTeam = /\(\s*No\.?\s*of\s+Corners\s*\)\s*$/i;
+      const bookingTeam = /\(\s*Total\s+Bookings\s*\)\s*$/i;
+      let cornerRows = 0, cornerSuffix = 0, bookingRows = 0, bookingSuffix = 0;
+      for (const row of [...today, ...early]) {
+        const league = String(row[37]);
+        const teams = [String(row[38]), String(row[39])];
+        if (cornerLeague.test(league)) {
+          cornerRows += 1;
+          if (teams.every((team) => cornerTeam.test(team))) cornerSuffix += 1;
+        } else if (bookingLeague.test(league)) {
+          bookingRows += 1;
+          if (teams.every((team) => bookingTeam.test(team))) bookingSuffix += 1;
+        }
+      }
+      state.cornerRows = cornerRows; state.cornerSuffixOk = cornerSuffix;
+      state.bookingRows = bookingRows; state.bookingSuffixOk = bookingSuffix;
       state.rowsNotSport = notSport;
       state.rowsLiveGroup = inLiveGroup;
       state.eventsDiscovered = groupsPerEvent.size;
