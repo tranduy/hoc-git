@@ -1267,6 +1267,11 @@ export class NetworkObserver {
   readonly #apsportHoldWindows = new Map<string, { open: boolean; changedAtMs: number }>();
   readonly #apsportPumpState = new Map<string, { reason: string; jobs: number;
     dueCount: number; atMs: number }>();
+  // A detail read that neither succeeds nor fails leaves the fixture unread and
+  // the pump picks it again: measured 2026-09-14, jobs kept being created while
+  // the read count sat still and failures stayed at zero. Two of the exits out
+  // of that function counted nothing at all, so name every one.
+  readonly #apsportDetailExits = new Map<string, Map<string, number>>();
   readonly #apsportCornerSocketRequests = new Set<string>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
@@ -4734,13 +4739,23 @@ export class NetworkObserver {
     this.#apsportEventDetailTimers.set(key, { sourceId: source.sourceId, timer });
   }
 
+  #noteApsportDetailExit(sourceId: string, reason: string): void {
+    const counts = this.#apsportDetailExits.get(sourceId) ?? new Map<string, number>();
+    if (counts.size < 12 || counts.has(reason)) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    this.#apsportDetailExits.set(sourceId, counts);
+  }
+
   async #refreshApsportEventDetail(source: ObservedSource, eventId: string, leagueId?: string): Promise<void> {
     const template = this.#apsportRequestTemplates.get(source.sourceId);
     const rosterLeagueId = leagueId ??
       this.#apsportActiveCatalogs.get(source.sourceId)?.rosterLeagueIds.get(eventId);
     const currentCatalogAllowsDetail = (): boolean =>
       this.#apsportActiveCatalogs.get(source.sourceId)?.hiddenDetailEventIds.has(eventId) === true;
-    if (!currentCatalogAllowsDetail() || template === undefined) return;
+    if (template === undefined) { this.#noteApsportDetailExit(source.sourceId, "no-template"); return; }
+    if (!currentCatalogAllowsDetail()) {
+      this.#noteApsportDetailExit(source.sourceId, "left-roster-before");
+      return;
+    }
     // A large all-future roster can take several minutes to hydrate. Its
     // periodic one-minute roster renewal must not discard the one detail
     // response already in flight when the event still belongs to the newer
@@ -4759,16 +4774,30 @@ export class NetworkObserver {
         sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
     } catch {
       if (isCurrent()) this.#apsportCoverage(source.sourceId).markFailure(eventId);
+      this.#noteApsportDetailExit(source.sourceId, "thrown");
       this.#lastCaptureExit.set(source.sourceId, "APSPORT_EVENT_DETAIL_THROWN");
       return;
     }
     const active = this.#apsportActiveCatalogs.get(source.sourceId);
-    if (!isCurrent() || active === undefined) return;
+    // The roster renews every minute; a read that lands after it can find its
+    // own fixture gone or the page identity changed. Nothing was recorded here,
+    // so the fixture stayed unread and was picked again on the next pump.
+    if (!currentCatalogAllowsDetail()) {
+      this.#noteApsportDetailExit(source.sourceId, "left-roster-after");
+      return;
+    }
+    if (!this.#apsportTemplateIsCurrent(source, template)) {
+      this.#noteApsportDetailExit(source.sourceId, "page-changed");
+      return;
+    }
+    if (active === undefined) { this.#noteApsportDetailExit(source.sourceId, "no-roster"); return; }
     const detailedEventId = detailed === null ? null :
       typeof detailed["2"] === "string" || typeof detailed["2"] === "number" ? String(detailed["2"]) : null;
     const validation = detailed === null ? null : validateApsportDetail(detailed);
     if (detailed === null || detailedEventId !== eventId || validation?.eventId !== eventId) {
       this.#apsportCoverage(source.sourceId).markFailure(eventId);
+      this.#noteApsportDetailExit(source.sourceId,
+        detailed === null ? "empty" : "identity-mismatch");
       return;
     }
     const status = detailed["10"];
@@ -4780,6 +4809,7 @@ export class NetworkObserver {
     const expired = detailed["6"] !== true && Number.isFinite(startAtMs) && startAtMs < this.#now();
     const removedFromRoster = inactive || expired;
     const transitionedOutOfPrematch = detailed["6"] === true || removedFromRoster;
+    this.#noteApsportDetailExit(source.sourceId, transitionedOutOfPrematch ? "retired" : "read");
     if (transitionedOutOfPrematch) this.#apsportCoverage(source.sourceId).removeEvent(eventId);
     else this.#apsportCoverage(source.sourceId).markSuccess(eventId, validation.hasMarkets, this.#now());
     if (transitionedOutOfPrematch) {
@@ -7077,11 +7107,15 @@ export class NetworkObserver {
       // Corner/card groups ride their own sockets. Reported here rather than
       // as typed counters so the running API needs no restart to show them.
       const d = this.#wsAttachDiagnostic(source);
+      const exits = [...(this.#apsportDetailExits.get(source.sourceId) ?? new Map())]
+        .sort((left, right) => right[1] - left[1])
+        .map(([reason, count]) => `${reason}:${count}`).join(",");
       const pump = this.#apsportPumpState.get(source.sourceId);
       const walk = pump === undefined ? "AP_WALK[chua-bom] "
         : `AP_WALK[${pump.reason};jobs:${pump.jobs};due:${pump.dueCount};` +
           `ageMs:${this.#now() - pump.atMs}] `;
-      return (walk + `AP_MG[mo:${d.apCornerSockets};dong:${d.apCornerSocketsClosed};` +
+      return (walk + `AP_DET[${exits}] ` +
+        `AP_MG[mo:${d.apCornerSockets};dong:${d.apCornerSocketsClosed};` +
         `frames:${d.apCornerFramesReceived};parsed:${d.apCornerFramesParsed}] ` +
         apsportExtraFlagShape() + ` ` +
         apsportGroupCensusShape() + ' ' + apsportBodyCensusShape() + ' ' + existing).slice(0, 900);
