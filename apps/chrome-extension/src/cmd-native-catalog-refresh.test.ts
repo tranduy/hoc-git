@@ -71,6 +71,39 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(2);
   });
 
+  it("tells a group holding one match's several books from one holding several matches", () => {
+    // 216 of 741 groups carry more than one event while a More response covers
+    // exactly one. Whether the rest are other books of the same match or other
+    // matches decides whether anything is actually missing.
+    const h = harness();
+    const named = (id: number, groupId: string, home: string) => {
+      const value = row(id, groupId);
+      value[38] = home;
+      return value;
+    };
+    h.tick();
+    h.commit([named(1, group(1), "Home"), named(2, group(1), "Home"),
+      named(3, group(2), "Home"), named(4, group(2), "Other")], []);
+    expect(h.tick()).toMatchObject({ multiEventGroups: 2,
+      groupsOneMatch: 1, groupsSeveralMatches: 1 });
+  });
+
+  it("counts a fetched group whose other events the provider never answered for", () => {
+    const h = harness();
+    const root = (h.globals.document as any).documentElement;
+    root.__fieldlineCollectionSchedulerV1 = {
+      dueReason: () => null, due: () => true, policy: () => ({ refreshMs: 10_000 }),
+      sort: (ids: string[]) => [...ids], completed: vi.fn()
+    };
+    h.tick();
+    h.commit([row(1, group(1)), row(2, group(1))], []);
+    expect(h.tick()).toMatchObject({ partialGroups: 0 });
+
+    // The provider answers for one of the group's two events.
+    h.complete(h.more()[0]!, 1);
+    expect(h.tick()).toMatchObject({ done: 1, partialGroups: 1 });
+  });
+
   it("counts events carried by more than one group, and groups carrying more than one event", () => {
     // A More response covers one event but marks every event in its group
     // collected, so a second group holding the same event is never due again.

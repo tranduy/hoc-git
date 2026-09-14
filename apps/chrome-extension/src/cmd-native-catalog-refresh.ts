@@ -8,7 +8,7 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
   }
   for (const name of ["todayRows", "earlyRows", "runningRows", "groups", "done", "pending",
     "due", "waiting", "started", "passive", "unplanned", "rebuilt", "rebuiltCollected",
-    "sharedEvents", "multiEventGroups", "failed",
+    "sharedEvents", "multiEventGroups", "groupsOneMatch", "groupsSeveralMatches", "partialGroups", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -46,6 +46,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     state.requestStatus ??= 0; state.nextMoreAt ??= 0; state.pumpTimer ??= null;
     state.rebuilt ??= 0; state.rebuiltCollected ??= 0;
     state.sharedEvents ??= 0; state.multiEventGroups ??= 0;
+    state.groupsOneMatch ??= 0; state.groupsSeveralMatches ??= 0;
     const retire = () => {
       state.owners.clear(); state.queue = []; state.cycle = null; state.nextRosterAt = 0;
       state.todayRows = 0; state.earlyRows = 0; state.runningRows = 0; state.rosterAtMs = 0;
@@ -165,6 +166,9 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         passive: census.passive, unplanned: census.unplanned,
         rebuilt: state.rebuilt, rebuiltCollected: state.rebuiltCollected,
         sharedEvents: state.sharedEvents, multiEventGroups: state.multiEventGroups,
+        groupsOneMatch: state.groupsOneMatch, groupsSeveralMatches: state.groupsSeveralMatches,
+        partialGroups: owners.filter((owner) => owner.doneAt > 0 &&
+          (owner.covered?.size ?? 0) < owner.events.size).length,
         failed: owners.filter((owner) => owner.failed).length, active: state.active.size,
         rosterActive: state.rosterActive, rosterFailed: state.rosterFailed, rosterAtMs: state.rosterAtMs,
         requestPaused: paused(), requestStatus: state.requestStatus,
@@ -223,6 +227,10 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
             if (valid) {
               requestSucceeded(job.startedAtMs);
               owner.doneAt = Date.now();
+              // Which event the provider actually answered for. Asking the same
+              // group again may or may not move it; without this the walk cannot
+              // tell a group it has covered from one it has only touched.
+              (owner.covered ??= new Set()).add(String(value.d[1]));
               for (const event of owner.events) root.__fieldlineCollectionSchedulerV1?.completed(event, owner.doneAt);
               // Keep the latest bounded sports tuple for native/API coverage
               // comparison; it carries no request or account parameters.
@@ -252,11 +260,19 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       const early = cycle.values[1].today.filter(fullRow);
       const liveGroups = new Set(live.map((row) => row[34]));
       const discovered = new Map();
+      // A group holding several events is either one match's several books or
+      // several matches. One More response covers one event, so which of those
+      // it is decides whether the rest are missing markets or have none to miss.
+      // Fingerprints never leave this closure; only the counts do.
+      const fixtures = new Map();
       for (const row of [...today, ...early]) {
         if (row[51] !== 'S' || liveGroups.has(row[34])) continue;
         let events = discovered.get(row[34]);
         if (!events) discovered.set(row[34], events = new Set());
         events.add(String(row[0]));
+        let names = fixtures.get(row[34]);
+        if (!names) fixtures.set(row[34], names = new Set());
+        names.add(String(row[37]) + '|' + String(row[38]) + '|' + String(row[39]));
       }
       const owners = new Map();
       // A replaced owner loses doneAt while the scheduler keeps its receipt, so
@@ -268,7 +284,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
           [...events].every((event) => prior.events.has(event));
         if (prior && !reusable && prior.doneAt > 0) state.rebuiltCollected += 1;
         else if (prior && !reusable) state.rebuilt += 1;
-        owners.set(id, reusable ? prior : { events, doneAt: 0, nextAt: 0, failed: false });
+        owners.set(id, reusable ? prior
+          : { events, doneAt: 0, nextAt: 0, failed: false, covered: new Set() });
       }
       // A More response covers one event but marks every event in its group
       // collected, so two groups sharing an event starve each other: the second
@@ -280,6 +297,14 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       }
       state.sharedEvents = [...groupsPerEvent.values()].filter((count) => count > 1).length;
       state.multiEventGroups = [...discovered.values()].filter((events) => events.size > 1).length;
+      let sameMatch = 0, severalMatches = 0;
+      for (const [id, events] of discovered) {
+        if (events.size <= 1) continue;
+        if ((fixtures.get(id)?.size ?? 1) > 1) severalMatches += 1;
+        else sameMatch += 1;
+      }
+      state.groupsOneMatch = sameMatch;
+      state.groupsSeveralMatches = severalMatches;
       state.owners = owners;
       state.queue = state.queue.filter((id) => owners.has(id));
       state.todayRows = today.length; state.earlyRows = early.length; state.runningRows = live.length;
