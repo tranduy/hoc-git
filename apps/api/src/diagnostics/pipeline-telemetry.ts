@@ -706,6 +706,11 @@ interface SabaCollectorDiagnostic {
   readonly owners?: string;
 }
 
+/** Exposed so the guard can be pinned against the strings the collector emits. */
+export function sabaCollectorDiagnosticForTests(value: unknown): SabaCollectorDiagnostic | undefined {
+  return sabaCollectorDiagnostic(value);
+}
+
 function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const entry = value as Record<string, unknown>;
@@ -721,7 +726,7 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     domBlocked: entry.domBlocked as boolean, probeBlocked: entry.probeBlocked as boolean,
     currentPeriod: entry.currentPeriod === "TODAY" || entry.currentPeriod === "EARLY" ? entry.currentPeriod : null,
     ...(typeof entry.owners === "string" &&
-      /^t-?d{1,5}.m-?d{1,5}.d-?d{1,5},e-?d{1,5}.m-?d{1,5}.d-?d{1,5}$/u.test(entry.owners)
+      /^t-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5},e-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5}$/u.test(entry.owners)
       ? { owners: entry.owners } : {}),
     lastErrorCode: typeof entry.lastErrorCode === "string" && /^SABA_COLLECTOR_[A-Z_]{1,70}$/u.test(entry.lastErrorCode)
       ? entry.lastErrorCode : null };

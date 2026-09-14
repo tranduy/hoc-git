@@ -6,7 +6,7 @@ import type { AuthoritySlotSnapshot } from "../chrome-bridge/provider-authority-
 import type { ProviderFeedSnapshot } from "../chrome-bridge/provider-feed-types.js";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { tsportContentRefusals } from "../chrome-bridge/tsport-ws-adapter.js";
-import { PipelineTelemetry, PIPELINE_TELEMETRY_LIMITS, type PipelineTelemetryReaders } from "./pipeline-telemetry.js";
+import { PipelineTelemetry, PIPELINE_TELEMETRY_LIMITS, type PipelineTelemetryReaders , sabaCollectorDiagnosticForTests} from "./pipeline-telemetry.js";
 
 const accountId = "catalog-source:CMD:FOOTBALL" as const;
 
@@ -511,4 +511,41 @@ describe("provider refresh outcomes", () => {
         { status: "gate-lock-held", count: 1 }, { status: "gate-cooldown", count: 1 },
         { status: "failure-signature", count: 1 }]);
   });
+});
+
+describe("SABA owner counts", () => {
+  const base = {
+    kind: "WS_ATTACH", sourceGeneration: 1, webSocketCreated: 0, webSockets: 0,
+    ksportTargets: 0, attachedTargets: 0, framesReceived: 0, framesOrphan: 0,
+    framesForwarded: 0, ignoredSockets: 0, framesBinary: 0, framesNotOwner: 0,
+    framesUnattributed: 0, framesNotActiveStream: 0, framesDecoderFailed: 0
+  };
+  const collector = (owners: string) => ({
+    nativeReady: false, schemaContextReady: false, catalogUsable: true,
+    discoveryPending: false, discoveryAttempted: true, collectorState: "FINISHED",
+    domBlocked: false, probeBlocked: false, currentPeriod: "EARLY", lastErrorCode: null,
+    owners
+  });
+
+  // Three separate guards have shipped with their backslashes eaten, matching a
+  // literal "d" instead of a digit and silently dropping every real value. Pin
+  // the strings the collector actually emits.
+  it("accepts the counts the collector emits", () => {
+    for (const owners of ["t94.m0.d0,e0.m0.d0", "t2.m2.d2,e2.m2.d2", "t0.m0.d-1,e0.m0.d0"]) {
+      expect(sabaCollectorDiagnosticForTests(collector(owners)), owners)
+        .toMatchObject({ owners });
+    }
+  });
+
+  it("still refuses anything that is not a count", () => {
+    for (const owners of ["td.md.dd,ed.md.dd", "Arsenal", "", "t1.m1.d1"]) {
+      expect(sabaCollectorDiagnosticForTests(collector(owners))?.owners, owners).toBeUndefined();
+    }
+  });
+
+  it("keeps the rest of the diagnostic when the counts are refused", () => {
+    expect(sabaCollectorDiagnosticForTests(collector("nonsense")))
+      .toMatchObject({ collectorState: "FINISHED", currentPeriod: "EARLY" });
+  });
+  void base;
 });
