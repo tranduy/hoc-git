@@ -126,6 +126,15 @@ describe("CMD native catalog collector", () => {
       cornerLooseOk: 1, cornerOneSided: 0, cornerNoParen: 1 });
   });
 
+  it("carries a bounded corner suffix sample and refuses anything else", () => {
+    expect(formatCmdNativeCatalogDiagnostic({ cornerShapes: ["(No. of Corners)", "(1st Corner)"] }))
+      .toBe("CMD_NATIVE[cornerShapes:(No. of Corners)|(1st Corner)]");
+    // A team name, a token, or anything with separators never rides along.
+    expect(formatCmdNativeCatalogDiagnostic({ cornerShapes: ["Arsenal", "(a;b)", "(" + "x".repeat(40) + ")"] }))
+      .toBe("CMD_NATIVE[]");
+    expect(formatCmdNativeCatalogDiagnostic({ cornerShapes: "(No. of Corners)" })).toBe("CMD_NATIVE[]");
+  });
+
   it("reports a missing plan as -1 rather than omitting it", () => {
     // An absent field reads the same as a plan of zero events, which is how a
     // plan that never reached the page would hide behind unplanned groups.
