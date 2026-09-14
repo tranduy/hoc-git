@@ -549,3 +549,25 @@ describe("SABA owner counts", () => {
   });
   void base;
 });
+
+describe("SABA capture counts", () => {
+  const collector = (captures: string) => ({
+    nativeReady: false, schemaContextReady: false, catalogUsable: true,
+    discoveryPending: false, discoveryAttempted: true, collectorState: "FINISHED",
+    domBlocked: false, probeBlocked: false, currentPeriod: "EARLY", lastErrorCode: null,
+    owners: "t88.m88.d25,e161.m129.d0", captures
+  });
+
+  it("accepts the tallies the collector emits", () => {
+    for (const captures of ["o0.n0.a0.g0.r0", "o25.n25.a0.g0.r0", "o25.n3.a12.g10.r418"]) {
+      expect(sabaCollectorDiagnosticForTests(collector(captures)), captures)
+        .toMatchObject({ captures });
+    }
+  });
+
+  it("refuses anything that is not a tally, without losing the record", () => {
+    const parsed = sabaCollectorDiagnosticForTests(collector("on.na.ag.gr.r"));
+    expect(parsed?.captures).toBeUndefined();
+    expect(parsed).toMatchObject({ owners: "t88.m88.d25,e161.m129.d0" });
+  });
+});

@@ -190,6 +190,9 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
       // are due: this fixture loads two owners a period, both with a More
       // control and both waiting their turn.
       owners: "t2.m2.d2,e2.m2.d2",
+      // opened, opened-to-nothing, alternate rows, expanded groups, groups
+      // returned. Nothing captured yet on this first heartbeat.
+      captures: "o0.n0.a0.g0.r0",
       domBlocked: false, probeBlocked: false, lastErrorCode: null, currentPeriod: "TODAY",
       mainRosterComplete: true, hiddenMarketsComplete: false });
   });

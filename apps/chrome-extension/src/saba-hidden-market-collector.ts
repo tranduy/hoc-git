@@ -298,6 +298,11 @@ export class SabaHiddenMarketCollector {
   #periodIndex = 0;
   #captureOrdinal = 0;
   #lastCapturedMonotonicMs = -1;
+  // Three numbers decide where SABA hidden markets are lost: how many owners
+  // the walk actually opens, how many of those opened to nothing, and how many
+  // rows the rest gave back. 217 of 249 fixtures show a More control while the
+  // catalog carries one market from behind it.
+  readonly #captureTally = { opened: 0, empty: 0, rows: 0, alternate: 0, groups: 0 };
   #terminalEmitted = false;
   #frozen: { status: "SAFE_ERROR" | "STALE_BINDING"; error: SabaCollectorAdvanceError } | null = null;
   #resumableOperation: ResumableOperation | null = null;
@@ -352,6 +357,12 @@ export class SabaHiddenMarketCollector {
       }
       return `${period === "TODAY" ? "t" : "e"}${roster.length}.m${more.length}.d${due}`;
     }).join(",");
+  }
+
+  /** opened, opened-to-nothing, alternate rows, expanded groups, rows returned. */
+  captureCounts(): string {
+    const tally = this.#captureTally;
+    return `o${tally.opened}.n${tally.empty}.a${tally.alternate}.g${tally.groups}.r${tally.rows}`;
   }
 
   get mainRosterComplete(): boolean { return this.#mainRosterItems !== undefined; }
@@ -613,6 +624,13 @@ export class SabaHiddenMarketCollector {
         return this.#freeze("SAFE_ERROR", "OWNER_CAPTURE_UNSAFE", emitted);
       }
       visits.push({ period, ownerMatchId: owner.ownerMatchId });
+      this.#captureTally.opened += 1;
+      if (!structural) this.#captureTally.empty += 1;
+      else if (result.safeControlOutcome === "ALTERNATE_ROWS_ADDED") this.#captureTally.alternate += 1;
+      else this.#captureTally.groups += 1;
+      // Market groups behind the More control, which is what the whole walk is
+      // for; a capture that opens and returns none is the interesting case.
+      if (capture !== undefined) this.#captureTally.rows += capture.record.groups.length;
       // This is an actual successful page read, never a synthetic quote timestamp.
       // Older adapters lack a clock for empty structural reads, so do not fabricate one.
       const receipt = capture?.capturedAtMs ?? result.observedAtMs;

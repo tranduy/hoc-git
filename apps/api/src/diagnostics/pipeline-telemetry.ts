@@ -704,6 +704,8 @@ interface SabaCollectorDiagnostic {
   readonly lastErrorCode: string | null;
   /** Per period: roster size, fixtures offering a More control, and how many are due. */
   readonly owners?: string;
+  /** opened, opened-to-nothing, alternate rows, expanded groups, groups returned. */
+  readonly captures?: string;
 }
 
 /** Exposed so the guard can be pinned against the strings the collector emits. */
@@ -728,6 +730,8 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     ...(typeof entry.owners === "string" &&
       /^t-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5},e-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5}$/u.test(entry.owners)
       ? { owners: entry.owners } : {}),
+    ...(typeof entry.captures === "string" &&
+      /^o\d{1,6}\.n\d{1,6}\.a\d{1,6}\.g\d{1,6}\.r\d{1,7}$/u.test(entry.captures) ? { captures: entry.captures } : {}),
     lastErrorCode: typeof entry.lastErrorCode === "string" && /^SABA_COLLECTOR_[A-Z_]{1,70}$/u.test(entry.lastErrorCode)
       ? entry.lastErrorCode : null };
 }
