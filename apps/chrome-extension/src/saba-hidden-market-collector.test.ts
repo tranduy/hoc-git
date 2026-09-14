@@ -55,6 +55,62 @@ function refreshed(value: SabaCollectorRosterOwner, clock: number,
 }
 
 describe("SabaHiddenMarketCollector", () => {
+  it("walks the main roster again when the Today list moved under it", async () => {
+    // Measured in production: the collector froze on TODAY_RESTORE_UNCONFIRMED
+    // after three advances and then refused 64 slices in a row, never once
+    // publishing a roster. A fixture kicking off mid-walk is enough to do it.
+    let live = ["a", "b", "c"], clock = 0;
+    const build = (ids: readonly string[]) => ids.map((id) => ({
+      ...owner(id, "ELIGIBLE_MORE", ++clock),
+      record: { ...record(id), providerTimezoneOffsetMinutes: 420 } }));
+    const page = adapter([], [], {
+      readRoster: async (period) => ({ binding: BINDING, period, selectedPrematch: true,
+        owners: period === "TODAY" ? build(live) : [] }),
+      restoreToday: async () => ({ binding: BINDING, selectedPrematch: true, rosterMatchIds: live })
+    });
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true,
+      shouldCaptureOwner: () => false, nowMs: () => 1_788_800_001_000 });
+
+    // "a" kicks off between the roster walk and the restoration that proves it.
+    let dropped = false;
+    const restore = vi.spyOn(page, "restoreToday").mockImplementation(async () => {
+      if (!dropped) { dropped = true; live = ["b", "c"]; }
+      return { binding: BINDING, selectedPrematch: true, rosterMatchIds: live };
+    });
+    const drifted = await collector.advance(1);
+    expect(drifted.status).toBe("INCOMPLETE");
+    expect(drifted.mainRosterChanged).toBeUndefined();
+    expect(collector.terminalError).toBeNull();
+    expect(collector.restoreCounts()).toBe("c1.r1.m1.e0.w1");
+
+    // The walk starts over and publishes the list as it now stands.
+    const republished = await collector.advance(1);
+    expect(republished.mainRosterChanged).toBe(true);
+    expect(collector.mainRosterComplete).toBe(true);
+    expect(republished.mainRosterItems?.filter((item) => item.kind === "CAPTURE")
+      .map((item) => item.ownerMatchId)).toEqual(["b", "c"]);
+    expect(restore).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses a restored view that shares nothing with the walked Today list", async () => {
+    const today = ["a", "b"].map((id, index) => ({ ...owner(id, "ELIGIBLE_MORE", index + 1),
+      record: { ...record(id), providerTimezoneOffsetMinutes: 420 } }));
+    const early = ["x", "y"].map((id, index) => ({ ...owner(id, "ELIGIBLE_MORE", index + 3),
+      record: { ...record(id), providerTimezoneOffsetMinutes: 420 } }));
+    const page = adapter(today, early, {
+      restoreToday: async () => ({ binding: BINDING, selectedPrematch: true,
+        rosterMatchIds: ["x", "y"] })
+    });
+    const collector = new SabaHiddenMarketCollector({ collectorGeneration: GENERATION,
+      binding: BINDING, adapter: page, publishMainRosterFirst: true,
+      shouldCaptureOwner: () => false, nowMs: () => 1_788_800_001_000 });
+    // Early ids in a view claiming to be Today is not drift, and never a restart.
+    expect(await collector.advance(1)).toMatchObject({ status: "SAFE_ERROR",
+      error: "TODAY_RESTORE_UNCONFIRMED" });
+    expect(collector.restoreCounts()).toBe("c1.r1.m2.e2.w0");
+  });
+
   it("carries the walk past an owner whose More control cannot be closed safely", async () => {
     // One unsafe owner used to end hidden collection for the life of the tab:
     // the collector froze, the driver marked it finished, and only an extension

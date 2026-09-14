@@ -207,6 +207,11 @@ const SCHEDULED_FAILURE_LIMIT = 2;
 // Unfreezing is recovery, not a retry loop. Past this many the collector stays
 // frozen so a page that is broken end to end still reports as broken.
 const SCHEDULED_RESUME_LIMIT = 64;
+// The Today list loses fixtures as they kick off, so a roster walked minutes ago
+// will not match a fresh read of it. That drift is not proof of a wrong view -
+// the adapter already proved the Today tab is the active one - so walk it again
+// instead of ending collection. Past this many restarts something else is wrong.
+const MAIN_ROSTER_RESTART_LIMIT = 8;
 const RESUMABLE_FRAME_COMMAND_TIMEOUT = "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT";
 const RESUMABLE_OPERATION_DEADLINE = "SABA_COLLECTOR_OPERATION_DEADLINE";
 const RESUMABLE_OWNER_PREPARATION_TIMEOUT = "SABA_COLLECTOR_OWNER_PREPARATION_TIMEOUT";
@@ -320,6 +325,7 @@ export class SabaHiddenMarketCollector {
   // drifted by a fixture or a view that is simply not Today cannot be told apart
   // without these: restorations checked, refused, and by how many ids each way.
   readonly #restoreTally = { checks: 0, refused: 0, missing: 0, extra: 0 };
+  #mainRosterRestarts = 0;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(options: SabaHiddenMarketCollectorOptions) {
@@ -372,10 +378,14 @@ export class SabaHiddenMarketCollector {
     }).join(",");
   }
 
-  /** Today restorations checked, refused, and the id gap each way when refused. */
+  /**
+   * Today restorations checked, refused, the id gap each way when refused, and
+   * main roster walks restarted because the list moved under the walk.
+   */
   restoreCounts(): string {
     const tally = this.#restoreTally;
-    return `c${tally.checks}.r${tally.refused}.m${tally.missing}.e${tally.extra}`;
+    return `c${tally.checks}.r${tally.refused}.m${tally.missing}.e${tally.extra}` +
+      `.w${this.#mainRosterRestarts}`;
   }
 
   /**
@@ -463,7 +473,8 @@ export class SabaHiddenMarketCollector {
   resumeScheduledAfterVerifiedTodayRestore(restoration: SabaCollectorTodayRestoreResult): boolean {
     if (this.#terminalEmitted || !this.scheduledCollection) return false;
     if (this.#frozen?.status !== "SAFE_ERROR") return false;
-    if (this.#frozen.error !== "ADAPTER_ERROR" && this.#frozen.error !== "OWNER_CAPTURE_UNSAFE") return false;
+    if (this.#frozen.error !== "ADAPTER_ERROR" && this.#frozen.error !== "OWNER_CAPTURE_UNSAFE" &&
+      this.#frozen.error !== "TODAY_RESTORE_UNCONFIRMED") return false;
     if (!sameBinding(restoration.binding, this.#binding) || restoration.selectedPrematch !== true) return false;
     const restoredIds = restoration.rosterMatchIds;
     if (new Set(restoredIds).size !== restoredIds.length) return false;
@@ -472,6 +483,28 @@ export class SabaHiddenMarketCollector {
     this.#frozen = null;
     this.#resumableOperation = null;
     return true;
+  }
+
+  /**
+   * A Today list that drifted still shares fixtures with the walk and still has
+   * nothing in common with Early. Anything else is a view this collector cannot
+   * account for, and refusing it is the only safe answer.
+   */
+  #driftedTodayRoster(restored: readonly string[], todayIds: readonly string[],
+    earlyIds: readonly string[]): boolean {
+    if (restored.length === 0 || todayIds.length === 0) return false;
+    const early = new Set(earlyIds);
+    if (restored.some((value) => early.has(value))) return false;
+    const known = new Set(todayIds);
+    return restored.some((value) => known.has(value));
+  }
+
+  #restartMainRoster(): void {
+    this.#mainPeriodIndex = 0;
+    this.#candidateItems.splice(0);
+    for (const period of PERIODS) {
+      this.#periods[period] = { roster: null, cursor: 0, complete: false, validatedNoGrowthPending: false };
+    }
   }
 
   #recordScheduledFailure(period: SabaCollectorPeriod, ownerMatchId: string): void {
@@ -782,8 +815,21 @@ export class SabaHiddenMarketCollector {
     const todayIds = this.#periods.TODAY.roster!.map(({ ownerMatchId }) => ownerMatchId);
     const earlyIds = this.#periods.EARLY.roster!.map(({ ownerMatchId }) => ownerMatchId);
     this.#recordRestoreCheck(restoration.rosterMatchIds, todayIds);
-    if (restoration.selectedPrematch !== true || !sameRosterMembership(restoration.rosterMatchIds, todayIds)) {
+    if (restoration.selectedPrematch !== true) {
       return this.#freeze("SAFE_ERROR", "TODAY_RESTORE_UNCONFIRMED", emitted);
+    }
+    if (!sameRosterMembership(restoration.rosterMatchIds, todayIds)) {
+      // Restoration lands on the Today tab, read twice identically, and the ids
+      // it returns overlap the walk and never touch Early. What moved is the
+      // list itself. Publishing a roster this read disagrees with would be a
+      // lie, so throw the accumulation away and read it again.
+      if (!this.#driftedTodayRoster(restoration.rosterMatchIds, todayIds, earlyIds) ||
+        this.#mainRosterRestarts >= MAIN_ROSTER_RESTART_LIMIT) {
+        return this.#freeze("SAFE_ERROR", "TODAY_RESTORE_UNCONFIRMED", emitted);
+      }
+      this.#mainRosterRestarts += 1;
+      this.#restartMainRoster();
+      return this.#result("INCOMPLETE", emitted);
     }
     const collectorGeneration = `${this.#generation}:main${this.#mainSequence === 0 ? "" : `:${this.#mainSequence}`}`;
     this.#mainRosterItems = [

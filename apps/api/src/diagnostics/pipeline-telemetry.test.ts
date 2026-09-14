@@ -581,13 +581,13 @@ describe("SABA Today restore counts", () => {
   });
 
   it("accepts the restore gaps the collector emits", () => {
-    for (const restore of ["c0.r0.m0.e0", "c3.r1.m2.e0", "c12.r4.m97.e98"]) {
+    for (const restore of ["c0.r0.m0.e0.w0", "c3.r1.m2.e0.w1", "c12.r4.m97.e98.w8"]) {
       expect(sabaCollectorDiagnosticForTests(collector(restore)), restore).toMatchObject({ restore });
     }
   });
 
   it("refuses a gap whose digits were eaten, without losing the record", () => {
-    const parsed = sabaCollectorDiagnosticForTests(collector("cd.rd.md.ed"));
+    const parsed = sabaCollectorDiagnosticForTests(collector("cd.rd.md.ed.wd"));
     expect(parsed?.restore).toBeUndefined();
     expect(parsed).toMatchObject({ owners: "t98.m93.d1,e170.m130.d54" });
   });
