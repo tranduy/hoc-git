@@ -7,7 +7,7 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
     fields.push(`status:${status.status}`);
   }
   for (const name of ["todayRows", "earlyRows", "runningRows", "groups", "done", "pending",
-    "due", "waiting", "started", "passive", "unplanned", "failed",
+    "due", "waiting", "started", "passive", "unplanned", "rebuilt", "rebuiltCollected", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -43,6 +43,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     // Keep backpressure in the document across worker/source-epoch changes.
     state.retryAtMs ??= 0; state.failureAtMs ??= -1; state.requestFailures ??= 0;
     state.requestStatus ??= 0; state.nextMoreAt ??= 0; state.pumpTimer ??= null;
+    state.rebuilt ??= 0; state.rebuiltCollected ??= 0;
     const retire = () => {
       state.owners.clear(); state.queue = []; state.cycle = null; state.nextRosterAt = 0;
       state.todayRows = 0; state.earlyRows = 0; state.runningRows = 0; state.rosterAtMs = 0;
@@ -160,6 +161,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         groups: owners.length, done, pending: owners.length - done,
         due: census.due, waiting: census.waiting, started: census.started,
         passive: census.passive, unplanned: census.unplanned,
+        rebuilt: state.rebuilt, rebuiltCollected: state.rebuiltCollected,
         failed: owners.filter((owner) => owner.failed).length, active: state.active.size,
         rosterActive: state.rosterActive, rosterFailed: state.rosterFailed, rosterAtMs: state.rosterAtMs,
         requestPaused: paused(), requestStatus: state.requestStatus,
@@ -254,10 +256,16 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         events.add(String(row[0]));
       }
       const owners = new Map();
+      // A replaced owner loses doneAt while the scheduler keeps its receipt, so
+      // the group reads as collected while carrying nothing. Count how often
+      // that happens before deciding whether it explains the coverage gap.
       for (const [id, events] of discovered) {
         const prior = state.owners.get(id);
-        owners.set(id, prior && prior.events.size === events.size && [...events].every((event) => prior.events.has(event))
-          ? prior : { events, doneAt: 0, nextAt: 0, failed: false });
+        const reusable = prior && prior.events.size === events.size &&
+          [...events].every((event) => prior.events.has(event));
+        if (prior && !reusable && prior.doneAt > 0) state.rebuiltCollected += 1;
+        else if (prior && !reusable) state.rebuilt += 1;
+        owners.set(id, reusable ? prior : { events, doneAt: 0, nextAt: 0, failed: false });
       }
       state.owners = owners;
       state.queue = state.queue.filter((id) => owners.has(id));

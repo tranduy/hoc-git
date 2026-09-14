@@ -71,6 +71,36 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(2);
   });
 
+  it("counts an owner rebuilt after it was already collected apart from one never collected", () => {
+    // A replaced owner loses doneAt while the scheduler keeps its receipt, so
+    // the group reads as collected while carrying nothing. 1,618 More responses
+    // were accepted in one window against 90 fixtures actually showing markets.
+    const h = harness();
+    const root = (h.globals.document as any).documentElement;
+    root.__fieldlineCollectionSchedulerV1 = {
+      dueReason: () => null, due: () => true, policy: () => ({ refreshMs: 10_000 }),
+      sort: (ids: string[]) => [...ids], completed: vi.fn()
+    };
+    const roster = (rows: unknown[][]) => {
+      vi.setSystemTime((vi.getMockedSystemTime()?.getTime() ?? START) + 30_000);
+      h.tick();
+      h.commit(rows, []);
+    };
+    h.tick();
+    h.commit([row(1, group(1)), row(2, group(2))], []);
+    expect(h.tick()).toMatchObject({ rebuilt: 0, rebuiltCollected: 0 });
+
+    // Collect group 1, then give it a second event so its owner is replaced.
+    const first = h.more().find((request) => JSON.parse(request.body).m_groupId === group(1))!;
+    h.complete(first, 1);
+    roster([row(1, group(1)), row(3, group(1)), row(2, group(2))]);
+    expect(h.tick()).toMatchObject({ rebuiltCollected: 1, rebuilt: 0 });
+
+    // A group replaced before it was ever collected is a different number.
+    roster([row(1, group(1)), row(3, group(1)), row(2, group(2)), row(4, group(2))]);
+    expect(h.tick()).toMatchObject({ rebuiltCollected: 1, rebuilt: 1 });
+  });
+
   it("says why each uncollected owner is uncollected, not just that it is pending", () => {
     // Measured in production: 760 groups, 96 collected, 664 "pending" - a number
     // that cannot tell a walk falling behind from fixtures no other book carries.
