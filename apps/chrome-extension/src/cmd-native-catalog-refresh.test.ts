@@ -71,6 +71,19 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(2);
   });
 
+  it("counts roster rows lost to each filter, and the events that survived", () => {
+    // 52 paired fixtures inside 72 hours carried no More while the walk said
+    // nothing was due. "pending" cannot tell a group never discovered from one
+    // never asked, so name the filter each row dies to.
+    const h = harness();
+    const other = row(9, group(9));
+    other[51] = "B";
+    const liveRow = row(5, group(5));
+    h.tick();
+    h.commit([row(1, group(1)), other, liveRow], [], [liveRow]);
+    expect(h.tick()).toMatchObject({ rowsNotSport: 1, rowsLiveGroup: 1, eventsDiscovered: 1 });
+  });
+
   it("tells a group holding one match's several books from one holding several matches", () => {
     // 216 of 741 groups carry more than one event while a More response covers
     // exactly one. Whether the rest are other books of the same match or other

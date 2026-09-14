@@ -8,7 +8,8 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
   }
   for (const name of ["todayRows", "earlyRows", "runningRows", "groups", "done", "pending",
     "due", "waiting", "started", "passive", "unplanned", "rebuilt", "rebuiltCollected",
-    "sharedEvents", "multiEventGroups", "groupsOneMatch", "groupsSeveralMatches", "partialGroups", "failed",
+    "sharedEvents", "multiEventGroups", "groupsOneMatch", "groupsSeveralMatches", "partialGroups",
+    "rowsNotSport", "rowsLiveGroup", "eventsDiscovered", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -47,6 +48,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     state.rebuilt ??= 0; state.rebuiltCollected ??= 0;
     state.sharedEvents ??= 0; state.multiEventGroups ??= 0;
     state.groupsOneMatch ??= 0; state.groupsSeveralMatches ??= 0;
+    state.rowsNotSport ??= 0; state.rowsLiveGroup ??= 0; state.eventsDiscovered ??= 0;
     const retire = () => {
       state.owners.clear(); state.queue = []; state.cycle = null; state.nextRosterAt = 0;
       state.todayRows = 0; state.earlyRows = 0; state.runningRows = 0; state.rosterAtMs = 0;
@@ -167,6 +169,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         rebuilt: state.rebuilt, rebuiltCollected: state.rebuiltCollected,
         sharedEvents: state.sharedEvents, multiEventGroups: state.multiEventGroups,
         groupsOneMatch: state.groupsOneMatch, groupsSeveralMatches: state.groupsSeveralMatches,
+        rowsNotSport: state.rowsNotSport, rowsLiveGroup: state.rowsLiveGroup,
+        eventsDiscovered: state.eventsDiscovered,
         partialGroups: owners.filter((owner) => owner.doneAt > 0 &&
           (owner.covered?.size ?? 0) < owner.events.size).length,
         failed: owners.filter((owner) => owner.failed).length, active: state.active.size,
@@ -265,8 +269,13 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       // it is decides whether the rest are missing markets or have none to miss.
       // Fingerprints never leave this closure; only the counts do.
       const fixtures = new Map();
+      // Which filter each roster row dies to. 52 paired fixtures inside 72 hours
+      // carried no More while the walk reported nothing due, and "pending"
+      // cannot say whether their group was never discovered or never asked.
+      let notSport = 0, inLiveGroup = 0;
       for (const row of [...today, ...early]) {
-        if (row[51] !== 'S' || liveGroups.has(row[34])) continue;
+        if (row[51] !== 'S') { notSport += 1; continue; }
+        if (liveGroups.has(row[34])) { inLiveGroup += 1; continue; }
         let events = discovered.get(row[34]);
         if (!events) discovered.set(row[34], events = new Set());
         events.add(String(row[0]));
@@ -305,6 +314,9 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       }
       state.groupsOneMatch = sameMatch;
       state.groupsSeveralMatches = severalMatches;
+      state.rowsNotSport = notSport;
+      state.rowsLiveGroup = inLiveGroup;
+      state.eventsDiscovered = groupsPerEvent.size;
       state.owners = owners;
       state.queue = state.queue.filter((id) => owners.has(id));
       state.todayRows = today.length; state.earlyRows = early.length; state.runningRows = live.length;
