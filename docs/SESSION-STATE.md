@@ -2432,11 +2432,38 @@ groups:755  unplanned:246  passive:306  waiting:196  due:7
 2. **Đối tượng nhóm bị dựng lại làm mất biên nhận** — `rebuilt:5 rebuiltCollected:2`.
 3. **Hai nhóm dùng chung một trận nên chặn nhau** — `sharedEvents:0`.
 
-### Còn mở
+### Nhóm nhiều trận: đo xong, không mất gì
 
-`multiEventGroups:216` — 216/741 nhóm mang **nhiều hơn một trận**, mà một phản hồi
-More chỉ phủ một trận (`d[1]`) rồi `completed()` đánh dấu **toàn bộ** trận trong
-nhóm. Chưa rõ những trận còn lại trong nhóm có More riêng hay không.
+`multiEventGroups` từng là nghi phạm thứ tư — 220/752 nhóm mang nhiều hơn một
+"trận", mà một phản hồi More chỉ phủ một (`d[1]`) rồi `completed()` đánh dấu cả
+nhóm. Đếm ra thì:
+
+```
+multiEventGroups:220   groupsOneMatch:220   groupsSeveralMatches:0
+```
+
+**Cả 220 nhóm đều chỉ chứa một trận.** Những "trận" thừa trong nhóm là các dòng
+khác của **cùng một trận đó** (cùng giải, cùng hai đội), không phải trận khác. Nên
+đánh dấu cả nhóm là đúng, và `partialGroups:107` chỉ là hệ quả của cách đếm, không
+phải mất mát. **Không cần sửa gì.**
+
+Cách đếm: vân tay `leagueName|home|away` dựng trong closure, chỉ số đếm đi ra.
+
+### Còn lại thật sự
+
+Độ phủ đã đứng yên ở **160 trận có More**:
+
+```
+<24h  87/120      24-72h  73/134      >72h  0/324 (PASSIVE, là lựa chọn)
+```
+
+94 trận trong 72h chưa có More, chia ra: **62 chỉ CMD có** (cắt đúng luật) và
+**32 có sàn khác cũng có**. 32 trận đó là phần còn lại thật.
+
+Nghi ngờ đầu tiên nên là **ghép trận**, không phải More: nếu bộ ghép production
+không ghép được chúng thì chúng nằm trong `unplanned:242` và bị cắt đúng chính
+sách. Phép đối chiếu ở trên chỉ so tên đội + giờ ±30 phút, thô hơn bộ ghép thật.
+Chưa kiểm chứng.
 
 ## Tài liệu liên quan
 
