@@ -71,6 +71,38 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(2);
   });
 
+  it("says why each uncollected owner is uncollected, not just that it is pending", () => {
+    // Measured in production: 760 groups, 96 collected, 664 "pending" - a number
+    // that cannot tell a walk falling behind from fixtures no other book carries.
+    const h = harness();
+    const root = (h.globals.document as any).documentElement;
+    const reasons: Record<string, "UNPLANNED" | "STARTED" | "PASSIVE" | "WAITING" | null> = {
+      "1": null, "2": "UNPLANNED", "3": "PASSIVE", "4": "STARTED", "5": "WAITING"
+    };
+    root.__fieldlineCollectionSchedulerV1 = {
+      dueReason: (id: string) => reasons[id] ?? "UNPLANNED",
+      due: (id: string) => reasons[id] === null,
+      policy: () => ({ refreshMs: 10_000 }),
+      sort: (ids: string[]) => [...ids], completed: vi.fn()
+    };
+    h.tick();
+    h.commit([row(1), row(2), row(3), row(4), row(5)], []);
+    expect(h.tick()).toMatchObject({ groups: 5, due: 1, unplanned: 1, passive: 1,
+      started: 1, waiting: 1 });
+  });
+
+  it("counts owners as merely waiting when the page holds a scheduler without the census", () => {
+    const h = harness();
+    const root = (h.globals.document as any).documentElement;
+    root.__fieldlineCollectionSchedulerV1 = {
+      due: () => false, policy: () => ({ refreshMs: 10_000 }),
+      sort: (ids: string[]) => [...ids], completed: vi.fn()
+    };
+    h.tick();
+    h.commit([row(1), row(2)], []);
+    expect(h.tick()).toMatchObject({ groups: 2, due: 0, waiting: 2, unplanned: 0 });
+  });
+
   it("queues the actual captured prematch owner using its native sport and group columns", () => {
     // Untouched public row from native-discovery-1788862499540, fc1 today;
     // only the test clock is synthetic. Column51 is sport, column56 is date.

@@ -30,6 +30,26 @@ export function createFootballCollectionScheduler(
     return policyFor(effective.start, effective.live,
       events.get(id)?.urgent === true && now() - receivedPlanAt < 120_000, now());
   };
+  /**
+   * Why a fixture is not due, or null when it is. due() is this same decision
+   * with the reason thrown away: keeping one implementation is what stops a
+   * census from disagreeing with the walk it is meant to explain.
+   */
+  const dueReason = (id: string, lastRealReceiptMs: number | null,
+    fallbackStart?: number | null, fallbackLive?: boolean):
+    "UNPLANNED" | "STARTED" | "PASSIVE" | "WAITING" | null => {
+    if (revision >= 0 && !events.has(id)) return "UNPLANNED";
+    const effective = timing(id, fallbackStart, fallbackLive);
+    if (!effective.live && typeof effective.start === "number" && Number.isFinite(effective.start) &&
+      effective.start > 0 && effective.start < now()) return "STARTED";
+    const p = policy(id);
+    if (p.refreshMs === null) return "PASSIVE";
+    if (manual.has(id)) return null;
+    const prior = receipts.get(id);
+    if (prior !== undefined && prior.tier !== p.tier) return null;
+    const receivedAt = Math.max(prior?.at ?? 0, lastRealReceiptMs ?? 0);
+    return receivedAt === 0 || now() - receivedAt >= p.refreshMs ? null : "WAITING";
+  };
   return {
     setPlan(plan: FootballCollectionPlan): void {
       if (!Number.isSafeInteger(plan.revision) || plan.revision < revision) return;
@@ -53,18 +73,9 @@ export function createFootballCollectionScheduler(
       }
     },
     policy,
+    dueReason,
     due(id: string, lastRealReceiptMs: number | null, fallbackStart?: number | null, fallbackLive?: boolean): boolean {
-      if (revision >= 0 && !events.has(id)) return false;
-      const effective = timing(id, fallbackStart, fallbackLive);
-      if (!effective.live && typeof effective.start === "number" && Number.isFinite(effective.start) &&
-        effective.start > 0 && effective.start < now()) return false;
-      const p = policy(id);
-      if (p.refreshMs === null) return false;
-      if (manual.has(id)) return true;
-      const prior = receipts.get(id);
-      if (prior !== undefined && prior.tier !== p.tier) return true;
-      const receivedAt = Math.max(prior?.at ?? 0, lastRealReceiptMs ?? 0);
-      return receivedAt === 0 || now() - receivedAt >= p.refreshMs;
+      return dueReason(id, lastRealReceiptMs, fallbackStart, fallbackLive) === null;
     },
     completed(id: string, realReceiptMs: number): void {
       if (!Number.isFinite(realReceiptMs) || realReceiptMs <= 0) return;

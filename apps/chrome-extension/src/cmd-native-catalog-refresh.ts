@@ -6,7 +6,8 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
   if (["frame-unavailable", "scope-unavailable", "ready", "roster-pending"].includes(String(status.status))) {
     fields.push(`status:${status.status}`);
   }
-  for (const name of ["todayRows", "earlyRows", "runningRows", "groups", "done", "pending", "failed",
+  for (const name of ["todayRows", "earlyRows", "runningRows", "groups", "done", "pending",
+    "due", "waiting", "started", "passive", "unplanned", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -129,12 +130,36 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       return Object.keys(value).every((name) => ['a', 't', 'data', 'today', 'f'].includes(name))
         ? null : 'extra-key';
     };
+    // "pending" counts every group not collected, which cannot tell a walk that
+    // is behind from fixtures the plan never asked for. Name the gate instead.
+    const RANK = { WAITING: 0, STARTED: 1, PASSIVE: 2, UNPLANNED: 3 };
+    const ownerBlock = (owner) => {
+      const scheduler = root.__fieldlineCollectionSchedulerV1;
+      // A page can still hold a scheduler injected before this census existed.
+      if (!scheduler || typeof scheduler.dueReason !== 'function') return 'WAITING';
+      let worst = null;
+      for (const id of owner.events) {
+        const reason = scheduler.dueReason(id, owner.doneAt || null);
+        if (reason === null) return null;
+        if (worst === null || RANK[reason] < RANK[worst]) worst = reason;
+      }
+      return worst ?? 'WAITING';
+    };
     const diagnostics = () => {
       const owners = [...state.owners.values()];
       const done = owners.filter((owner) => owner.doneAt > 0).length;
+      const census = { due: 0, waiting: 0, started: 0, passive: 0, unplanned: 0 };
+      for (const owner of owners) {
+        if (ownerDue(owner)) { census.due += 1; continue; }
+        const block = ownerBlock(owner);
+        if (block === null) census.due += 1;
+        else census[block.toLowerCase()] += 1;
+      }
       const result = { status: state.rosterAtMs > 0 ? 'ready' : 'roster-pending', generation: state.generation,
         todayRows: state.todayRows, earlyRows: state.earlyRows, runningRows: state.runningRows,
         groups: owners.length, done, pending: owners.length - done,
+        due: census.due, waiting: census.waiting, started: census.started,
+        passive: census.passive, unplanned: census.unplanned,
         failed: owners.filter((owner) => owner.failed).length, active: state.active.size,
         rosterActive: state.rosterActive, rosterFailed: state.rosterFailed, rosterAtMs: state.rosterAtMs,
         requestPaused: paused(), requestStatus: state.requestStatus,
