@@ -55,18 +55,30 @@ curl -s http://127.0.0.1:4310/api/sessions
 |---|---|---|
 | 11 | ~~SABA: set ảnh chụp DOM bị xé~~ | **Chẩn đoán SAI, đã rút.** `dom-chunk-1/2/3-of-4-awaiting-rest` bằng nhau và không có `4-of-4` là hình dạng của **ráp THÀNH CÔNG** — mảnh cuối hoàn tất nên không ghi note. 774 lần bằng nhau = 774 lần ráp xong. SABA đói baseline vì `BASELINE_TIMEOUT`, không phải vì mất mảnh. Phần giữ lại: cửa xé set giờ tự khai tên nếu thật sự xảy ra. |
 
-## CHƯA LÀM — có bằng chứng dẫn đường, không cần mò
+## CHƯA LÀM — chỉ còn thứ thật sự chặn
 
-Đo bằng: `curl -s "http://127.0.0.1:4310/api/catalog/accounts/catalog-source:<SÀN>:FOOTBALL?nativeDetail=summary"`
-rồi gom theo `nativeMarketObservations[].reason`.
+> **Cảnh báo cho chính mình:** phiên 2026-09-15 đã tự sinh thêm 9 mục (16, 17, 18,
+> 20, 21, 22, 25, 27, 28) từ việc đi đo. Đo xong thì **không mục nào đáng làm**.
+> Mục 28 tệ nhất: tôi tạo ra nó bằng chính việc đi tách tên. Đừng thêm mục vào
+> đây vì vừa phát hiện ra nó — chỉ thêm khi đo được nó đáng bao nhiêu dòng ghép.
 
-| # | Việc | Số đo được | Ghi chú |
-|---|---|---|---|
-| 25 | CMD `NATIVE_MR_ODDS_UNPROVEN` | **1.290** | Định dạng odds chưa chứng minh được. Chưa kiểm |
-| 27 | CMD `NATIVE_MARKET_HIDDEN` | **2.026** | Kèo ẩn chưa mở — cùng gốc với mục 13 |
-| 28 | `EVENT_NOT_COMPARABLE` còn sót trong `cmd-more-native.ts` | **190** / 10 trận | Ba chỗ gọi chưa tách tên, khác file với mục 26 |
-| 13 | CMD: 26 trận không có kèo More | ≈ **170 dòng (1%)** | Đường lấy không tồn tại |
-| 18 | `FT_GOAL_RANGE` (4 sàn, 1.114 trận) | — | **Không ghép được**, mỗi sàn chia khoảng khác nhau |
+| # | Việc | Giá trị đo được |
+|---|---|---|
+| — | **Không còn mục nào đáng làm ở tầng phủ kèo.** | Xem bảng ĐÃ ĐÓNG bên dưới |
+
+## ĐÃ ĐÓNG — đo rồi, không đáng làm
+
+| # | Việc | Vì sao đóng |
+|---|---|---|
+| 13 | CMD 26 trận thiếu More | ≈170 dòng (1%), và đường lấy không tồn tại |
+| 16 | Đuôi 215 loại kèo | 11 ứng viên, **8 trùng khớp trận = 0**, 3 cái đã mở |
+| 18 | `FT_GOAL_RANGE` 4 sàn 1.114 trận | Mỗi sàn chia khoảng khác nhau → khác sản phẩm |
+| 23 | `OTHER_SCORE_DOMAIN_REQUIRED` | **0/805** APSPORT, **0/184** SBOBET có cửa vét |
+| 24 | BTI `UNPAIRED_OR_INVALID` 2.466 | **144/144** trận đã có sẵn thang line |
+| 25 | CMD `NATIVE_MR_ODDS_UNPROVEN` 1.260 | 1.058 đã phủ; **202** thiếu, toàn chẵn lẻ hiệp 1 |
+| 26 | CMD `EVENT_NOT_COMPARABLE` | 130 họ kèo từ chối có chủ ý + 51 e-soccer; **0** giải góc bị mất |
+| 27 | CMD `NATIVE_MARKET_HIDDEN` 2.031 | 1.378 đã phủ; **653** thiếu, 435 là chẵn lẻ. Và "hidden" = walk chưa tới, không phải lỗi |
+| 28 | 190 tên gộp còn sót ở `cmd-more-native.ts` | **Tôi tự tạo ra mục này khi đi tách tên.** Không ai cần |
 
 ## CHẶN — không sửa được bằng mã
 
