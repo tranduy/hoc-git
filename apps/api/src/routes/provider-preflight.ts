@@ -277,7 +277,14 @@ export function registerProviderPreflightRoutes(app: FastifyInstance, preflight:
       if (code === "PREFLIGHT_ACCOUNT_NOT_FOUND") return reply.code(404).send({ error: code });
       if (code === "PREFLIGHT_ACCOUNT_UNAVAILABLE") return reply.code(409).send({ error: code });
       if (code === "PREFLIGHT_IDENTITY_MISMATCH") return reply.code(422).send({ error: code });
-      return reply.code(503).send({ error: code === "PREFLIGHT_PROVIDER_UNSUPPORTED" ? code : "PREFLIGHT_UNAVAILABLE" });
+      if (code === "PREFLIGHT_PROVIDER_UNSUPPORTED") return reply.code(503).send({ error: code });
+      // Every other failure read as one word, so a preflight that never ran and
+      // one that ran and was refused looked identical from outside. Name the
+      // reason when it is one of our own codes, and nothing otherwise: provider
+      // text, hostnames and tokens must never leave through an error body.
+      const named = /^[A-Z][A-Z0-9_]{2,63}$/u.test(code) ? code : null;
+      return reply.code(503).send({ error: "PREFLIGHT_UNAVAILABLE",
+        ...(named === null ? {} : { reason: named }) });
     }
   });
   app.post("/api/preflight/realtime-check", async (request, reply) => {
