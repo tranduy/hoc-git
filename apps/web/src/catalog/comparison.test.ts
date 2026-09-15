@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import { buildComparisonEvents, COMPARISON_LIVE_LAG_LIMIT_MS, createCompetitionLinkMemory, livePricedCatalogs, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
+import { buildComparisonEvents, coherentLiveQuotes, COMPARISON_LIVE_LAG_LIMIT_MS,
+  createCompetitionLinkMemory, livePricedCatalogs, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, selectionHandicapLine, selectionLabel, ticketMarketLabel,
   decimalOdds } from "./comparison.js";
 
@@ -1160,5 +1161,40 @@ describe("in-play prices from a book read too long ago", () => {
       catalog("APSPORT", now - (COMPARISON_LIVE_LAG_LIMIT_MS - 1), [quote(true), quote(false)])
     ]);
     expect(inside?.quotes).toHaveLength(2);
+  });
+});
+
+describe("a live market left behind by its own book", () => {
+  const quote = (marketType: string, sequence: number, isLive = true) =>
+    ({ provider: "APSPORT", providerEventId: "e1", marketType, selection: "HOME",
+      rawOdds: "1.90", status: "OPEN", isLive, sequence }) as unknown as ProviderQuote;
+  const catalog = (quotes: readonly ProviderQuote[]) =>
+    ({ provider: "APSPORT", accountId: "catalog-source:APSPORT:FOOTBALL",
+      observedAtMs: 1_700_000_000_000, events: [], markets: [], quotes }) as unknown as LiveCatalogResponse;
+
+  it("drops the market that trails its own fixture", () => {
+    // Measured 2026-09-15: Sporting Lisbon U23 had FT_1X2 at sequence 44,773
+    // calling home a near certainty while FT_DOUBLE_CHANCE sat at 27,679 still
+    // pricing the balanced game, and the pair read as a 66% arbitrage.
+    const [kept] = coherentLiveQuotes([catalog([
+      quote("FT_1X2", 44_773), quote("FT_DOUBLE_CHANCE", 27_679)
+    ])]);
+    expect(kept?.quotes.map((item) => item.marketType)).toEqual(["FT_1X2"]);
+  });
+
+  it("keeps markets a book published together", () => {
+    // CMD, SBOBET and BTI published every market of a live fixture at one
+    // sequence; SABA's widest spread was 74. Only APSPORT walks them apart.
+    const [kept] = coherentLiveQuotes([catalog([
+      quote("FT_1X2", 44_773), quote("FT_DOUBLE_CHANCE", 44_773 - 74)
+    ])]);
+    expect(kept?.quotes).toHaveLength(2);
+  });
+
+  it("never touches prematch prices, which do not move on a clock", () => {
+    const [kept] = coherentLiveQuotes([catalog([
+      quote("FT_1X2", 44_773), quote("FT_DOUBLE_CHANCE", 27_679, false)
+    ])]);
+    expect(kept?.quotes).toHaveLength(2);
   });
 });

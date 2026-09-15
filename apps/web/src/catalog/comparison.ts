@@ -1728,10 +1728,58 @@ export function livePricedCatalogs(
     });
 }
 
+/**
+ * How far a live market may trail the freshest market of its own fixture, at
+ * its own book, and still be priced.
+ *
+ * Four of the five books publish every market of a live fixture at one
+ * sequence: measured 2026-09-15, the per-fixture spread was 0 at CMD, SBOBET
+ * and BTI, and at most 74 at SABA. APSPORT is walked group by group over
+ * minutes instead, and its live fixtures spread across about fifty thousand
+ * sequences - half of them at 49,680 or worse. Its markets therefore describe
+ * different moments of the same match.
+ *
+ * That is how a decided game produced a 66% edge: Sporting Lisbon U23 had
+ * FT_1X2 at sequence 44,773 saying home was a near certainty and
+ * FT_DOUBLE_CHANCE at 27,679 still pricing the balanced game it had been
+ * seventeen thousand sequences earlier. freshestProviderCells could not see it,
+ * because it compares a provider's cells inside one row and the evidence was
+ * in another row of the same fixture.
+ *
+ * Prematch is deliberately untouched: those prices do not move on a clock.
+ */
+export const COMPARISON_LIVE_FIXTURE_SEQUENCE_LAG = 500;
+
+/**
+ * Drop live quotes that trail their own book's newest sequence for the same
+ * fixture. This is the fixture-scope twin of freshestProviderCells, which sees
+ * only one row at a time.
+ */
+export function coherentLiveQuotes(
+  catalogs: readonly LiveCatalogResponse[],
+  lagLimit: number = COMPARISON_LIVE_FIXTURE_SEQUENCE_LAG
+): readonly LiveCatalogResponse[] {
+  return catalogs.map((catalog) => {
+    const newestByEvent = new Map<string, number>();
+    for (const quote of catalog.quotes) {
+      if (!quote.isLive || typeof quote.sequence !== "number" || !Number.isFinite(quote.sequence)) continue;
+      const seen = newestByEvent.get(quote.providerEventId);
+      if (seen === undefined || quote.sequence > seen) newestByEvent.set(quote.providerEventId, quote.sequence);
+    }
+    if (newestByEvent.size === 0) return catalog;
+    const quotes = catalog.quotes.filter((quote) => {
+      if (!quote.isLive || typeof quote.sequence !== "number" || !Number.isFinite(quote.sequence)) return true;
+      const newest = newestByEvent.get(quote.providerEventId);
+      return newest === undefined || newest - quote.sequence <= lagLimit;
+    });
+    return quotes.length === catalog.quotes.length ? catalog : { ...catalog, quotes };
+  });
+}
+
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
   competitionMemory?: CompetitionLinkMemory,
   options: { readonly playerComparisonsOnly?: boolean } = {}): readonly ComparisonEvent[] {
-  const orderedCatalogs = sortProviderItems(withScheduledPhase(livePricedCatalogs(catalogs)),
+  const orderedCatalogs = sortProviderItems(withScheduledPhase(coherentLiveQuotes(livePricedCatalogs(catalogs))),
     (catalog) => catalog.provider,
     (left, right) => left.accountId.localeCompare(right.accountId));
   const catalogIndexes = new Map<LiveCatalogResponse, {
