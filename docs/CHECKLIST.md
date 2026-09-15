@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | **19.253** dòng / 866 trận, 2.025 trận khớp | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | **14.532** dòng / 836 trận *(BTI đang hỏng, xem mục 29)*; mức bình thường **19.253** | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
@@ -57,14 +57,14 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 ## CHƯA LÀM — chỉ còn thứ thật sự chặn
 
-> **Cảnh báo cho chính mình:** phiên 2026-09-15 đã tự sinh thêm 9 mục (16, 17, 18,
-> 20, 21, 22, 25, 27, 28) từ việc đi đo. Đo xong thì **không mục nào đáng làm**.
-> Mục 28 tệ nhất: tôi tạo ra nó bằng chính việc đi tách tên. Đừng thêm mục vào
-> đây vì vừa phát hiện ra nó — chỉ thêm khi đo được nó đáng bao nhiêu dòng ghép.
+> **Cảnh báo cho chính mình:** phiên 2026-09-15 đã tự sinh thêm 9 mục từ việc đi
+> đo. Đo xong thì không mục nào đáng làm. Đừng thêm mục vào đây vì vừa phát hiện
+> ra nó — chỉ thêm khi đo được nó đáng bao nhiêu dòng ghép.
 
-| # | Việc | Giá trị đo được |
-|---|---|---|
-| — | **Không còn mục nào đáng làm ở tầng phủ kèo.** | Xem bảng ĐÃ ĐÓNG bên dưới |
+| # | Việc | Số đo được | Ai làm được |
+|---|---|---|---|
+| 29 | **BTI kẹt `HARD_RECOVERY`** | baseline cũ **752s** (ngưỡng 90s), `quoteChanges300s=0`, market **82.942 → 29.618**. Bảng mất **4.721 dòng (-25%)** | **Người vận hành.** Envelope vẫn về (`lastSeq` tăng, tuổi 2,3s) nên tab sống; nhưng `awaiting-list-live-initial` không bao giờ xong. Đường relaunch bị `browserRefreshEnabled=false` đóng; ảnh chụp sảnh đã thử **15 lần** không lên |
+| 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
 
