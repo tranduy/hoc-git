@@ -1144,6 +1144,44 @@ export function exactTwoWayOutcomeDomain(marketType: string, scope: string,
   return null;
 }
 
+/**
+ * Markets whose three outcomes partition every result and never push, so a leg
+ * on each is covered whatever happens. Named one by one rather than matched by
+ * selection pattern: each entry is an assertion about settlement, and the cost
+ * of being wrong is a ticket that looks covered and is not.
+ *
+ * All four books publish corner 1X2, and nothing could ever build a ticket from
+ * it: the opposition route needs a double-chance complement no book offers, and
+ * the two-way route is gated at exactly two legs.
+ */
+const partitionMarkets: Readonly<Record<string, readonly string[]>> = {
+  CORNER_FT_1X2: ["AWAY", "DRAW", "HOME"], CORNER_FH_1X2: ["AWAY", "DRAW", "HOME"],
+  CARD_FT_1X2: ["AWAY", "DRAW", "HOME"], CARD_FH_1X2: ["AWAY", "DRAW", "HOME"],
+  YELLOW_CARD_FT_1X2: ["AWAY", "DRAW", "HOME"]
+};
+
+/** The full outcome set of a no-push partition market, or null. */
+export function exactPartitionOutcomeDomain(marketType: string, scope: string,
+  line: string | null): readonly string[] | null {
+  const outcomes = partitionMarkets[marketType];
+  if (outcomes === undefined || line !== null) return null;
+  const spec = footballCategoricalMarketSpec(marketType as MarketType);
+  if (spec === null || spec.scope !== scope || spec.linePolicy !== "NONE") return null;
+  return outcomes.every((outcome) => isFootballCategoricalSelection(marketType as MarketType, outcome))
+    ? outcomes : null;
+}
+
+/**
+ * Worst case across a full partition is the same in every branch, so the margin
+ * is the plain book sum. No push means no stake fraction to optimise over, which
+ * is why this cannot go through the two-way settlement model.
+ */
+function partitionMargin(odds: readonly number[]): number | null {
+  if (odds.length < 2 || odds.some((value) => !Number.isFinite(value) || value <= 1)) return null;
+  const margin = 1 / odds.reduce((sum, value) => sum + 1 / value, 0) - 1;
+  return Math.abs(margin) < 1e-12 ? 0 : margin;
+}
+
 type OppositionContract = Pick<ComparisonRow, "marketType" | "scope" | "line" | "opposition">;
 
 export function comparisonOutcomeDomain(row: OppositionContract): readonly string[] | null {
@@ -1198,6 +1236,40 @@ export function distinctResultSourceCells(cells: readonly ComparisonCell[]): rea
     other.market.providerMarketId === cell.market.providerMarketId).length === 1 &&
     !cells.some(other => other.provider === cell.provider && other.market.providerEventId !== cell.market.providerEventId));
 }
+
+function partitionRows(rawCells: readonly ComparisonCell[]): readonly ObservedTicketRow[] {
+    const byContract = new Map<string, { domain: readonly string[]; cells: ComparisonCell[] }>();
+    for (const cell of rawCells) {
+      const { marketType, scope, line, settlementProfile } = cell.market;
+      const domain = exactPartitionOutcomeDomain(marketType, scope, line);
+      if (domain === null) continue;
+      // The same contradiction guards the opposition route applies: one quote
+      // per outcome, one native market, one generation, and nothing borrowed
+      // from another fixture.
+      const selections = cell.quotes.map((quote) => quote.selection);
+      if (selections.length !== domain.length || new Set(selections).size !== selections.length ||
+        [...selections].sort().join("|") !== [...domain].join("|") ||
+        new Set(cell.quotes.map((quote) => quote.providerSelectionId)).size !== selections.length ||
+        new Set(cell.quotes.map((quote) => quote.sequence)).size !== 1 ||
+        cell.quotes.some((quote) => quote.provider !== cell.provider ||
+          quote.category !== cell.market.category ||
+          quote.providerEventId !== cell.market.providerEventId ||
+          quote.providerMarketId !== cell.market.providerMarketId ||
+          quote.marketType !== marketType || quote.scope !== scope || quote.line !== null)) continue;
+      const key = [marketType, scope, settlementProfile].join("|");
+      const entry = byContract.get(key) ?? { domain, cells: [] };
+      entry.cells.push(cell);
+      byContract.set(key, entry);
+    }
+    const rows: ObservedTicketRow[] = [];
+    for (const [key, { domain, cells }] of byContract) {
+      if (new Set(cells.map((cell) => cell.provider)).size < 2) continue;
+      rows.push({ key: `PARTITION|${key}`, marketType: cells[0]!.market.marketType,
+        scope: cells[0]!.market.scope, line: null,
+        settlementProfile: cells[0]!.market.settlementProfile, outcomeDomain: domain, cells });
+    }
+    return rows.sort((left, right) => left.key.localeCompare(right.key));
+  }
 
 function resultOppositionRows(rawCells: readonly ComparisonCell[]): readonly ObservedTicketRow[] {
   const result: ObservedTicketRow[] = [];
@@ -1481,8 +1553,12 @@ export function observedTicketAsComparisonRow(ticket: ObservedTicketRow): Compar
     const quote = ticket.cells.find((cell) => cell.provider === provider)?.quotes.find((item) => item.selection === selection);
     return quote === undefined ? null : decimalOdds(quote);
   });
-  const margin = bestOdds.length === 2 && bestOdds.every((value): value is number => value !== null)
-    ? settlementMargin(ticket.marketType, ticket.scope, ticket.line, bestOdds) : null;
+  const complete = bestOdds.every((value): value is number => value !== null);
+  const partition = exactPartitionOutcomeDomain(ticket.marketType, ticket.scope, ticket.line);
+  const margin = !complete ? null
+    : partition !== null && [...ticket.outcomeDomain].join("|") === [...partition].join("|")
+      ? partitionMargin(bestOdds)
+      : bestOdds.length === 2 ? settlementMargin(ticket.marketType, ticket.scope, ticket.line, bestOdds) : null;
   const crossBook = new Set(Object.values(bestBySelection)).size >= 2;
   return { key: ticket.key, marketType: ticket.marketType, scope: ticket.scope, line: ticket.line,
     cells: ticket.cells, bestBySelection, crossBook,
@@ -1825,7 +1901,8 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
         }
       }
     }
-    const resultRows = resultOppositionRows([...rowGroups.values()].flat());
+    const resultRows = [...resultOppositionRows([...rowGroups.values()].flat()),
+      ...partitionRows([...rowGroups.values()].flat())];
     // More than one settlement contract can each have a valid cross-book pair.
     // Keep those independent rows; selecting the largest cluster loses the rest.
     // A lone compatible cluster keeps its existing display/key behavior.
