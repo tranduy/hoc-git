@@ -88,8 +88,8 @@ describe("normalizeCmdCatalog", () => {
         ...(explicitProviderDate === undefined ? {} : { explicitProviderDate }) };
       expect(normalizeObservedFootballCatalog("SABA", [input], options).events).toEqual([]);
       expect(observeNativeCmdMarkets("SABA", [input], options)).toEqual([
-        expect.objectContaining({ providerMarketId: "total-1", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" }),
-        expect.objectContaining({ providerMarketId: "unknown-native", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" })
+        expect.objectContaining({ providerMarketId: "total-1", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" }),
+        expect.objectContaining({ providerMarketId: "unknown-native", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" })
       ]);
     });
 
@@ -373,11 +373,11 @@ describe("normalizeCmdCatalog", () => {
       disposition: observation.disposition,
       reason: observation.reason
     }))).toEqual([
-      { providerMarketId: "1058624279", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" },
-      { providerMarketId: "1058624277", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" },
-      { providerMarketId: "1058624275", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" },
-      { providerMarketId: "1062389532", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" },
-      { providerMarketId: "1062389533", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" }
+      { providerMarketId: "1058624279", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" },
+      { providerMarketId: "1058624277", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" },
+      { providerMarketId: "1058624275", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" },
+      { providerMarketId: "1062389532", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" },
+      { providerMarketId: "1062389533", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" }
     ]);
   });
 
@@ -833,7 +833,7 @@ describe("SABA multi-match aggregate accounting", () => {
     const inventory = observeNativeCmdMarkets("SABA", actual, options);
     expect(inventory).toHaveLength(15);
     expect(inventory.every(({ disposition, reason }) => disposition === "EXCLUDED" &&
-      reason === "EVENT_NOT_COMPARABLE")).toBe(true);
+      reason === "EVENT_MULTI_MATCH_AGGREGATE")).toBe(true);
     expect(new Set(inventory.map(({ providerMarketId }) => providerMarketId))).toEqual(new Set(
       actual.flatMap(({ groups: nativeGroups }) => nativeGroups.map((group) => group.odds[0]!.marketOddsId))));
 
@@ -852,5 +852,32 @@ describe("SABA multi-match aggregate accounting", () => {
     const result = normalizeObservedFootballCatalog("SABA", [fixture("near", leagueName, teamNames)], options);
     expect(result.events).toHaveLength(1);
     expect(result.markets).toHaveLength(5);
+  });
+});
+
+describe("why an event is not comparable", () => {
+  it("names the condition instead of one word for five of them", () => {
+    // Measured 2026-09-15: CMD refused 1,773 markets across 197 fixtures under
+    // a single EVENT_NOT_COMPARABLE, and nothing said whether that was e-soccer
+    // working as intended or the classifier failing on real football. Those two
+    // want opposite responses and read identically.
+    const record = (changes: Record<string, unknown>) => ({
+      sportId: "1", matchId: "m1", leagueName: "Premier League",
+      teamNames: ["Arsenal", "Chelsea"], timeText: "09/08 01:45AM",
+      groups: [{ betTypeIds: ["MAIN:2"], labels: ["ODD", "EVEN"],
+        odds: ["0.97", "0.91"].map((priceText) => ({ marketOddsId: "native:MAIN:2", priceText,
+          status: null, greyedOut: null })) }], ...changes
+    });
+    const options = { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 123,
+      timezoneOffsetMinutes: 480, sequence: 7 };
+    const reasons = (input: ReturnType<typeof record>): string | null => {
+      const [observation] = observeNativeCmdMarkets("CMD", [input as never], options);
+      return observation?.reason ?? null;
+    };
+
+    expect(reasons(record({ sportId: "2" }))).toBe("EVENT_NOT_FOOTBALL");
+    expect(reasons(record({ matchId: "   " }))).toBe("EVENT_ID_MISSING");
+    expect(reasons(record({ leagueName: "FANTASY MATCHES" }))).toBe("EVENT_SETTLEMENT_FAMILY_UNSUPPORTED");
+    expect(reasons(record({ leagueName: "E-SOCCER LEAGUE" }))).toBe("EVENT_VIRTUAL_FOOTBALL");
   });
 });

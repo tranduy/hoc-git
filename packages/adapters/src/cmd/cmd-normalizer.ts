@@ -270,6 +270,38 @@ function classifyCmdEvent(rawCompetition: string, rawTeams: readonly string[]): 
   return { competition, teams: normalizedDistinctTeams(rawTeams), family: "GOALS" };
 }
 
+/**
+ * Which condition makes an event incomparable, or null when none does.
+ *
+ * Five unrelated situations used to leave here as the same EVENT_NOT_COMPARABLE
+ * and the name could not say which: a row that is not football, one with no
+ * match id, a settlement family we deliberately refuse (specific-minutes,
+ * advance-to-next-round, fantasy, a malformed corner or card league), a
+ * simulated or e-soccer fixture, and a SABA aggregate or unresolved kickoff.
+ *
+ * Measured 2026-09-15: CMD refused 1,773 markets across 197 fixtures under the
+ * single name, and nothing in the record said whether that was e-soccer working
+ * as intended or the classifier failing on real football. The first is fine and
+ * the second is a bug, and they read identically.
+ */
+function eventComparabilityRefusal(input: {
+  readonly sportId: string;
+  readonly matchId: string;
+  readonly classified: { readonly competition: string; readonly teams: readonly string[] } | null;
+  readonly isSabaAggregate: boolean;
+  readonly timeUnresolved: boolean;
+}): string | null {
+  if (input.sportId !== "1") return "EVENT_NOT_FOOTBALL";
+  if (input.matchId.trim() === "") return "EVENT_ID_MISSING";
+  if (input.classified === null) return "EVENT_SETTLEMENT_FAMILY_UNSUPPORTED";
+  if (virtualFootballEvidence(input.classified.competition, input.classified.teams)) {
+    return "EVENT_VIRTUAL_FOOTBALL";
+  }
+  if (input.isSabaAggregate) return "EVENT_MULTI_MATCH_AGGREGATE";
+  if (input.timeUnresolved) return "EVENT_TIME_UNRESOLVED";
+  return null;
+}
+
 function virtualFootballEvidence(competition: string, teams: readonly string[]): boolean {
   const label = competition.normalize("NFKC").toLocaleLowerCase("en");
   if (/(?:soccer marble|e[\s-]?soccer|\bvirtual\b|simulated reality|spinner world cup|\bpes\b|ảo|điện tử)/u.test(label)) return true;
@@ -473,9 +505,11 @@ export function observeNativeCmdMarkets(
     const unsupportedPeriod = classified !== null && observedEventScope(classified.teams) !== "REGULATION";
     const isSabaAggregate = provider === "SABA" &&
       isSabaMultiMatchAggregate(record.leagueName, record.teamNames);
-    const comparableEvent = record.sportId === "1" && record.matchId.trim() !== "" && classified !== null &&
-      !virtualFootballEvidence(classified.competition, classified.teams) && !isSabaAggregate &&
-      (provider !== "SABA" || recordEventTime(provider, record, options) !== null);
+    const comparabilityRefusal = eventComparabilityRefusal({
+      sportId: record.sportId, matchId: record.matchId, classified, isSabaAggregate,
+      timeUnresolved: provider === "SABA" && recordEventTime(provider, record, options) === null
+    });
+    const comparableEvent = comparabilityRefusal === null;
     for (const [groupIndex, group] of record.groups.entries()) {
       const nativeType = group.betTypeIds.length === 0 ? "UNKNOWN" : group.betTypeIds.join("+");
       const uniqueIds = [...new Set(group.odds.map((odd) => odd.marketOddsId.trim()).filter(Boolean))];
@@ -525,7 +559,7 @@ export function observeNativeCmdMarkets(
       const disposition: NativeMarketObservation["disposition"] = !comparableEvent || unsupportedPeriod || group.normalizationBlockReason !== undefined ||
         group.betTypeIds.length !== 1 || semantics !== null && !validShape || threeWay && !resultMarket
         ? "EXCLUDED" : semantics === null ? "UNMAPPED" : "NORMALIZED";
-      const reason = !comparableEvent ? "EVENT_NOT_COMPARABLE"
+      const reason = comparabilityRefusal !== null ? comparabilityRefusal
         : unsupportedPeriod ? "EVENT_PERIOD_SETTLEMENT_UNSUPPORTED"
         : group.normalizationBlockReason !== undefined ? group.normalizationBlockReason
         : group.betTypeIds.length !== 1 ? "AMBIGUOUS_NATIVE_TYPE"
