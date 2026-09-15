@@ -45,6 +45,8 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 20 | Vì sao 20% bảng không có giá | **3.408/3.408** là "một sàn tốt nhất ở mọi cửa" — đúng thiết kế. 0 dòng thiếu chân | `whyUnpriced` |
 | 21 | Trần kèo góc, đo qua bộ ghép thật | **49** trận có góc ở ≥2 sàn / 2.025 trận; **302** dòng góc | `cornerCoverage` |
 | 22 | Kèo góc có bị thu sót không | **Không.** SBOBET **0**, CMD **0** kèo góc thấy-mà-không-chuẩn-hoá-được | `nativeMarketObservations` |
+| 30 | BTI collector giờ tự khai | `BTI_COV[chars:N]` → `BTI_COV[phase:…;failed:…;requestStatus:…;authBlocked:…]`. Chính nó cho ra `none` và chốt được chẩn đoán mục 29 | `catalogShape` trong `/api/diag/pipeline` |
+| 31 | Sweep gia hạn tự giữ backoff | 8 lần thử/giờ → **1 lần mỗi 5→60 phút**, và nói rõ đợi bao lâu | `%LOCALAPPDATA%/tool-chenh/maintenance/events.jsonl` |
 | 24 | BTI `UNPAIRED_OR_INVALID_NATIVE_SELECTIONS` — **không phải lỗ hổng** | 2.466 market/144 trận là bản tổng hợp trùng; **144/144 trận đã có sẵn** cả thang tài xỉu lẫn kèo chấp. **0** trận bị từ chối mà không có gì thay thế | `nativeDetail=summary` |
 | 23 | `OTHER_SCORE_DOMAIN_REQUIRED` — **trần thật** | APSPORT **0/805**, SBOBET **0/184** market có cửa vét "tỉ số khác". Không có cửa đó thì không định giá được | `nativeDetail=summary` |
 | 26 | CMD `EVENT_NOT_COMPARABLE` — tách 5 nguyên nhân | 1.170/130 trận họ kèo bị từ chối có chủ ý · 459/51 e-soccer · 190/10 còn sót. **`EVENT_STATISTIC_LEAGUE_UNRESOLVED` = 0** → không mất giải góc nào | `nativeDetail=summary` |
@@ -63,7 +65,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI kẹt `HARD_RECOVERY`** | baseline **841s** (ngưỡng 90s), `quoteChanges300s=0`, market **82.942 → 29.618**, bảng mất **4.721 dòng (-25%)**. Gốc: BTI commit **một** generation (`commit-listed-events-1000+:1`) rồi không đúc generation mới; mọi payload sau bị từ chối `generation-already-committed` (**441**). Cổng đó **đúng** — phát lại cùng generation không cập nhật được gì. | **Chặn ở chẩn đoán.** BTI là sàn **duy nhất** không phơi bộ đếm collector: CMD có `CMD_NATIVE`, SBOBET có `SBO_DISCOVERY`, APSPORT có `AP_WALK/AP_DET/AP_MG`, BTI chỉ có `BTI_COV[chars:N]`. Không truy được vì sao generation đứng |
+| 29 | **BTI tối hẳn — kẹt ở `CANDIDATE`** | 5/6 sàn `tab=ACTIVE hop5=ACTIVE`; **BTI `tab=CANDIDATE hop5=NONE`**, `HTTP_RESPONSE=0`, `decoded=0`, `BTI_COV[none]`, 0 dòng từ chối. Tab vẫn sống (`TAB_STATE=91`, keepalive ok) nhưng không phát lưu lượng catalog nào. Catalog đóng băng 2.347s, market 29.618, bảng mất **4.721 dòng (-25%)**. Restart API **làm tệ hơn**: trước đó `ACTIVE` với generation cũ, sau đó `CANDIDATE` và không gì cả. | Nguồn gắn vào dạng CANDIDATE mà **không bao giờ được thăng lên ACTIVE** (`attachAuthority` → `#reconcileAuthoritySlot`). Chưa truy tiếp |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
