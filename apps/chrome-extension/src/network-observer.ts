@@ -7175,10 +7175,20 @@ export class NetworkObserver {
         apsportGroupCensusShape() + ' ' + apsportBodyCensusShape() + ' ' + existing).slice(0, 900);
     }
     if (source.lobby === "BTI") {
-      // Say how much collector coverage arrived, so an empty page-health probe
-      // can be told apart from a collector that published nothing at all.
+      // The collector already reports its own coverage - phase, league and
+      // event counts, request status, whether auth blocked it - and this used
+      // to print the LENGTH of that string and throw the content away.
+      //
+      // Measured 2026-09-16: BTI sat in HARD_RECOVERY for twenty-nine minutes
+      // with its catalog frozen and no quote changing, and the only collector
+      // fact available was BTI_COV[chars:1918]. Every other book names its own
+      // steps (CMD_NATIVE, SBO_DISCOVERY, AP_WALK/AP_DET/AP_MG); BTI was the
+      // one book that could not say why it stopped.
+      //
+      // Counts and phase names only, which is what the collector already
+      // gathers - no values, no targets, no identifiers.
       const reported = this.#btiCollectorCoverage.get(source.sourceId);
-      return (`BTI_COV[chars:${reported?.length ?? 0}] ` + existing).slice(0, 900);
+      return (`BTI_COV[${btiCoverageShape(reported)}] ` + existing).slice(0, 900);
     }
     return source.lobby === "KSPORT" ? (`SBO_PAUSE[${this.#sbobetLastFailureLane};` +
       `status:${this.#sbobetRequestBackoff.lastStatus()};waitMs:${this.#sbobetRequestBackoff.retryInMs()}] ` +
@@ -10307,6 +10317,38 @@ function uniqueObjects<T>(items: readonly T[]): readonly T[] {
     seen.add(key);
     return true;
   });
+}
+
+/**
+ * The fields of the BTI collector coverage that explain a stall, in the order
+ * a reader needs them: which phase it reached, what it refused, whether its
+ * requests are paused or blocked, and how much it actually found.
+ *
+ * Shape only. Every field here is a phase name, a boolean or a count that the
+ * collector already computes; no values, targets or identifiers pass through.
+ */
+const BTI_COVERAGE_FIELDS = ["phase", "failed", "rosterRefreshFailed", "authBlocked",
+  "requestPaused", "requestStatus", "requestRetryInMs", "liveLeagues", "prematchLeagues",
+  "earlyLeagues", "events", "validEvents", "detailPendingEvents", "detailFailedEvents",
+  "detailCoverageComplete"] as const;
+
+export function btiCoverageShape(reported: string | undefined): string {
+  if (reported === undefined || reported.length === 0) return "none";
+  let parsed: unknown;
+  try { parsed = JSON.parse(reported); } catch { return `unparsable:${reported.length}`; }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return `not-an-object:${reported.length}`;
+  }
+  const record = parsed as Record<string, unknown>;
+  const parts: string[] = [];
+  for (const field of BTI_COVERAGE_FIELDS) {
+    const value = record[field];
+    if (value === undefined) continue;
+    if (typeof value === "string") { if (/^[A-Za-z_]{1,32}$/u.test(value)) parts.push(`${field}:${value}`); continue; }
+    if (typeof value === "boolean") { parts.push(`${field}:${value ? 1 : 0}`); continue; }
+    if (typeof value === "number" && Number.isFinite(value)) parts.push(`${field}:${Math.round(value)}`);
+  }
+  return parts.length === 0 ? `no-known-fields:${reported.length}` : parts.join(";");
 }
 
 function collectFrameIds(value: unknown): string[] {
