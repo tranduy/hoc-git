@@ -48,6 +48,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 30 | BTI collector giờ tự khai | `BTI_COV[chars:N]` → `BTI_COV[phase:…;failed:…;requestStatus:…;authBlocked:…]`. Chính nó cho ra `none` và chốt được chẩn đoán mục 29 | `catalogShape` trong `/api/diag/pipeline` |
 | 31 | Sweep gia hạn tự giữ backoff | 8 lần thử/giờ → **1 lần mỗi 5→60 phút**, và nói rõ đợi bao lâu | `%LOCALAPPDATA%/tool-chenh/maintenance/events.jsonl` |
 | 32 | Ứng viên kẹt được hỏi lại | Trước: **1 lần/nhiệm kỳ**. Sau: nonce vẫn chặn spam mỗi ACK, nhưng ứng viên còn là ứng viên sau **60s** thì hỏi lại | `chrome-bridge-route.test.ts` |
+| 33 | Collector đang chờ tự khai là đang chờ | `cancelled()` trước trả **không có `coverage`** → `BTI_COV[none]`, giống hệt "không có collector". Giờ mang `phase:PAUSED\|ROSTER_BACKOFF\|SESSION_LOST\|CANCELLED` kèm `authBlocked`, `requestStatus`, backoff còn lại | `bti-coverage-shape.test.ts` |
 | 24 | BTI `UNPAIRED_OR_INVALID_NATIVE_SELECTIONS` — **không phải lỗ hổng** | 2.466 market/144 trận là bản tổng hợp trùng; **144/144 trận đã có sẵn** cả thang tài xỉu lẫn kèo chấp. **0** trận bị từ chối mà không có gì thay thế | `nativeDetail=summary` |
 | 23 | `OTHER_SCORE_DOMAIN_REQUIRED` — **trần thật** | APSPORT **0/805**, SBOBET **0/184** market có cửa vét "tỉ số khác". Không có cửa đó thì không định giá được | `nativeDetail=summary` |
 | 26 | CMD `EVENT_NOT_COMPARABLE` — tách 5 nguyên nhân | 1.170/130 trận họ kèo bị từ chối có chủ ý · 459/51 e-soccer · 190/10 còn sót. **`EVENT_STATISTIC_LEAGUE_UNRESOLVED` = 0** → không mất giải góc nào | `nativeDetail=summary` |
@@ -66,7 +67,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI tối hẳn** — trang không còn collector | Ép refresh bằng `POST /api/chrome-bridge/request-snapshot` (chạy trong trang, **không** navigate/reload — `snapshotRecoveryMode` trả `CATALOG_REFRESH` cho mọi sàn): trả **504 `PROVIDER_FEED_BASELINE_TIMEOUT`**. Sau đó vẫn `BTI_COV[none]`, `HTTP_RESPONSE=0`, `decoded=0`, `ingestRejections=TAB_STATE_TRANSPORT…`, `activeGeneration=null`. **`none` chứ không phải `phase:FAILED`** — collector không có trong trang, chứ không phải chạy rồi hỏng. Catalog **3.768s**, bảng thiếu **4.721 dòng (-25%)**. | **Người vận hành mở lại tab BTI.** Mọi đường tự động đã thử: ảnh chụp sảnh 15 lần, retry ứng viên (mục 32), ép refresh trực tiếp |
+| 29 | **BTI: biểu thức refresh treo, không trả về** | Trang BTI **đang chạy, có kèo, không cần login** (ảnh chụp 2026-09-16). Nhưng `HTTP_RESPONSE=0`, `decoded=0`, catalog **6.086s**. Ép `POST /api/chrome-bridge/request-snapshot` hai lần → **504** cả hai. Sau mục 33 (đặt tên mọi lối thoát sớm) vẫn `BTI_COV[none]` ⇒ biểu thức **không trả về trong 60s**, tức treo ở một `fetch` không bao giờ xong — không phải thoát sớm, không phải vắng collector. | Chưa truy tiếp: cần biết `fetch('/api/eventlist/asia/leagues/v2/1/…')` từ origin `prod20091.fxf774.com` trả gì. Đó là quan sát trong trang, ngoài tầm tôi |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
@@ -117,6 +118,8 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"16 chữ số thập phân = giá bịa"** — sai, 931/942 quote APSPORT đều vậy.
 - **"Ô chứa quote của line khác"** — sai, `candidates=1`, line khớp hết.
 - **"APSPORT live còn sàn khác prematch"** — sai, `rows split on phase: 0`.
+- **"BTI tối vì tab không còn là trang ứng dụng"** — SAI. Ảnh chụp cho thấy trang
+  đang chạy, có kèo, không cần login. Đúng là: biểu thức refresh treo, không trả về.
 - **Đổi tên lý do từ chối trong `saba-football-normalizer`** — phình phạm vi giữa
   lúc sửa BTI, làm đỏ 5 test không liên quan. Đã hoàn nguyên. Việc đó không dính
   gì tới lỗi đang sửa.
