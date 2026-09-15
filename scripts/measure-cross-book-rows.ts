@@ -118,6 +118,7 @@ async function main(): Promise<void> {
   livePositiveSplit(built as readonly unknown[]);
   cmdMoreValue(built as readonly unknown[], catalogs as never);
   marginBearingMarkets(built as readonly unknown[]);
+  unusedMarketTypes(built as readonly unknown[], catalogs as never);
   top(pairCounts, "by book pair", 15);
   top(marketCounts, "by market type", 15);
 }
@@ -509,6 +510,46 @@ export function marginBearingMarkets(built: readonly unknown[]): void {
 `);
   for (const [type, count] of unpriced.sort((a, b) => b[1] - a[1]).slice(0, 8)) {
     process.stdout.write(`      ${type.padEnd(30)} rows=${count}
+`);
+  }
+}
+
+/**
+ * Market types the books publish that reach no row at all. Each one is a book's
+ * inventory the board collects, stores and never compares - the state
+ * FT_HALF_FULL_RESULT and FT_RESULT_BTTS were in until 2026-09-15. Ranked by
+ * how many books carry it, because a type only one book publishes can never
+ * produce a cross-book row however it is priced.
+ */
+export function unusedMarketTypes(built: readonly unknown[],
+  catalogs: readonly { provider?: string;
+    quotes?: readonly { marketType?: string; providerEventId?: string }[] }[]): void {
+  const inRows = new Set<string>();
+  for (const event of built as readonly { rows: readonly { marketType: string }[] }[]) {
+    for (const row of event.rows) inRows.add(row.marketType);
+  }
+  const books = new Map<string, Set<string>>();
+  const fixtures = new Map<string, Set<string>>();
+  for (const catalog of catalogs) {
+    for (const quote of catalog.quotes ?? []) {
+      const type = String(quote.marketType);
+      if (inRows.has(type)) continue;
+      const bookSet = books.get(type) ?? new Set<string>();
+      bookSet.add(String(catalog.provider));
+      books.set(type, bookSet);
+      const fixtureSet = fixtures.get(type) ?? new Set<string>();
+      fixtureSet.add(`${catalog.provider}|${quote.providerEventId}`);
+      fixtures.set(type, fixtureSet);
+    }
+  }
+  const ranked = [...books].sort((a, b) => b[1].size - a[1].size ||
+    (fixtures.get(b[0])?.size ?? 0) - (fixtures.get(a[0])?.size ?? 0));
+  process.stdout.write(`
+market types collected but never compared: ${ranked.length}
+`);
+  for (const [type, bookSet] of ranked.slice(0, 20)) {
+    process.stdout.write(`  ${type.padEnd(34)} books=${bookSet.size}  ` +
+      `bookFixtures=${fixtures.get(type)?.size ?? 0}  [${[...bookSet].sort().join(",")}]
 `);
   }
 }

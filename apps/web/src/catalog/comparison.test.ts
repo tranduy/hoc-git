@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
+import type { ComparisonCell } from "./comparison.js";
 import { buildComparisonEvents, coherentLiveQuotes, COMPARISON_LIVE_LAG_LIMIT_MS, partitionRowsForTest,
   createCompetitionLinkMemory, livePricedCatalogs, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, selectionHandicapLine, selectionLabel, ticketMarketLabel,

@@ -1205,7 +1205,21 @@ const partitionMarkets: Readonly<Record<string, readonly string[]>> = {
   // settles. Not to be confused with FT_DOUBLE_CHANCE_BTTS, whose double-chance
   // legs overlap and therefore do not partition anything.
   FT_RESULT_BTTS: ["AWAY_NO", "AWAY_YES", "DRAW_NO", "DRAW_YES", "HOME_NO", "HOME_YES"],
-  FH_RESULT_BTTS: ["AWAY_NO", "AWAY_YES", "DRAW_NO", "DRAW_YES", "HOME_NO", "HOME_YES"]
+  FH_RESULT_BTTS: ["AWAY_NO", "AWAY_YES", "DRAW_NO", "DRAW_YES", "HOME_NO", "HOME_YES"],
+  // Which half held more goals. EQUAL is a published outcome rather than a
+  // refund, so the three cover every match with nothing to push - measured
+  // 2026-09-15, SBOBET, APSPORT and BTI each publish all three in one native
+  // market on 552 fixtures between them, and no row was ever built.
+  //
+  // FT_DRAW_NO_BET is deliberately absent though it is two clean outcomes at
+  // three books: a draw refunds both legs, so one branch pays back stake rather
+  // than the partition payout, and partitionMargin assumes no such branch.
+  // FT_GOAL_RANGE is absent for a different reason - the books do not agree on
+  // the ranges (0-1/2-3/4-5/6+ against 0-0/1-1/2-2/3-3 against 4-6/7+), so they
+  // are not the same product and pairing them would compare different bets.
+  FT_HIGHEST_SCORING_HALF: ["EQUAL", "FIRST_HALF", "SECOND_HALF"],
+  HOME_FT_HIGHEST_SCORING_HALF: ["EQUAL", "FIRST_HALF", "SECOND_HALF"],
+  AWAY_FT_HIGHEST_SCORING_HALF: ["EQUAL", "FIRST_HALF", "SECOND_HALF"]
 };
 
 /** The full outcome set of a no-push partition market, or null. */
