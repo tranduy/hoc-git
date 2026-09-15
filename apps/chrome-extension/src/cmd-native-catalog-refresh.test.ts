@@ -119,11 +119,14 @@ describe("CMD native catalog collector", () => {
       shaped(5, "PREMIER LEAGUE - BOOKINGS", "Arsenal", "Chelsea"),
       shaped(6, "PREMIER LEAGUE", "Arsenal", "Chelsea")
     ], []);
+    // A refused booking tail is sampled from the same set, and a tail neither
+    // pattern can name is counted rather than silently skipped.
     expect(h.tick()).toMatchObject({ cornerRows: 3, cornerSuffixOk: 1,
       bookingRows: 2, bookingSuffixOk: 1,
       // "(Corners)" is a shape the strict suffix refuses but a widened one
       // would take; bare team names are a different refusal entirely.
-      cornerLooseOk: 1, cornerOneSided: 0, cornerNoParen: 1 });
+      cornerLooseOk: 1, cornerOneSided: 0, cornerNoParen: 1,
+      cornerShapes: ["(Corners)"], shapesBlind: 4 });
   });
 
   it("carries a bounded corner suffix sample and refuses anything else", () => {

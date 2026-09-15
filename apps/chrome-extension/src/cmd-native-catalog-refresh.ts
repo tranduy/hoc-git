@@ -12,7 +12,7 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
     "rowsNotSport", "rowsLiveGroup", "eventsDiscovered",
     "groupsCoveredTwice", "partialWanted",
     "cornerRows", "cornerSuffixOk", "cornerLooseOk", "cornerOneSided", "cornerNoParen",
-    "bookingRows", "bookingSuffixOk", "failed",
+    "bookingRows", "bookingSuffixOk", "shapesBlind", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -73,7 +73,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     state.rowsNotSport ??= 0; state.rowsLiveGroup ??= 0; state.eventsDiscovered ??= 0;
     state.cornerRows ??= 0; state.cornerSuffixOk ??= 0;
     state.cornerLooseOk ??= 0; state.cornerOneSided ??= 0; state.cornerNoParen ??= 0;
-    state.cornerShapes ??= [];
+    state.cornerShapes ??= []; state.shapesBlind ??= 0;
     state.bookingRows ??= 0; state.bookingSuffixOk ??= 0;
     const retire = () => {
       state.owners.clear(); state.queue = []; state.cycle = null; state.nextRosterAt = 0;
@@ -198,6 +198,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         cornerRows: state.cornerRows, cornerSuffixOk: state.cornerSuffixOk,
         cornerLooseOk: state.cornerLooseOk, cornerOneSided: state.cornerOneSided,
         cornerNoParen: state.cornerNoParen, cornerShapes: state.cornerShapes,
+        shapesBlind: state.shapesBlind,
         bookingRows: state.bookingRows, bookingSuffixOk: state.bookingSuffixOk,
         rowsNotSport: state.rowsNotSport, rowsLiveGroup: state.rowsLiveGroup,
         eventsDiscovered: state.eventsDiscovered,
@@ -393,7 +394,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       const shapeSafe = /^(?:\([\w\s.',\/&:-]{1,38}\)|-[\w\s.',\/&:-]{1,38})$/;
       let cornerRows = 0, cornerSuffix = 0, bookingRows = 0, bookingSuffix = 0;
       let cornerLooseOk = 0, cornerOneSided = 0, cornerNoParen = 0;
-      const cornerShapes = new Set();
+      const shapes = new Set();
+      let shapesBlind = 0;
       for (const row of [...today, ...early]) {
         const league = String(row[37]);
         const teams = [String(row[38]), String(row[39])];
@@ -408,22 +410,30 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
             // the same bounded public-label evidence the SABA walk already
             // reports, and the one thing that says what to widen the rule to.
             for (const team of teams) {
-              if (cornerShapes.size >= 6) break;
+              if (shapes.size >= 6) break;
               const match = anyParen.exec(team) ?? tail.exec(team);
-              if (match === null) continue;
+              if (match === null) { shapesBlind += 1; continue; }
               const shape = match[0].trim().slice(0, 40);
-              if (shapeSafe.test(shape)) cornerShapes.add(shape);
+              if (shapeSafe.test(shape)) shapes.add(shape); else shapesBlind += 1;
             }
           }
         } else if (bookingLeague.test(league)) {
           bookingRows += 1;
           if (teams.every((team) => bookingTeam.test(team))) bookingSuffix += 1;
+          else for (const team of teams) {
+            if (shapes.size >= 6) break;
+            const match = anyParen.exec(team) ?? tail.exec(team);
+            if (match === null) { shapesBlind += 1; continue; }
+            const shape = match[0].trim().slice(0, 40);
+            if (shapeSafe.test(shape)) shapes.add(shape); else shapesBlind += 1;
+          }
         }
       }
       state.cornerRows = cornerRows; state.cornerSuffixOk = cornerSuffix;
       state.cornerLooseOk = cornerLooseOk; state.cornerOneSided = cornerOneSided;
       state.cornerNoParen = cornerNoParen;
-      state.cornerShapes = [...cornerShapes];
+      state.cornerShapes = [...shapes];
+      state.shapesBlind = shapesBlind;
       state.bookingRows = bookingRows; state.bookingSuffixOk = bookingSuffix;
       state.rowsNotSport = notSport;
       state.rowsLiveGroup = inLiveGroup;
