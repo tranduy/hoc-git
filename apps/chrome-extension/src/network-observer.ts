@@ -7448,15 +7448,27 @@ export class NetworkObserver {
     if (method === "Target.attachedToTarget") {
       const childSessionId = typeof params.sessionId === "string" ? params.sessionId : null;
       const targetInfo = isRecord(params.targetInfo) ? params.targetInfo : null;
-      if (source.lobby === "KSPORT" || source.lobby === "SABA") {
-        this.#wsAttachDiagnostic(source).autoAttachEvents += 1;
+      // Counted for every book, not just the two that once needed it. An empty
+      // targets[] used to mean "this lobby is not measured" and was read on
+      // 2026-09-16 as "this book has no child targets", which is a different
+      // claim entirely and was the wrong one.
+      this.#wsAttachDiagnostic(source).autoAttachEvents += 1;
+      {
         const type = typeof targetInfo?.type === "string" ? targetInfo.type.slice(0, 24) : "none";
         const seen = this.#targetTypesSeen.get(source.sourceId) ?? new Map<string, number>();
         seen.set(type, (seen.get(type) ?? 0) + 1);
         this.#targetTypesSeen.set(source.sourceId, seen);
       }
-      const observeChild = targetInfo?.type === "iframe" ||
-        ((source.lobby === "KSPORT" || source.lobby === "SABA") && targetInfo?.type === "worker") ||
+      // A book whose page moves its API calls into a worker goes completely
+      // dark otherwise: the worker's requests never reach a session we watch,
+      // so Network events never arrive and HTTP_RESPONSE stays at zero while
+      // the page is visibly live and serving odds.
+      //
+      // Measured 2026-09-16: BTI reported HTTP_RESPONSE zero across two tabs
+      // and five minutes on a page showing live prices, while CMD, SBOBET,
+      // APSPORT and IM captured hundreds each. BTI was attached to iframes
+      // only, because workers were listed for KSPORT and SABA by name.
+      const observeChild = targetInfo?.type === "iframe" || targetInfo?.type === "worker" ||
         (source.lobby === "SABA" && targetInfo?.type === "shared_worker");
       if (childSessionId !== null && observeChild) {
         const targetId = typeof targetInfo.targetId === "string" ? targetInfo.targetId : undefined;

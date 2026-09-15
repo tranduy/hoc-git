@@ -8605,6 +8605,28 @@ describe("NetworkObserver", () => {
     }
   });
 
+  it("watches a worker target for every book, not only the two named ones", async () => {
+    // A page that moves its API calls into a worker goes completely dark: the
+    // worker's requests never reach a session we watch, so Network events never
+    // arrive and HTTP_RESPONSE stays at zero while the page is visibly live.
+    //
+    // Measured 2026-09-16: BTI reported HTTP_RESPONSE zero across two tabs and
+    // five minutes on a page showing live prices, while CMD, SBOBET, APSPORT
+    // and IM captured hundreds each. Workers were listed for KSPORT and SABA by
+    // name, so BTI was attached to iframes only.
+    for (const lobby of ["BTI", "CMD", "TSPORT", "IM"] as const) {
+      const sendCommand = vi.fn(async () => ({}));
+      const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+      const observer = new NetworkObserver({ sendCommand, forward });
+
+      await observer.handleEvent({ lobby, sourceId: `chrome:${lobby}:9`, tabId: 9 },
+        "Target.attachedToTarget", { sessionId: `${lobby}-worker`, targetInfo: { type: "worker" } });
+
+      expect(sendCommand, lobby).toHaveBeenCalledWith(9, "Network.enable",
+        expect.any(Object), `${lobby}-worker`);
+    }
+  });
+
   it("enables and routes KSPORT sportsbook traffic from an OOPIF child CDP session", async () => {
     const sendCommand = vi.fn(async () => ({}));
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
