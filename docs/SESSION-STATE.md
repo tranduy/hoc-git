@@ -2571,15 +2571,33 @@ này với AWAY ở sàn kia chính là **ghép 2 trong 3 cửa**, thứ mà d�
 chứng minh không phải kèo chắc.
 
 Điều còn thiếu là **luật thanh toán**: trận không có phạt góc thì hoàn tiền hay
-thua? Không nằm trong feed của sàn nào. Nếu ngày nào xác minh được **cả hai sàn
-đều hoàn tiền**, thì HOME+AWAY thành phân hoạch đầy đủ và mở được. Trước đó thì
-không.
+thua? Không nằm trong feed của sàn nào.
 
-Test `cmd-normalizer.test.ts` giờ ghim đúng hình dạng CMD thật sự viết ra
-(`(1st Corner)`, `(1st Booking)`) kèm toàn bộ lý do, thay vì chỉ có
-`(11th Corner)` bịa ra.
+#### Đã mở (chủ sở hữu xác nhận cả hai sàn hoàn tiền)
 
-**Quy mô nếu mở được:** ~22 trận CMD/đêm, đối ứng BTI 25 trận góc + 13 trận thẻ.
+Với luật hoàn tiền, HOME+AWAY phủ hết mọi kết quả **có trả tiền**, nên nó thôi là
+ghép 2-trong-3 và trở thành kèo thật. Đã mở:
+
+- `(1st Corner)` → `CORNER_FT_FIRST_TEAM`, `(1st Booking)` → `CARD_FT_FIRST_TEAM`
+- line bị **bỏ** (đo được 28/28 dòng line = 0 — đồng banh, không phải chấp)
+- pseudo-fixture chỉ mang **đúng một** kèo: mọi bet type khác trên dòng đó bị từ
+  chối, không mượn tài/xỉu hay chấp của sổ kèo góc
+- ordinal sau (`(3rd Corner)`…) vẫn loại — không sàn nào có
+
+#### Nhưng thu hoạch thật thì nhỏ, phải nói thẳng
+
+```
+CORNER_FT_FIRST_TEAM   CMD 8 trận | BTI 27 trận | ghép chéo  1
+CARD_FT_FIRST_TEAM     CMD 3 trận | BTI 15 trận | ghép chéo  0
+```
+
+Cả 8 trận CMD **đều ghép được** với BTI (bộ ghép production, 484 cặp CMD-BTI tổng
+cộng) — nhưng BTI chỉ ra kèo "phạt góc đầu tiên" trên **1** trong 8 trận đó. Hai
+sàn ra kèo này trên các trận khác nhau.
+
+Nên: code đúng, kèo đã lên bảng, **thu hoạch hiện tại là 1 dòng ghép chéo**. Không
+phải 22 như ước lượng ban đầu. Ước lượng đó đếm trận có kèo, không đếm trận **cả
+hai sàn cùng có kèo** — đúng cái sai mà thước đo của dự án đã cảnh báo.
 
 Khớp chéo với danh mục sống: 16 nhận được → **17 trận có kèo góc**; 6 → **6 trận có
 kèo thẻ**. Phần *nhận được* không hỏng; phần *bị loại* thì hỏng, xem trên.
