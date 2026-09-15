@@ -6,6 +6,10 @@ API giải mã và dựng danh mục, web so sánh giữa các sàn.
 
 ## Đọc trước khi làm
 
+**`docs/CHECKLIST.md`** — bảng trạng thái: việc nào xong, việc nào chưa,
+mỗi dòng một số đo được và lệnh tự kiểm. Checkbox trong `plans/*.md` không ai
+cập nhật, đừng dùng làm thước.
+
 **`docs/SESSION-STATE.md`** — trạng thái hiện tại của 6 sàn, việc còn lại theo thứ tự,
 cách đo, và những cái bẫy đã mắc. Đọc file đó thay vì dò lại từ đầu.
 
