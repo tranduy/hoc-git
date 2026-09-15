@@ -45,6 +45,9 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 20 | Vì sao 20% bảng không có giá | **3.408/3.408** là "một sàn tốt nhất ở mọi cửa" — đúng thiết kế. 0 dòng thiếu chân | `whyUnpriced` |
 | 21 | Trần kèo góc, đo qua bộ ghép thật | **49** trận có góc ở ≥2 sàn / 2.025 trận; **302** dòng góc | `cornerCoverage` |
 | 22 | Kèo góc có bị thu sót không | **Không.** SBOBET **0**, CMD **0** kèo góc thấy-mà-không-chuẩn-hoá-được | `nativeMarketObservations` |
+| 24 | BTI `UNPAIRED_OR_INVALID_NATIVE_SELECTIONS` — **không phải lỗ hổng** | 2.466 market/144 trận là bản tổng hợp trùng; **144/144 trận đã có sẵn** cả thang tài xỉu lẫn kèo chấp. **0** trận bị từ chối mà không có gì thay thế | `nativeDetail=summary` |
+| 23 | `OTHER_SCORE_DOMAIN_REQUIRED` — **trần thật** | APSPORT **0/805**, SBOBET **0/184** market có cửa vét "tỉ số khác". Không có cửa đó thì không định giá được | `nativeDetail=summary` |
+| 26 | CMD `EVENT_NOT_COMPARABLE` — tách 5 nguyên nhân | 1.170/130 trận họ kèo bị từ chối có chủ ý · 459/51 e-soccer · 190/10 còn sót. **`EVENT_STATISTIC_LEAGUE_UNRESOLVED` = 0** → không mất giải góc nào | `nativeDetail=summary` |
 
 ## ĐANG CHẠY — đã giao nhưng **chưa** chứng minh hết
 
@@ -54,17 +57,14 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 ## CHƯA LÀM — có bằng chứng dẫn đường, không cần mò
 
-Mọi cửa từ chối đều tự khai tên. Đo bằng:
-`curl -s "http://127.0.0.1:4310/api/catalog/accounts/catalog-source:<SÀN>:FOOTBALL?nativeDetail=summary"`
+Đo bằng: `curl -s "http://127.0.0.1:4310/api/catalog/accounts/catalog-source:<SÀN>:FOOTBALL?nativeDetail=summary"`
 rồi gom theo `nativeMarketObservations[].reason`.
 
 | # | Việc | Số đo được | Ghi chú |
 |---|---|---|---|
-| 23 | `OTHER_SCORE_DOMAIN_REQUIRED` | APSPORT **802**/404 trận, SBOBET **122**/74 | Kèo tỉ số chính xác cần cửa "tỉ số khác". Nếu sàn có phát cửa đó thì sửa được; nếu không thì là trần thật. **Chưa kiểm** |
-| 24 | BTI `UNPAIRED_OR_INVALID_NATIVE_SELECTIONS` | **2.466**/169 trận | Cửa từ chối lớn nhất của BTI. **Chưa kiểm** là hỏng thật hay đúng |
-| 25 | CMD `NATIVE_MR_ODDS_UNPROVEN` | **1.290** | Định dạng odds chưa chứng minh được |
-| 26 | CMD `EVENT_NOT_COMPARABLE` | **1.782** | Trận không ghép được sang sàn khác |
-| 27 | CMD `NATIVE_MARKET_HIDDEN` | **2.026** | Kèo ẩn chưa mở — liên quan mục 13 |
+| 25 | CMD `NATIVE_MR_ODDS_UNPROVEN` | **1.290** | Định dạng odds chưa chứng minh được. Chưa kiểm |
+| 27 | CMD `NATIVE_MARKET_HIDDEN` | **2.026** | Kèo ẩn chưa mở — cùng gốc với mục 13 |
+| 28 | `EVENT_NOT_COMPARABLE` còn sót trong `cmd-more-native.ts` | **190** / 10 trận | Ba chỗ gọi chưa tách tên, khác file với mục 26 |
 | 13 | CMD: 26 trận không có kèo More | ≈ **170 dòng (1%)** | Đường lấy không tồn tại |
 | 18 | `FT_GOAL_RANGE` (4 sàn, 1.114 trận) | — | **Không ghép được**, mỗi sàn chia khoảng khác nhau |
 
@@ -102,6 +102,8 @@ rồi gom theo `nativeMarketObservations[].reason`.
 - **"16 chữ số thập phân = giá bịa"** — sai, 931/942 quote APSPORT đều vậy.
 - **"Ô chứa quote của line khác"** — sai, `candidates=1`, line khớp hết.
 - **"APSPORT live còn sàn khác prematch"** — sai, `rows split on phase: 0`.
+- **"197 trận CMD bị loại là e-soccer"** — sai tỉ lệ. E-soccer chỉ **51/191**;
+  phần lớn (130) là họ kèo bị từ chối có chủ ý. Tách tên ra mới biết.
 - **"SABA mất mảnh thứ 4 của ảnh chụp DOM, 511 lần"** — SAI. Ba bộ đếm bằng nhau
   và thiếu bộ thứ tư chính là dấu hiệu **ráp thành công**. Đã rút, sửa cả trong mã.
 - **"215 loại kèo bị bỏ phí"** — đọc sai một phần: `FT_DOUBLE_CHANCE` đứng đầu bảng
