@@ -1222,10 +1222,37 @@ const partitionMarkets: Readonly<Record<string, readonly string[]>> = {
   AWAY_FT_HIGHEST_SCORING_HALF: ["EQUAL", "FIRST_HALF", "SECOND_HALF"]
 };
 
+/**
+ * Markets whose outcomes partition everything except one branch that refunds.
+ *
+ * Draw-no-bet pays one side and voids on a draw; first-corner and first-card
+ * void when the match produces none. A ticket covering every paying outcome
+ * therefore returns the margin when the market settles and the stake when it
+ * voids - never a loss, but never the same payout in every branch either, which
+ * is why these cannot join partitionMarkets above: partitionMargin's guarantee
+ * is that the worst case is identical everywhere, and here one branch pays zero.
+ *
+ * The figure is still the right one to show, and the market name carries the
+ * condition: an operator reading FT_DRAW_NO_BET knows a draw returns the stake.
+ * Measured 2026-09-15, this is the whole remaining tail of the 215 collected and
+ * never compared types - every other candidate with two books and an agreed
+ * selection set had zero fixtures in common.
+ */
+const voidBranchMarkets: Readonly<Record<string, readonly string[]>> = {
+  FT_DRAW_NO_BET: ["AWAY", "HOME"], FH_DRAW_NO_BET: ["AWAY", "HOME"],
+  CORNER_FT_FIRST_TEAM: ["AWAY", "HOME"], CARD_FT_FIRST_TEAM: ["AWAY", "HOME"],
+  FT_HOME_NO_BET: ["AWAY", "DRAW"], FT_AWAY_NO_BET: ["DRAW", "HOME"]
+};
+
+/** Whether a priced row returns the stake rather than the payout in one branch. */
+export function hasVoidBranch(marketType: string): boolean {
+  return Object.prototype.hasOwnProperty.call(voidBranchMarkets, marketType);
+}
+
 /** The full outcome set of a no-push partition market, or null. */
 export function exactPartitionOutcomeDomain(marketType: string, scope: string,
   line: string | null): readonly string[] | null {
-  const outcomes = partitionMarkets[marketType];
+  const outcomes = partitionMarkets[marketType] ?? voidBranchMarkets[marketType];
   if (outcomes === undefined || line !== null) return null;
   const spec = footballCategoricalMarketSpec(marketType as MarketType);
   if (spec === null || spec.scope !== scope || spec.linePolicy !== "NONE") return null;

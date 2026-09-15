@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import type { ComparisonCell } from "./comparison.js";
-import { buildComparisonEvents, coherentLiveQuotes, COMPARISON_LIVE_LAG_LIMIT_MS, partitionRowsForTest,
+import { buildComparisonEvents, coherentLiveQuotes, COMPARISON_LIVE_LAG_LIMIT_MS,
+  exactPartitionOutcomeDomain, hasVoidBranch,
+  partitionRowsForTest,
   createCompetitionLinkMemory, livePricedCatalogs, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, selectionHandicapLine, selectionLabel, ticketMarketLabel,
   decimalOdds } from "./comparison.js";
@@ -1240,5 +1242,29 @@ describe("a partition a book splits across native markets", () => {
   it("refuses a book missing one outcome of the partition", () => {
     const short = cells("SBOBET").slice(0, 5);
     expect(partitionRowsForTest([...short, ...cells("APSPORT")])).toHaveLength(0);
+  });
+});
+
+describe("markets with a branch that refunds", () => {
+  it("prices draw-no-bet and first-corner, which no route reached before", () => {
+    // Measured 2026-09-15: of eleven unpriced types carried by two books with an
+    // agreed selection set, eight had zero fixtures in common. The three that
+    // overlapped were all void-branch markets, so this was the whole remaining
+    // tail of the 215 collected and never compared.
+    expect(exactPartitionOutcomeDomain("FT_DRAW_NO_BET", "FULL_TIME", null)).toEqual(["AWAY", "HOME"]);
+    expect(exactPartitionOutcomeDomain("CORNER_FT_FIRST_TEAM", "FULL_TIME", null)).toEqual(["AWAY", "HOME"]);
+  });
+
+  it("marks them apart from a partition that pays the same in every branch", () => {
+    // A draw returns the stake rather than the payout, so the figure means
+    // "this or your money back" and the caller has to be able to tell.
+    expect(hasVoidBranch("FT_DRAW_NO_BET")).toBe(true);
+    expect(hasVoidBranch("CORNER_FT_FIRST_TEAM")).toBe(true);
+    expect(hasVoidBranch("CORNER_FT_1X2")).toBe(false);
+    expect(hasVoidBranch("FT_HIGHEST_SCORING_HALF")).toBe(false);
+  });
+
+  it("still refuses a line on either kind", () => {
+    expect(exactPartitionOutcomeDomain("FT_DRAW_NO_BET", "FULL_TIME", "0.5")).toBeNull();
   });
 });
