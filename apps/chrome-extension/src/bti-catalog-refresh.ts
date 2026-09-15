@@ -154,7 +154,24 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   detailState.committed?.pump?.();
   if (existingRosterWorker && existingRosterWorker.promise && !existingRosterWorker.result) {
     if (detailState.committed?.snapshot) return detailState.committed.snapshot();
-    return publishResult(await existingRosterWorker.promise);
+    // Joining a roster already in flight, with a bound on the wait.
+    //
+    // This used to await that promise outright. Every list fetch inside it is
+    // capped at five seconds, but nothing capped the promise itself, so one
+    // worker that never settles made every later call wait forever: the
+    // expression stopped returning, Runtime.evaluate timed out at sixty
+    // seconds, and no coverage was ever published. The diagnostic then read
+    // BTI_COV[none], which is also what it reads when no collector exists.
+    //
+    // Measured 2026-09-16: BTI stayed that way for eighty-four minutes with its
+    // page live and serving odds on screen, and two forced refreshes returned
+    // 504 with nothing to say. A bounded join turns that into a named refusal.
+    const joined = await Promise.race([
+      existingRosterWorker.promise,
+      new Promise((resolve) => { setTimeout(() => resolve('JOIN_TIMEOUT'), 20000); })
+    ]);
+    if (joined === 'JOIN_TIMEOUT') return cancelled('ROSTER_JOIN_TIMEOUT');
+    return publishResult(joined);
   }
   const generation = 'bti:' + now + ':' + Math.floor(Math.random() * 1000000000);
   const rosterWorker = { generation, completedAt: 0, result: null, promise: null,
