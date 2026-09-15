@@ -39,6 +39,15 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
       /^(?:\([\w\s.',\/&:-]{1,38}\)|-[\w\s.',\/&:-]{1,38})$/u.test(value)).slice(0, 6);
     if (safe.length > 0) fields.push(`cornerShapes:${safe.join("|")}`);
   }
+  // Which fixed price slots a refused corner or card row fills. A closed
+  // vocabulary of slot names, never a price or a line.
+  const slots = status.betSlots;
+  if (Array.isArray(slots)) {
+    const safe = slots.filter((value): value is string => typeof value === "string" &&
+      /^(?:none|(?:1|3|7|8|OE|FHOE|5x[123]|FH5x[123]|DCx[123])(?:\+(?:1|3|7|8|OE|FHOE|5x[123]|FH5x[123]|DCx[123]))*)$/u
+        .test(value)).slice(0, 6);
+    if (safe.length > 0) fields.push(`betSlots:${safe.join("|")}`);
+  }
   // Predicate name and row count only; anything else the page could put here is
   // dropped rather than carried into diagnostics.
   const reject = status.rosterReject;
@@ -73,7 +82,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     state.rowsNotSport ??= 0; state.rowsLiveGroup ??= 0; state.eventsDiscovered ??= 0;
     state.cornerRows ??= 0; state.cornerSuffixOk ??= 0;
     state.cornerLooseOk ??= 0; state.cornerOneSided ??= 0; state.cornerNoParen ??= 0;
-    state.cornerShapes ??= []; state.shapesBlind ??= 0;
+    state.cornerShapes ??= []; state.shapesBlind ??= 0; state.betSlots ??= [];
     state.bookingRows ??= 0; state.bookingSuffixOk ??= 0;
     const retire = () => {
       state.owners.clear(); state.queue = []; state.cycle = null; state.nextRosterAt = 0;
@@ -198,7 +207,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         cornerRows: state.cornerRows, cornerSuffixOk: state.cornerSuffixOk,
         cornerLooseOk: state.cornerLooseOk, cornerOneSided: state.cornerOneSided,
         cornerNoParen: state.cornerNoParen, cornerShapes: state.cornerShapes,
-        shapesBlind: state.shapesBlind,
+        shapesBlind: state.shapesBlind, betSlots: state.betSlots,
         bookingRows: state.bookingRows, bookingSuffixOk: state.bookingSuffixOk,
         rowsNotSport: state.rowsNotSport, rowsLiveGroup: state.rowsLiveGroup,
         eventsDiscovered: state.eventsDiscovered,
@@ -391,11 +400,42 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       // A refused tail need not be parenthesised: the archived day-aggregate
       // rows end "- Tuesday - 6 Matches". Take the segment after the last dash.
       const tail = /-[^-]{1,38}$/;
+      // Which fixed price slots a refused row actually fills. CMD carries no
+      // bet-type field: the market is the column it sits in, so the slot set is
+      // the only thing that says what a "(1st Corner)" row is offering. Names
+      // from a closed vocabulary, never a price.
+      const twoWay = { '1': [40, 41], '3': [42, 43], '7': [44, 45], '8': [46, 47],
+        'OE': [48, 49], 'FHOE': [65, 66] };
+      const threeWay = { '5': [17, 18, 19], 'FH5': [20, 21, 22], 'DC': [84, 85, 86] };
+      const priced = (value) => {
+        if (typeof value !== 'number' && typeof value !== 'string') return false;
+        if (value === '') return false;
+        const number = Number(value);
+        return Number.isFinite(number) && number !== 0 && Math.abs(number) <= 1;
+      };
+      const resultPriced = (value) => {
+        if (typeof value !== 'number' && typeof value !== 'string') return false;
+        if (value === '') return false;
+        const number = Number(value);
+        return Number.isFinite(number) && number > 1;
+      };
+      const slotSignature = (row) => {
+        const names = [];
+        for (const [name, columns] of Object.entries(twoWay)) {
+          if (columns.every((column) => priced(row[column]))) names.push(name);
+        }
+        for (const [name, columns] of Object.entries(threeWay)) {
+          const filled = columns.filter((column) => resultPriced(row[column])).length;
+          if (filled > 0) names.push(name + 'x' + filled);
+        }
+        return names.join('+') || 'none';
+      };
       const shapeSafe = /^(?:\([\w\s.',\/&:-]{1,38}\)|-[\w\s.',\/&:-]{1,38})$/;
       let cornerRows = 0, cornerSuffix = 0, bookingRows = 0, bookingSuffix = 0;
       let cornerLooseOk = 0, cornerOneSided = 0, cornerNoParen = 0;
       const shapes = new Set();
       let shapesBlind = 0;
+      const slots = new Set();
       for (const row of [...today, ...early]) {
         const league = String(row[37]);
         const teams = [String(row[38]), String(row[39])];
@@ -409,6 +449,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
             // The parenthesised market suffix only, never the team it follows:
             // the same bounded public-label evidence the SABA walk already
             // reports, and the one thing that says what to widen the rule to.
+            if (slots.size < 6) slots.add(slotSignature(row));
             for (const team of teams) {
               if (shapes.size >= 6) break;
               const match = anyParen.exec(team) ?? tail.exec(team);
@@ -421,6 +462,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
           bookingRows += 1;
           if (teams.every((team) => bookingTeam.test(team))) bookingSuffix += 1;
           else for (const team of teams) {
+            if (slots.size < 6) slots.add(slotSignature(row));
             if (shapes.size >= 6) break;
             const match = anyParen.exec(team) ?? tail.exec(team);
             if (match === null) { shapesBlind += 1; continue; }
@@ -434,6 +476,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       state.cornerNoParen = cornerNoParen;
       state.cornerShapes = [...shapes];
       state.shapesBlind = shapesBlind;
+      state.betSlots = [...slots];
       state.bookingRows = bookingRows; state.bookingSuffixOk = bookingSuffix;
       state.rowsNotSport = notSport;
       state.rowsLiveGroup = inLiveGroup;

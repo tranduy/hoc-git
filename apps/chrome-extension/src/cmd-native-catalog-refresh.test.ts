@@ -142,6 +142,14 @@ describe("CMD native catalog collector", () => {
     expect(formatCmdNativeCatalogDiagnostic({ cornerShapes: "(No. of Corners)" })).toBe("CMD_NATIVE[]");
   });
 
+  it("carries a slot signature from a closed vocabulary and nothing else", () => {
+    expect(formatCmdNativeCatalogDiagnostic({ betSlots: ["1+3", "5x3", "none", "OE+DCx2"] }))
+      .toBe("CMD_NATIVE[betSlots:1+3|5x3|none|OE+DCx2]");
+    // A price, a line, or anything outside the vocabulary never rides along.
+    expect(formatCmdNativeCatalogDiagnostic({ betSlots: ["0.97", "1+", "9", "5x4"] }))
+      .toBe("CMD_NATIVE[]");
+  });
+
   it("reports a missing plan as -1 rather than omitting it", () => {
     // An absent field reads the same as a plan of zero events, which is how a
     // plan that never reached the page would hide behind unplanned groups.
