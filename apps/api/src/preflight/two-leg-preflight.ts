@@ -81,12 +81,16 @@ export class TwoLegPreflight {
     if (opportunity === undefined || opportunity.executionConfidence !== "HIGH") {
       throw new Error("PREFLIGHT_OPPORTUNITY_UNAVAILABLE");
     }
-    if (opportunity.legs.length !== 2 || new Set(opportunity.legs.map((leg) => leg.provider)).size !== 2 ||
+    // One account per leg, and no book holding two of them: a book given two
+    // legs nets them off internally and the cover is imaginary.
+    const accountIds = [request.accountAId, request.accountBId,
+      ...(request.additionalAccountIds ?? [])] as const;
+    if (opportunity.legs.length < 2 || opportunity.legs.length !== accountIds.length ||
+      new Set(opportunity.legs.map((leg) => leg.provider)).size !== opportunity.legs.length ||
       opportunity.legs.some((leg) => !leg.eligible || leg.quoteStatus !== "OPEN")) {
       throw new Error("PREFLIGHT_NOT_TWO_OPEN_LEGS");
     }
 
-    const accountIds = [request.accountAId, request.accountBId] as const;
     const accountProviders = await Promise.all(accountIds.map(async (id) => this.#providers.providerForAccount(id)));
     if (new Set(accountProviders).size !== 2) throw new Error("PREFLIGHT_PROVIDER_COVERAGE_MISMATCH");
     const accountByProvider = new Map(accountProviders.map((provider, index) => [provider, accountIds[index]!]));
@@ -119,7 +123,7 @@ export class TwoLegPreflight {
     if (current === undefined || current.executionConfidence !== "HIGH" ||
       current.canonicalEventId !== opportunity.canonicalEventId ||
       current.canonicalMarketId !== opportunity.canonicalMarketId || current.line !== opportunity.line ||
-      current.legs.length !== 2 || current.legs.some((leg, index) =>
+      current.legs.length !== opportunity.legs.length || current.legs.some((leg, index) =>
         leg.provider !== opportunity.legs[index]!.provider ||
         leg.providerEventId !== opportunity.legs[index]!.providerEventId ||
         leg.providerMarketId !== opportunity.legs[index]!.providerMarketId ||

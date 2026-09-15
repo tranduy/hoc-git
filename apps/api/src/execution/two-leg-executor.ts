@@ -59,7 +59,10 @@ export class TwoLegExecutor {
     fingerprint: string): Promise<TwoLegExecutionResult> {
     if (!this.#verifyTicket(ticket)) throw new Error("EXECUTION_TICKET_INVALID");
     if (ticket.expiresAtMs <= this.#clock.nowMs()) throw new Error("EXECUTION_TICKET_EXPIRED");
-    if (ticket.legs.length !== 2 || ticket.legs[0].provider === ticket.legs[1].provider) {
+    // Two legs or three: what matters is that no book holds two of them. A
+   // book given both sides nets them off internally and the cover is imaginary.
+    const providers = ticket.legs.map((leg) => leg.provider);
+    if (ticket.legs.length < 2 || new Set(providers).size !== providers.length) {
       throw new Error("EXECUTION_TWO_PROVIDER_TICKET_REQUIRED");
     }
     if (this.#idempotencyStore !== null) {
@@ -89,10 +92,12 @@ export class TwoLegExecutor {
         .catch((): ExecutionLegResult => ({ provider: leg.provider, providerSelectionId: leg.providerSelectionId,
           status: "UNKNOWN", reason: "ADAPTER_ERROR" }));
     });
-    const settled = await Promise.all(operations.map((operation, index) => this.#withTimeout(operation, ticket.legs[index]!)));
-    const legs = settled as [ExecutionLegResult, ExecutionLegResult];
+    const legs = await Promise.all(operations.map((operation, index) =>
+      this.#withTimeout(operation, ticket.legs[index]!)));
     const accepted = legs.filter((leg) => leg.status === "ACCEPTED").length;
-    const status = accepted === 2 ? "BOTH_ACCEPTED" as const
+    // A ticket is only covered when every leg is on. Anything short of that is a
+    // partial fill, whether it is one leg of two or two legs of three.
+    const status = accepted === legs.length ? "BOTH_ACCEPTED" as const
       : accepted === 0 && legs.every((leg) => leg.status === "REJECTED") ? "NONE_ACCEPTED" as const
         : "PARTIAL_FAILURE" as const;
     return { ticketId: ticket.ticketId, idempotencyKey, mode: "DRY_RUN", status, legs };

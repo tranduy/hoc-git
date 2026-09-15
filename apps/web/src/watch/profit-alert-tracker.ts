@@ -79,8 +79,11 @@ function parseProfitAlert(value: unknown): ProfitAlert | null {
   if (!isString(input.id) || !isString(input.identity) || !Number.isFinite(input.observedAtMs) ||
     !isString(input.competition) || !isString(input.matchName) || !isString(input.marketName) ||
     !(input.line === null || isString(input.line)) || !Array.isArray(input.providers) ||
-    input.providers.length !== 2 || !input.providers.every((provider) => providers.has(provider as ProviderId)) ||
-    !Array.isArray(input.legs) || input.legs.length !== 2 || !input.legs.every((leg) =>
+    // Two books for a two-outcome market, three for a three-outcome one. What
+    // must hold is one book per leg, not a particular count of them.
+    input.providers.length < 2 || !input.providers.every((provider) => providers.has(provider as ProviderId)) ||
+    new Set(input.providers).size !== input.providers.length ||
+    !Array.isArray(input.legs) || input.legs.length !== input.providers.length || !input.legs.every((leg) =>
       typeof leg === "object" && leg !== null && providers.has((leg as ProfitAlertLeg).provider) &&
       isString((leg as ProfitAlertLeg).selection)) || !validDecimal(input.roi) ||
     !validDecimal(input.worstCaseProfit) || !isString(input.currency) || input.freshness !== "FRESH") return null;

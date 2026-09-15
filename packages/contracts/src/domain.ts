@@ -87,6 +87,12 @@ export interface PreflightRequest {
   readonly opportunityId: string;
   readonly accountAId: string;
   readonly accountBId: string;
+  /**
+   * Accounts beyond the first two, in leg order. A three-outcome ticket needs a
+   * third book; the original pair is kept so a caller that never sends this
+   * keeps working unchanged.
+   */
+  readonly additionalAccountIds?: readonly string[] | undefined;
   readonly maxOddsDriftBps: number;
 }
 
@@ -240,8 +246,15 @@ export interface TwoLegExecutionResult {
   readonly ticketId: string;
   readonly idempotencyKey: string;
   readonly mode: "DRY_RUN";
+  /**
+   * BOTH_ACCEPTED means every leg was accepted, whatever the leg count. The
+   * name is kept because it is written into the bet history, the reconciliation
+   * journal and the idempotency store: renaming it for a three-leg ticket would
+   * invalidate records already on disk for no gain.
+   */
   readonly status: "BOTH_ACCEPTED" | "NONE_ACCEPTED" | "PARTIAL_FAILURE";
-  readonly legs: readonly [ExecutionLegResult, ExecutionLegResult];
+  /** Two or more, one per outcome the ticket covers. */
+  readonly legs: readonly ExecutionLegResult[];
 }
 
 export interface PreflightTicket {

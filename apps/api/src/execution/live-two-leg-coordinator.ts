@@ -60,7 +60,8 @@ export class LiveTwoLegCoordinator {
   async execute(input: { readonly ticket: PreflightTicket; readonly armToken: string }): Promise<LiveTwoLegResult> {
     if (!this.#verifyTicket(input.ticket)) throw new Error("LIVE_TICKET_INVALID");
     if (input.ticket.expiresAtMs <= this.#clock.nowMs()) throw new Error("LIVE_TICKET_EXPIRED");
-    if (input.ticket.legs[0].provider === input.ticket.legs[1].provider) throw new Error("LIVE_TWO_PROVIDERS_REQUIRED");
+    const liveProviders = input.ticket.legs.map((leg) => leg.provider);
+    if (new Set(liveProviders).size !== liveProviders.length) throw new Error("LIVE_TWO_PROVIDERS_REQUIRED");
     if (!this.#consumeArm(input.ticket.ticketId, input.armToken)) throw new Error("LIVE_ARM_INVALID");
     const claim = await this.#journal?.claim(input.ticket) ?? { status: "CLAIMED" as const };
     if (claim.status === "COMPLETED") return claim.result;

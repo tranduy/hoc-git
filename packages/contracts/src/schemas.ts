@@ -316,10 +316,15 @@ export const PreflightRequestSchema = z.strictObject({
   opportunityId: z.string().trim().min(1).max(256),
   accountAId: z.string().trim().min(1).max(128),
   accountBId: z.string().trim().min(1).max(128),
+  additionalAccountIds: z.array(z.string().trim().min(1).max(128)).max(6).optional(),
   maxOddsDriftBps: z.number().int().min(0).max(10_000)
 }).superRefine((request, context) => {
-  if (request.accountAId === request.accountBId) {
-    context.addIssue({ code: "custom", path: ["accountBId"], message: "preflight accounts must be distinct" });
+  const accountIds = [request.accountAId, request.accountBId, ...(request.additionalAccountIds ?? [])];
+  const duplicate = accountIds.findIndex((id, index) => accountIds.indexOf(id) !== index);
+  if (duplicate >= 0) {
+    context.addIssue({ code: "custom",
+      path: duplicate < 2 ? ["accountBId"] : ["additionalAccountIds", duplicate - 2],
+      message: "preflight accounts must be distinct" });
   }
 }) satisfies z.ZodType<PreflightRequest>;
 
@@ -544,17 +549,23 @@ export const TwoLegExecutionResultSchema = z.strictObject({
   idempotencyKey: z.string().min(16).max(256),
   mode: z.literal("DRY_RUN"),
   status: z.enum(["BOTH_ACCEPTED", "NONE_ACCEPTED", "PARTIAL_FAILURE"]),
-  legs: z.tuple([ExecutionLegResultSchema, ExecutionLegResultSchema])
+  legs: z.array(ExecutionLegResultSchema).min(2)
 }).superRefine((result, context) => {
   const accepted = result.legs.filter((leg) => leg.status === "ACCEPTED").length;
-  const expected = accepted === 2 ? "BOTH_ACCEPTED"
+  // Accepting every leg is what makes a ticket covered, and a three-outcome
+  // ticket needs three of them. The status name predates leg counts above two.
+  const expected = accepted === result.legs.length ? "BOTH_ACCEPTED"
     : accepted === 0 && result.legs.every((leg) => leg.status === "REJECTED") ? "NONE_ACCEPTED"
       : "PARTIAL_FAILURE";
   if (result.status !== expected) {
-    context.addIssue({ code: "custom", path: ["status"], message: "status must match both leg results" });
+    context.addIssue({ code: "custom", path: ["status"], message: "status must match every leg result" });
   }
-  if (result.legs[0].provider === result.legs[1].provider) {
-    context.addIssue({ code: "custom", path: ["legs", 1, "provider"],
+  // One book cannot hold two legs of the same ticket: it would net them off
+  // internally and the cover is imaginary.
+  const providers = result.legs.map((leg) => leg.provider);
+  const duplicate = providers.findIndex((provider, index) => providers.indexOf(provider) !== index);
+  if (duplicate >= 0) {
+    context.addIssue({ code: "custom", path: ["legs", duplicate, "provider"],
       message: "execution legs must use distinct providers" });
   }
 }) satisfies z.ZodType<TwoLegExecutionResult>;
