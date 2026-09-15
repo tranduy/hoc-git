@@ -55,19 +55,41 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
   #sessionCache: { readonly sessions: readonly RedactedSessionStatus[]; readonly expiresAtMs: number } | null = null;
   #sessionRead: Promise<readonly RedactedSessionStatus[]> | null = null;
 
+  readonly #clock: { nowMs(): number };
+
   constructor(options: {
     readonly sessions: CatalogSessionAccess;
     readonly accounts: CatalogAccountDelegate;
     readonly supportedPairs: readonly SupportedCatalogPair[];
+    readonly clock?: { nowMs(): number };
   }) {
     this.#sessions = options.sessions;
     this.#accounts = options.accounts;
+    this.#clock = options.clock ?? { nowMs: Date.now };
     const pairs = options.supportedPairs.map((pair) => ({ ...pair, alias: pair.alias.trim() }));
     if (pairs.some((pair) => pair.alias.length === 0) || new Set(pairs.map(sourceId)).size !== pairs.length) {
       throw new Error("CATALOG_SOURCE_CONFIG_INVALID");
     }
     this.#pairs = pairs;
     this.#pairsById = new Map(pairs.map((pair) => [sourceId(pair), pair]));
+  }
+
+  /**
+   * A session stays ACTIVE after its renewal deadline passes, and every path
+   * that needs its secret then refuses. Measured 2026-09-15: fourteen sessions
+   * reported ACTIVE and not one was usable, the newest twenty-seven hours past
+   * renewal, with no retry pending and no reason recorded anywhere.
+   *
+   * Catalogs kept arriving the whole time, because the extension reads logged-in
+   * tabs and never touches the stored secret - so nothing on screen disagreed
+   * with itself while every preflight was being turned away.
+   */
+  #sessionReason(session: { readonly state: string; readonly renewAfterMs: number | null;
+    readonly reason: CatalogSourceStatus["reason"] } | null): CatalogSourceStatus["reason"] {
+    if (session === null) return null;
+    if (session.reason !== null) return session.reason;
+    return session.state === "ACTIVE" && (session.renewAfterMs === null ||
+      this.#clock.nowMs() >= session.renewAfterMs) ? "EXPIRED" : null;
   }
 
   async listStatuses(): Promise<readonly CatalogSourceStatus[]> {
@@ -83,7 +105,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
         sessionState: selected?.state ?? "UNCONFIGURED",
         ...(selected === null ? {} : { sessionSource: selected.source }),
         acquiredAtMs: selected?.acquiredAtMs ?? null,
-        reason: selected?.reason ?? null
+        reason: this.#sessionReason(selected)
       });
     });
   }

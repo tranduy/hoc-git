@@ -18,6 +18,18 @@ export const TONE_LABELS: Readonly<Record<FreshnessTone, string>> = {
   LIVE: "Fresh", SLOW: "Lagging", STALE: "Outdated", NONE: "No data"
 };
 
+/**
+ * Data freshness and session health are separate facts and a book can have one
+ * without the other: catalogs arrive through a logged-in tab and never touch the
+ * stored session secret, so an expired session shows no symptom on this strip.
+ * Measured 2026-09-15: every session was past renewal, the newest by
+ * twenty-seven hours, while the strip read Fresh for every book.
+ */
+export function sessionNeedsAttention(status: CatalogSourceStatus): boolean {
+  return status.reason === "EXPIRED" || status.sessionState === "ACTION_REQUIRED" ||
+    status.sessionState === "INVALID";
+}
+
 // The operator contract is 30 s: past that a book is not answering, so the
 // strip must call it out rather than shade it as merely slow.
 export const FRESHNESS_LIVE_MS = 15_000;
@@ -104,6 +116,11 @@ export function ProviderFreshnessStrip({ api, category, pollMs = 2_000, now = ()
           <span aria-hidden="true" className="provider-freshness__dot" />
           <strong className="provider-freshness__tone">{TONE_LABELS[freshness.tone]}</strong>
           <span className="provider-freshness__age">{formatAge(freshness.ageMs)}</span>
+          {sessionNeedsAttention(status)
+            ? <span className="provider-freshness__session" data-testid={`provider-session-${status.provider}`}>
+                {status.reason === "EXPIRED" ? "session expired" : "sign-in needed"}
+              </span>
+            : null}
         </div>
       ))}
       {error === null ? null : <span className="provider-freshness__error" role="status">{error}</span>}
