@@ -33,7 +33,10 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
   const shapes = status.cornerShapes;
   if (Array.isArray(shapes)) {
     const safe = shapes.filter((value): value is string => typeof value === "string" &&
-      /^\([\w\s.'\/&-]{1,38}\)$/u.test(value)).slice(0, 6);
+      // A market tail, never a bare name: either parenthesised or introduced by
+      // a dash. A widened class that accepted any word accepted team names too.
+      // The separators this token is built from stay excluded.
+      /^(?:\([\w\s.',\/&:-]{1,38}\)|-[\w\s.',\/&:-]{1,38})$/u.test(value)).slice(0, 6);
     if (safe.length > 0) fields.push(`cornerShapes:${safe.join("|")}`);
   }
   // Predicate name and row count only; anything else the page could put here is
@@ -384,6 +387,10 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       // widened to exactly what the provider writes and nothing more.
       const cornerLoose = /\((?:No\.?\s*of\s+)?Corners?\)\s*$/i;
       const anyParen = /\([^)]*\)\s*$/;
+      // A refused tail need not be parenthesised: the archived day-aggregate
+      // rows end "- Tuesday - 6 Matches". Take the segment after the last dash.
+      const tail = /-[^-]{1,38}$/;
+      const shapeSafe = /^(?:\([\w\s.',\/&:-]{1,38}\)|-[\w\s.',\/&:-]{1,38})$/;
       let cornerRows = 0, cornerSuffix = 0, bookingRows = 0, bookingSuffix = 0;
       let cornerLooseOk = 0, cornerOneSided = 0, cornerNoParen = 0;
       const cornerShapes = new Set();
@@ -401,10 +408,11 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
             // the same bounded public-label evidence the SABA walk already
             // reports, and the one thing that says what to widen the rule to.
             for (const team of teams) {
-              const match = anyParen.exec(team);
-              if (match === null || cornerShapes.size >= 6) continue;
+              if (cornerShapes.size >= 6) break;
+              const match = anyParen.exec(team) ?? tail.exec(team);
+              if (match === null) continue;
               const shape = match[0].trim().slice(0, 40);
-              if (/^\([\w\s.'\/&-]{1,38}\)$/.test(shape)) cornerShapes.add(shape);
+              if (shapeSafe.test(shape)) cornerShapes.add(shape);
             }
           }
         } else if (bookingLeague.test(league)) {

@@ -129,6 +129,10 @@ describe("CMD native catalog collector", () => {
   it("carries a bounded corner suffix sample and refuses anything else", () => {
     expect(formatCmdNativeCatalogDiagnostic({ cornerShapes: ["(No. of Corners)", "(1st Corner)"] }))
       .toBe("CMD_NATIVE[cornerShapes:(No. of Corners)|(1st Corner)]");
+    // A refused tail need not be parenthesised: the day-aggregate rows end
+    // "- Tuesday - 6 Matches", and naming that is the whole point.
+    expect(formatCmdNativeCatalogDiagnostic({ cornerShapes: ["- Tuesday - 6 Matches"] }))
+      .toBe("CMD_NATIVE[cornerShapes:- Tuesday - 6 Matches]");
     // A team name, a token, or anything with separators never rides along.
     expect(formatCmdNativeCatalogDiagnostic({ cornerShapes: ["Arsenal", "(a;b)", "(" + "x".repeat(40) + ")"] }))
       .toBe("CMD_NATIVE[]");
