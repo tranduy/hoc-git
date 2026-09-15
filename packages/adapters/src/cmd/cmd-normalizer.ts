@@ -63,7 +63,7 @@ const cmdTwoWayMarketSemantics = {
     settlementProfile: "football-first-half-including-added-time" }
 } as const;
 
-type CmdEventFamily = "GOALS" | "CORNERS" | "CARDS";
+type CmdEventFamily = "GOALS" | "CORNERS" | "CARDS" | "CORNER_FIRST" | "CARD_FIRST";
 
 const specialTwoWaySemantics = {
   CORNERS: {
@@ -92,6 +92,9 @@ function cmdMarketSemantics(betType: string, family: CmdEventFamily) {
   if (family === "GOALS") {
     return cmdTwoWayMarketSemantics[betType as keyof typeof cmdTwoWayMarketSemantics] ?? null;
   }
+  // The ordinal families carry exactly one market, resolved above. They have
+  // no handicap or total of their own, and must never borrow the corner book's.
+  if (family === "CORNER_FIRST" || family === "CARD_FIRST") return null;
   return specialTwoWaySemantics[family][betType as keyof typeof specialTwoWaySemantics[typeof family]] ?? null;
 }
 
@@ -135,7 +138,24 @@ function cmdGroupSemantics(group: CmdCatalogGroup, family: CmdEventFamily, provi
     if (evidence !== null) return evidence;
   }
   const betType = group.betTypeIds[0]!;
-  if (provider === "CMD" && family !== "GOALS" && (betType === "5" || betType === "FH:5")) {
+  if (provider === "CMD" && (family === "CORNER_FIRST" || family === "CARD_FIRST")) {
+    // CMD prices "which team takes the first corner" into the full-time
+    // handicap slot as a pick'em: measured live, every one of 28 rows carried a
+    // line of exactly zero. The line is meaningless here and is dropped, which
+    // is what makes it the same market BTI publishes as CORNER_FT_FIRST_TEAM.
+    //
+    // Admissible only because both books refund a match with no corner, so
+    // HOME and AWAY partition every outcome that pays. Without that rule this
+    // is a two-of-three pairing, and this project has already proved that is
+    // not an arb.
+    if (betType !== "1") return null;
+    const marketType = family === "CORNER_FIRST" ? "CORNER_FT_FIRST_TEAM" : "CARD_FT_FIRST_TEAM";
+    const spec = footballCategoricalMarketSpec(marketType);
+    if (spec === null || group.odds.length !== 2) return null;
+    return { marketType, scope: spec.scope, settlementProfile: spec.settlementProfile,
+      selections: ["HOME", "AWAY"], isHandicap: false, linePolicy: "NONE", rawFormat: "MALAY" };
+  }
+  if (provider === "CMD" && (family === "CORNERS" || family === "CARDS") && (betType === "5" || betType === "FH:5")) {
     // CMD's native result slots are HOME/DRAW/AWAY for the separately named
     // corner/booking fixture too. Its decimal quotes retain that statistic.
     if (group.odds.some(odd => odd.priceFormat !== "DECIMAL")) return null;
@@ -220,12 +240,24 @@ function classifyCmdEvent(rawCompetition: string, rawTeams: readonly string[]): 
   const cornerCompetition = /\s*-\s*CORNERS\s*$/iu.test(competition);
   const bookingCompetition = /\s*-\s*BOOKINGS\s*$/iu.test(competition);
   if (cornerCompetition) {
+    const firstSuffix = /\s*\(\s*1st\s+Corner\s*\)\s*$/iu;
+    if (rawTeams.every((team) => firstSuffix.test(team))) {
+      const teams = normalizedDistinctTeams(rawTeams, firstSuffix);
+      return teams.length === 2 ? { competition: competition.replace(/\s*-\s*CORNERS\s*$/iu, "").trim(),
+        teams, family: "CORNER_FIRST" } : null;
+    }
     const suffix = /\s*\(\s*No\.?\s*of\s+Corners\s*\)\s*$/iu;
     if (!rawTeams.every((team) => suffix.test(team))) return null;
     return { competition: competition.replace(/\s*-\s*CORNERS\s*$/iu, "").trim(),
       teams: normalizedDistinctTeams(rawTeams, suffix), family: "CORNERS" };
   }
   if (bookingCompetition) {
+    const firstSuffix = /\s*\(\s*1st\s+Booking\s*\)\s*$/iu;
+    if (rawTeams.every((team) => firstSuffix.test(team))) {
+      const teams = normalizedDistinctTeams(rawTeams, firstSuffix);
+      return teams.length === 2 ? { competition: competition.replace(/\s*-\s*BOOKINGS\s*$/iu, "").trim(),
+        teams, family: "CARD_FIRST" } : null;
+    }
     const suffix = /\s*\(\s*Total\s+Bookings\s*\)\s*$/iu;
     if (!rawTeams.every((team) => suffix.test(team))) return null;
     return { competition: competition.replace(/\s*-\s*BOOKINGS\s*$/iu, "").trim(),

@@ -576,27 +576,66 @@ describe("normalizeCmdCatalog", () => {
     ]);
   });
 
+  it("admits the first-corner and first-card props as the two-way market BTI publishes", () => {
+    // Measured live: CMD writes these as "(1st Corner)" / "(1st Booking)" and
+    // prices them into slot 1, the full-time handicap, with a line of exactly
+    // zero on all 28 rows - a pick'em, not a handicap. BTI publishes the same
+    // market as CORNER_FT_FIRST_TEAM on 25 fixtures and CARD_FT_FIRST_TEAM on
+    // 13. Both books refund a match with no corner, so HOME and AWAY partition
+    // every outcome that pays.
+    const props = [
+      { leagueName: "CHINA FOOTBALL SUPER LEAGUE - CORNERS",
+        teamNames: ["Shanghai Shenhua (1st Corner)", "Beijing Guoan (1st Corner)"],
+        marketType: "CORNER_FT_FIRST_TEAM" },
+      { leagueName: "CHINA FOOTBALL SUPER LEAGUE - BOOKINGS",
+        teamNames: ["Shanghai Shenhua (1st Booking)", "Beijing Guoan (1st Booking)"],
+        marketType: "CARD_FT_FIRST_TEAM" }
+    ];
+    for (const { marketType, ...candidate } of props) {
+      const result = normalizeCmdCatalog([{ ...structuredClone(record), ...candidate, groups: [{
+        betTypeIds: ["1"], labels: ["0"], odds: [
+          { marketOddsId: "first-team", priceText: "0.88", status: null, greyedOut: "false", lineText: "0" },
+          { marketOddsId: "first-team", priceText: "-0.96", status: null, greyedOut: "false", lineText: null }
+        ] }] }], { observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1,
+        timezoneOffsetMinutes: 420, sequence: 1 });
+      // The suffix is stripped back to the real fixture, and the pick'em line
+      // is dropped: carrying it would make this a handicap it is not.
+      expect(result.events).toHaveLength(1);
+      expect(result.events[0]).toMatchObject({ participantA: "Shanghai Shenhua",
+        participantB: "Beijing Guoan", competition: "CHINA FOOTBALL SUPER LEAGUE" });
+      expect(result.markets).toMatchObject([{ marketType, scope: "FULL_TIME", line: null }]);
+      expect(result.quotes.map((quote) => quote.selection).sort()).toEqual(["AWAY", "HOME"]);
+      expect(result.quotes.every((quote) => quote.line === null && quote.rawFormat === "MALAY")).toBe(true);
+    }
+  });
+
+  it("gives a first-ordinal prop no handicap, total or result market of its own", () => {
+    // The pseudo-fixture prices one market. A stray total on the same row must
+    // not become a corner total, which would be a different bet entirely.
+    for (const betTypeIds of [["3"], ["7"], ["8"], ["5"], ["MAIN:2"]]) {
+      const result = normalizeCmdCatalog([{ ...structuredClone(record),
+        leagueName: "CHINA FOOTBALL SUPER LEAGUE - CORNERS",
+        teamNames: ["Shanghai Shenhua (1st Corner)", "Beijing Guoan (1st Corner)"],
+        groups: [{ betTypeIds, labels: ["2.5"], odds: [
+          { marketOddsId: "stray", priceText: "0.88", status: null, greyedOut: "false", lineText: "2.5" },
+          { marketOddsId: "stray", priceText: "-0.96", status: null, greyedOut: "false", lineText: null }
+        ] }] }], { observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1,
+        timezoneOffsetMinutes: 420, sequence: 1 });
+      expect(result.markets, betTypeIds.join()).toEqual([]);
+      expect(result.quotes, betTypeIds.join()).toEqual([]);
+    }
+  });
+
   it("fails closed on unsupported CMD pseudo-events instead of relabelling them as goal markets", () => {
     const unsupported = [
       { leagueName: "CHINA FOOTBALL SUPER LEAGUE - CORNERS",
         teamNames: ["Shanghai Shenhua (11th Corner)", "Beijing Guoan (11th Corner)"] },
       { leagueName: "CHINA FOOTBALL SUPER LEAGUE - BOOKINGS",
         teamNames: ["Shanghai Shenhua (4th Booking)", "Beijing Guoan (4th Booking)"] },
-      // The shapes CMD actually writes, measured live: 16 corner and 6 booking
-      // fixtures a night, every one of them a two-way pick'em - slot 1, the
-      // full-time handicap, with a line of exactly zero on all 28 rows.
-      //
-      // BTI publishes the matching CORNER_FT_FIRST_TEAM and CARD_FT_FIRST_TEAM
-      // on 25 and 13 fixtures, so the temptation is to admit these and pair
-      // them. Do not, on this evidence: the market's own outcome space is
-      // HOME | AWAY | NONE, neither book prices NONE, and backing HOME on one
-      // book against AWAY on the other is the two-of-three pairing this project
-      // already proved is not an arb. Whether a match with no corner voids or
-      // loses is a settlement rule, and it is not in either feed.
+      // A later ordinal has no counterpart on any other book and stays out.
+      // The first ordinal does - see the first-team test below.
       { leagueName: "CHINA FOOTBALL SUPER LEAGUE - CORNERS",
-        teamNames: ["Shanghai Shenhua (1st Corner)", "Beijing Guoan (1st Corner)"] },
-      { leagueName: "CHINA FOOTBALL SUPER LEAGUE - BOOKINGS",
-        teamNames: ["Shanghai Shenhua (1st Booking)", "Beijing Guoan (1st Booking)"] },
+        teamNames: ["Shanghai Shenhua (3rd Corner)", "Beijing Guoan (3rd Corner)"] },
       { leagueName: "SPECIFIC 15 MINS", teamNames: ["Alpha FC (00:00-15:00)", "Beta FC (00:00-15:00)"] },
       { leagueName: "WHICH TEAM WILL ADVANCE", teamNames: ["Alpha FC", "Beta FC"] },
       { leagueName: "SINGLE TEAM OVER/UNDER", teamNames: ["Alpha FC", "Beta FC"] },
