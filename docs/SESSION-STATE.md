@@ -2528,13 +2528,39 @@ cornerLooseOk:0  cornerOneSided:0  cornerNoParen:0
 cornerShapes: (1st Corner)
 ```
 
-9 dòng bị loại **toàn bộ là `(1st Corner)`** — cược "đội nào đá phạt góc đầu
-tiên", **không phải** kèo tài/xỉu hay chấp phạt góc. Dòng 237 của
-`cmd-normalizer.ts` loại nó có chủ đích. **Loại là đúng**: đem nó so với kèo chấp
-góc của sàn khác chính là chế ra chênh lệch ảo.
+Các dòng bị loại được gọi tên hết, `shapesBlind:0`:
+
+```
+kèo góc bị loại (16) → toàn bộ (1st Corner)
+kèo thẻ bị loại  (6) → toàn bộ (1st Booking)
+```
+
+**Loại chúng KHÔNG đúng** — đây là chỗ tôi kết luận sai lần đầu. BTI có đúng hai
+loại kèo ấy, và là **hai cửa HOME/AWAY**, tức so sánh được về mặt cấu trúc:
+
+```
+BTI  CORNER_FT_FIRST_TEAM   25 trận   (quotes: HOME, AWAY)
+BTI  CARD_FT_FIRST_TEAM     13 trận
+BTI  CORNER_FT_LAST_TEAM    25 trận
+```
+
+Dòng 237 `cmd-normalizer.ts` loại `((?:d+(?:ST|ND|RD|TH)s+)?(?:CORNER|BOOKING|CARD)S?)`
+— gộp chung prop thứ tự với thứ không so được. Có **~22 trận CMD** đang rơi vào đó.
+
+Muốn nhận vào thì còn phải: tách họ riêng ánh xạ sang `CORNER_FT_FIRST_TEAM` /
+`CARD_FT_FIRST_TEAM`, bóc hậu tố lấy lại tên đội, và **quan trọng nhất** xác minh
+mã bet type CMD dùng trên những dòng đó thật sự mang nghĩa "đội đá góc đầu tiên".
+Chưa có bằng chứng bet type → chưa sửa. Đoán chỗ này là chế ra chênh lệch ảo.
 
 Khớp chéo với danh mục sống: 16 nhận được → **17 trận có kèo góc**; 6 → **6 trận có
-kèo thẻ**. Không có gì hỏng.
+kèo thẻ**. Phần *nhận được* không hỏng; phần *bị loại* thì hỏng, xem trên.
+
+Hai họ khác trong danh sách loại **đúng là loại đúng**:
+- `SPECIFIC 15 MINS` (`Dortmund (00:00-15:00)`) — dò cả 230 loại kèo của BTI, 74
+  của APSPORT, 62 của SBOBET: **không sàn nào có kèo tương đương**. BTI chỉ có
+  `FT_FIRST_GOAL_MINUTE_RANGE` (phút bàn thắng đầu), khác hẳn.
+- `Home Team No.of Corners - Tuesday - 6 Matches` — **kèo gộp 6 trận trong ngày**,
+  không phải một trận.
 
 Bộ đếm để lại làm chốt canh: nếu CMD đổi sang hậu tố khác, `cornerShapes` sẽ **gọi
 tên** nó thay vì lặng lẽ rụng trận. Mẫu chỉ lấy phần trong ngoặc, tối đa 6 dạng,
