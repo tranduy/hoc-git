@@ -1,14 +1,15 @@
 export type MaintenanceLevel = "INFO" | "WARN" | "ERROR";
 export interface MaintenanceNotification { readonly id: string; readonly atMs: number;
   readonly level: MaintenanceLevel; readonly message: string }
-export interface MaintenanceStatus { readonly running: boolean; readonly scheduledHour: 3;
+export interface MaintenanceStatus { readonly running: boolean; readonly scheduledHour: number | null;
   readonly lastStartedAtMs: number | null; readonly lastCompletedAtMs: number | null;
   readonly lastResult: "SUCCESS" | "FAILED" | null; readonly notifications: readonly MaintenanceNotification[] }
 
 function parseStatus(value: unknown): MaintenanceStatus {
   if (typeof value !== "object" || value === null) throw new Error("Invalid maintenance response");
   const input = value as Partial<MaintenanceStatus>;
-  if (typeof input.running !== "boolean" || input.scheduledHour !== 3 || !Array.isArray(input.notifications)) {
+  if (typeof input.running !== "boolean" || !Array.isArray(input.notifications) ||
+    (input.scheduledHour !== null && typeof input.scheduledHour !== "number")) {
     throw new Error("Invalid maintenance response");
   }
   return value as MaintenanceStatus;

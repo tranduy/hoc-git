@@ -4,7 +4,7 @@ import type { MaintenanceStatus } from "../api/maintenance.js";
 import type { ProfitAlert } from "../watch/profit-alert-tracker.js";
 import { MaintenanceControls } from "./maintenance-controls.js";
 
-const status: MaintenanceStatus = { running: false, scheduledHour: 3, lastStartedAtMs: null,
+const status: MaintenanceStatus = { running: false, scheduledHour: null, lastStartedAtMs: null,
   lastCompletedAtMs: null, lastResult: null, notifications: [
     { id: "1", atMs: 1_000, level: "ERROR", message: "SABA hết phiên" }
   ] };

@@ -74,3 +74,20 @@ describe("createDailyMaintenanceScheduler", () => {
     scheduler.stop();
   });
 });
+
+describe("the schedule a status claims", () => {
+  const control = () => new SessionRefreshControl({ refresh: async () => {} });
+
+  it("claims no hour until a timer is actually armed", () => {
+    // Removed deliberately on 2026-09-04 because its global reset destroyed
+    // healthy provider sockets - but the status went on reporting hour 3 for
+    // twelve days and zero runs, which is how a dead schedule stays invisible.
+    expect(control().status().scheduledHour).toBeNull();
+  });
+
+  it("reports the hour whoever armed the timer passed in", () => {
+    const value = control();
+    value.armSchedule(3);
+    expect(value.status().scheduledHour).toBe(3);
+  });
+});

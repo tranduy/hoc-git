@@ -77,7 +77,16 @@ export type MaintenanceTrigger = "MANUAL" | "SCHEDULED";
 
 export interface MaintenanceStatus {
   readonly running: boolean;
-  readonly scheduledHour: 3;
+  /**
+   * The hour a timer is actually armed for, or null when nothing is scheduled.
+   *
+   * This was the literal 3 for as long as it took to notice. The automatic
+   * 03:00 run was deliberately removed on 2026-09-04 because its global reset
+   * destroyed healthy provider sockets, and the status kept announcing a
+   * schedule that no longer existed - measured 2026-09-15, twelve days and
+   * zero scheduled runs later, still reporting hour 3.
+   */
+  readonly scheduledHour: number | null;
   readonly lastStartedAtMs: number | null;
   readonly lastCompletedAtMs: number | null;
   readonly lastResult: "SUCCESS" | "FAILED" | null;
@@ -92,6 +101,7 @@ export class SessionRefreshControl {
   #lastStartedAtMs: number | null = null;
   #lastCompletedAtMs: number | null = null;
   #lastResult: "SUCCESS" | "FAILED" | null = null;
+  #scheduledHour: number | null = null;
 
   constructor(options: { refresh(): Promise<void>; journal?: MaintenanceJournal; clock?: { nowMs(): number } }) {
     this.#refresh = options.refresh;
@@ -120,13 +130,21 @@ export class SessionRefreshControl {
     return this.status();
   }
 
+  /**
+   * Called by whoever actually arms a timer, so the reported hour cannot
+   * outlive the schedule it describes.
+   */
+  armSchedule(hour: number): void {
+    this.#scheduledHour = hour;
+  }
+
   async runScheduled(): Promise<void> {
     this.start("SCHEDULED");
     await this.#operation;
   }
 
   status(): MaintenanceStatus {
-    return { running: this.#operation !== null, scheduledHour: 3,
+    return { running: this.#operation !== null, scheduledHour: this.#scheduledHour,
       lastStartedAtMs: this.#lastStartedAtMs, lastCompletedAtMs: this.#lastCompletedAtMs,
       lastResult: this.#lastResult, notifications: this.#journal.notifications() };
   }
