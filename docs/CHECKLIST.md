@@ -66,7 +66,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI tối hẳn — kẹt ở `CANDIDATE`** | 5/6 sàn `tab=ACTIVE`; BTI `tab=CANDIDATE hop5=NONE`, `HTTP_RESPONSE=0`, `decoded=0`, `BTI_COV[none]`, catalog **3.480s**, bảng mất **4.721 dòng (-25%)**. Vòng khoá: thăng lên ACTIVE cần catalog evidence, mà API chỉ lái nguồn khi đã ACTIVE. **Đã sửa một nửa** (mục 32): ứng viên kẹt giờ được hỏi lại sau 60s thay vì đúng một lần mỗi nhiệm kỳ. **Không cứu được BTI**: retry bám vào ACK của một envelope, mà BTI không phát envelope nào ngoài `TAB_STATE`. | Cần người vận hành mở lại tab BTI. Đường tự động không có gì để bám |
+| 29 | **BTI tối hẳn** — trang không còn collector | Ép refresh bằng `POST /api/chrome-bridge/request-snapshot` (chạy trong trang, **không** navigate/reload — `snapshotRecoveryMode` trả `CATALOG_REFRESH` cho mọi sàn): trả **504 `PROVIDER_FEED_BASELINE_TIMEOUT`**. Sau đó vẫn `BTI_COV[none]`, `HTTP_RESPONSE=0`, `decoded=0`, `ingestRejections=TAB_STATE_TRANSPORT…`, `activeGeneration=null`. **`none` chứ không phải `phase:FAILED`** — collector không có trong trang, chứ không phải chạy rồi hỏng. Catalog **3.768s**, bảng thiếu **4.721 dòng (-25%)**. | **Người vận hành mở lại tab BTI.** Mọi đường tự động đã thử: ảnh chụp sảnh 15 lần, retry ứng viên (mục 32), ép refresh trực tiếp |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
