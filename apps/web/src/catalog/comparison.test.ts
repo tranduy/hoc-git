@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import { buildComparisonEvents, coherentLiveQuotes, COMPARISON_LIVE_LAG_LIMIT_MS,
+import { buildComparisonEvents, coherentLiveQuotes, COMPARISON_LIVE_LAG_LIMIT_MS, partitionRowsForTest,
   createCompetitionLinkMemory, livePricedCatalogs, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, selectionHandicapLine, selectionLabel, ticketMarketLabel,
   decimalOdds } from "./comparison.js";
@@ -1196,5 +1196,48 @@ describe("a live market left behind by its own book", () => {
       quote("FT_1X2", 44_773), quote("FT_DOUBLE_CHANCE", 27_679, false)
     ])]);
     expect(kept?.quotes).toHaveLength(2);
+  });
+});
+
+describe("a partition a book splits across native markets", () => {
+  const quote = (selection: string, rawOdds: string, sequence = 7, marketId = selection) =>
+    ({ provider: "SBOBET", category: "FOOTBALL", providerEventId: "e1", providerMarketId: marketId,
+      providerSelectionId: `sel-${marketId}-${selection}`, marketType: "FT_RESULT_BTTS",
+      scope: "FULL_TIME", selection, line: null, rawOdds, rawFormat: "DECIMAL", status: "OPEN",
+      isLive: false, sourceTimestampMs: null, receivedMonotonicMs: 1, sequence }) as unknown as ProviderQuote;
+  const market = (marketId: string) =>
+    ({ provider: "SBOBET", category: "FOOTBALL", providerEventId: "e1", providerMarketId: marketId,
+      marketType: "FT_RESULT_BTTS", scope: "FULL_TIME", line: null, status: "OPEN",
+      settlementProfile: "football-result-btts-regulation" }) as unknown as ProviderMarket;
+  const SELECTIONS = ["HOME_YES", "HOME_NO", "DRAW_YES", "DRAW_NO", "AWAY_YES", "AWAY_NO"];
+  const cells = (provider: string, sequence = 7) => SELECTIONS.map((selection) => ({
+    provider, market: { ...market(selection), provider },
+    quotes: [{ ...quote(selection, "6.00", sequence), provider }]
+  })) as unknown as ComparisonCell[];
+
+  it("prices a six-way partition each book publishes one outcome at a time", () => {
+    // Measured 2026-09-15: SBOBET and APSPORT both carried complete six-way
+    // FT_RESULT_BTTS sets on a hundred shared fixtures, and the board built no
+    // row at all, because the builder wanted the whole partition inside one
+    // native market - which only BTI does, and only for half-time/full-time.
+    const rows = partitionRowsForTest([...cells("SBOBET"), ...cells("APSPORT")]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.outcomeDomain).toHaveLength(6);
+    expect(new Set(rows[0]?.cells.map((cell) => cell.provider))).toEqual(new Set(["SBOBET", "APSPORT"]));
+  });
+
+  it("refuses legs captured at different moments", () => {
+    // The guard that must survive: a partition assembled from quotes taken at
+    // different sequences is the defect that priced a decided match against a
+    // balanced one, one market type over.
+    const torn = cells("SBOBET");
+    const mixed = torn.map((cell, index) => index === 0
+      ? { ...cell, quotes: [{ ...cell.quotes[0]!, sequence: 9 }] } : cell) as unknown as ComparisonCell[];
+    expect(partitionRowsForTest([...mixed, ...cells("APSPORT")])).toHaveLength(0);
+  });
+
+  it("refuses a book missing one outcome of the partition", () => {
+    const short = cells("SBOBET").slice(0, 5);
+    expect(partitionRowsForTest([...short, ...cells("APSPORT")])).toHaveLength(0);
   });
 });

@@ -1192,7 +1192,20 @@ export function exactTwoWayOutcomeDomain(marketType: string, scope: string,
 const partitionMarkets: Readonly<Record<string, readonly string[]>> = {
   CORNER_FT_1X2: ["AWAY", "DRAW", "HOME"], CORNER_FH_1X2: ["AWAY", "DRAW", "HOME"],
   CARD_FT_1X2: ["AWAY", "DRAW", "HOME"], CARD_FH_1X2: ["AWAY", "DRAW", "HOME"],
-  YELLOW_CARD_FT_1X2: ["AWAY", "DRAW", "HOME"]
+  YELLOW_CARD_FT_1X2: ["AWAY", "DRAW", "HOME"],
+  // Half-time/full-time is nine mutually exclusive outcomes that cover every
+  // regulation result, so it is a partition on the same terms as the corner
+  // 1X2 markets above. Four books publish it - measured 2026-09-15: CMD on 62
+  // fixtures, SBOBET 137, APSPORT 321, BTI 166 - and not one row was ever
+  // built from it, because a nine-way market fits neither the two-way domain
+  // nor any partition declared here.
+  FT_HALF_FULL_RESULT: ["AWAY_AWAY", "AWAY_DRAW", "AWAY_HOME", "DRAW_AWAY", "DRAW_DRAW",
+    "DRAW_HOME", "HOME_AWAY", "HOME_DRAW", "HOME_HOME"],
+  // Result crossed with both-teams-to-score: six outcomes, exactly one of which
+  // settles. Not to be confused with FT_DOUBLE_CHANCE_BTTS, whose double-chance
+  // legs overlap and therefore do not partition anything.
+  FT_RESULT_BTTS: ["AWAY_NO", "AWAY_YES", "DRAW_NO", "DRAW_YES", "HOME_NO", "HOME_YES"],
+  FH_RESULT_BTTS: ["AWAY_NO", "AWAY_YES", "DRAW_NO", "DRAW_YES", "HOME_NO", "HOME_YES"]
 };
 
 /** The full outcome set of a no-push partition market, or null. */
@@ -1272,6 +1285,54 @@ export function distinctResultSourceCells(cells: readonly ComparisonCell[]): rea
     !cells.some(other => other.provider === cell.provider && other.market.providerEventId !== cell.market.providerEventId));
 }
 
+/**
+ * One cell per provider per partition, assembled from the single-outcome native
+ * markets a book publishes separately. A book that already publishes the
+ * partition whole contributes nothing here, because its cells carry more than
+ * one quote and the pool below never sees them.
+ */
+function splitPartitionCells(
+  rawCells: readonly ComparisonCell[]
+): ReadonlyMap<string, { readonly domain: readonly string[]; readonly cells: readonly ComparisonCell[] }> {
+  const pools = new Map<string, { domain: readonly string[]; contract: string; cells: ComparisonCell[] }>();
+  for (const cell of rawCells) {
+    const { marketType, scope, line, settlementProfile } = cell.market;
+    if (line !== null || cell.quotes.length !== 1) continue;
+    const domain = exactPartitionOutcomeDomain(marketType, scope, line);
+    if (domain === null || domain.length < 2) continue;
+    const quote = cell.quotes[0]!;
+    if (quote.provider !== cell.provider || quote.category !== cell.market.category ||
+      quote.providerEventId !== cell.market.providerEventId ||
+      quote.providerMarketId !== cell.market.providerMarketId ||
+      quote.marketType !== marketType || quote.scope !== scope || quote.line !== null ||
+      !domain.includes(quote.selection)) continue;
+    const poolKey = [cell.provider, cell.market.providerEventId, marketType, scope, settlementProfile].join("|");
+    const pool = pools.get(poolKey) ??
+      { domain, contract: [marketType, scope, settlementProfile].join("|"), cells: [] };
+    pool.cells.push(cell);
+    pools.set(poolKey, pool);
+  }
+  const assembled = new Map<string, { domain: readonly string[]; cells: ComparisonCell[] }>();
+  for (const pool of pools.values()) {
+    const quotes = pool.cells.map((cell) => cell.quotes[0]!);
+    const selections = quotes.map((quote) => quote.selection);
+    if (selections.length !== pool.domain.length ||
+      [...selections].sort().join("|") !== [...pool.domain].join("|") ||
+      new Set(quotes.map((quote) => quote.providerSelectionId)).size !== quotes.length ||
+      new Set(quotes.map((quote) => quote.sequence)).size !== 1) continue;
+    const base = pool.cells[0]!;
+    const entry = assembled.get(pool.contract) ?? { domain: pool.domain, cells: [] };
+    entry.cells.push({ ...base, quotes });
+    assembled.set(pool.contract, entry);
+  }
+  return assembled;
+}
+
+/** Exposed for tests: partition rows are otherwise reachable only through a full board. */
+export function partitionRowsForTest(rawCells: readonly ComparisonCell[]): readonly ObservedTicketRow[] {
+  return partitionRows(rawCells);
+}
+
 function partitionRows(rawCells: readonly ComparisonCell[]): readonly ObservedTicketRow[] {
     const byContract = new Map<string, { domain: readonly string[]; cells: ComparisonCell[] }>();
     for (const cell of rawCells) {
@@ -1295,6 +1356,25 @@ function partitionRows(rawCells: readonly ComparisonCell[]): readonly ObservedTi
       const entry = byContract.get(key) ?? { domain, cells: [] };
       entry.cells.push(cell);
       byContract.set(key, entry);
+    }
+    // Books that split a partition across native markets.
+    //
+    // The loop above wants the whole partition inside one native market, which
+    // is how BTI publishes half-time/full-time. SBOBET and APSPORT publish one
+    // native market per outcome instead, so every cell carried a single quote
+    // against a nine- or six-outcome domain and was dropped. Measured
+    // 2026-09-15: FT_HALF_FULL_RESULT built rows from BTI alone, and
+    // FT_RESULT_BTTS built none at all, though SBOBET and APSPORT both carry
+    // complete six-way sets on a hundred shared fixtures.
+    //
+    // Assembling those into one cell keeps the guard that matters: every quote
+    // must share one sequence, so a partition can never be built from legs
+    // captured at different moments - the defect that priced a decided match
+    // against a balanced one earlier today.
+    for (const [contract, group] of splitPartitionCells(rawCells)) {
+      const entry = byContract.get(contract) ?? { domain: group.domain, cells: [] };
+      entry.cells.push(...group.cells);
+      byContract.set(contract, entry);
     }
     const rows: ObservedTicketRow[] = [];
     for (const [key, { domain, cells }] of byContract) {

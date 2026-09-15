@@ -117,6 +117,7 @@ async function main(): Promise<void> {
   ladderForWorstRow(built as readonly unknown[], catalogs as never);
   livePositiveSplit(built as readonly unknown[]);
   cmdMoreValue(built as readonly unknown[], catalogs as never);
+  marginBearingMarkets(built as readonly unknown[]);
   top(pairCounts, "by book pair", 15);
   top(marketCounts, "by market type", 15);
 }
@@ -476,4 +477,38 @@ export function cmdMoreValue(built: readonly unknown[],
 `);
   process.stdout.write(`    rows they carry a CMD side on     : ${richRows} (mean ${mean(richRows, richMatched)})
 `);
+}
+
+/**
+ * Every market type the board is willing to put a margin on. Only two routes
+ * may produce one - an exact two-way domain, and the 1X2/double-chance
+ * complement - so anything else here is a market being priced through a door
+ * nobody meant to open. FT_HALF_FULL_RESULT is the reason to look: it carries a
+ * nine-way selection space in which HOME_AWAY means "home at half time, away at
+ * full time", the same string double chance uses for "home or away".
+ */
+export function marginBearingMarkets(built: readonly unknown[]): void {
+  const priced = new Map<string, number>();
+  const rowsBy = new Map<string, number>();
+  for (const event of built as readonly { rows: readonly {
+    marketType: string; margin: number | null }[] }[]) {
+    for (const row of event.rows) {
+      rowsBy.set(row.marketType, (rowsBy.get(row.marketType) ?? 0) + 1);
+      if (typeof row.margin === "number" && Number.isFinite(row.margin)) {
+        priced.set(row.marketType, (priced.get(row.marketType) ?? 0) + 1);
+      }
+    }
+  }
+  process.stdout.write("\nmarket types carrying a margin\n");
+  for (const [type, count] of [...priced].sort((a, b) => b[1] - a[1])) {
+    process.stdout.write(`  ${type.padEnd(30)} priced=${String(count).padEnd(6)} rows=${rowsBy.get(type)}
+`);
+  }
+  const unpriced = [...rowsBy].filter(([type]) => !priced.has(type));
+  process.stdout.write(`  (market types present but never priced: ${unpriced.length})
+`);
+  for (const [type, count] of unpriced.sort((a, b) => b[1] - a[1]).slice(0, 8)) {
+    process.stdout.write(`      ${type.padEnd(30)} rows=${count}
+`);
+  }
 }
