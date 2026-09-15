@@ -47,6 +47,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 22 | Kèo góc có bị thu sót không | **Không.** SBOBET **0**, CMD **0** kèo góc thấy-mà-không-chuẩn-hoá-được | `nativeMarketObservations` |
 | 30 | BTI collector giờ tự khai | `BTI_COV[chars:N]` → `BTI_COV[phase:…;failed:…;requestStatus:…;authBlocked:…]`. Chính nó cho ra `none` và chốt được chẩn đoán mục 29 | `catalogShape` trong `/api/diag/pipeline` |
 | 31 | Sweep gia hạn tự giữ backoff | 8 lần thử/giờ → **1 lần mỗi 5→60 phút**, và nói rõ đợi bao lâu | `%LOCALAPPDATA%/tool-chenh/maintenance/events.jsonl` |
+| 32 | Ứng viên kẹt được hỏi lại | Trước: **1 lần/nhiệm kỳ**. Sau: nonce vẫn chặn spam mỗi ACK, nhưng ứng viên còn là ứng viên sau **60s** thì hỏi lại | `chrome-bridge-route.test.ts` |
 | 24 | BTI `UNPAIRED_OR_INVALID_NATIVE_SELECTIONS` — **không phải lỗ hổng** | 2.466 market/144 trận là bản tổng hợp trùng; **144/144 trận đã có sẵn** cả thang tài xỉu lẫn kèo chấp. **0** trận bị từ chối mà không có gì thay thế | `nativeDetail=summary` |
 | 23 | `OTHER_SCORE_DOMAIN_REQUIRED` — **trần thật** | APSPORT **0/805**, SBOBET **0/184** market có cửa vét "tỉ số khác". Không có cửa đó thì không định giá được | `nativeDetail=summary` |
 | 26 | CMD `EVENT_NOT_COMPARABLE` — tách 5 nguyên nhân | 1.170/130 trận họ kèo bị từ chối có chủ ý · 459/51 e-soccer · 190/10 còn sót. **`EVENT_STATISTIC_LEAGUE_UNRESOLVED` = 0** → không mất giải góc nào | `nativeDetail=summary` |
@@ -65,7 +66,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI tối hẳn — kẹt ở `CANDIDATE`** | 5/6 sàn `tab=ACTIVE hop5=ACTIVE`; **BTI `tab=CANDIDATE hop5=NONE`**, `HTTP_RESPONSE=0`, `decoded=0`, `BTI_COV[none]`, 0 dòng từ chối. Tab vẫn sống (`TAB_STATE=91`, keepalive ok) nhưng không phát lưu lượng catalog nào. Catalog đóng băng 2.347s, market 29.618, bảng mất **4.721 dòng (-25%)**. Restart API **làm tệ hơn**: trước đó `ACTIVE` với generation cũ, sau đó `CANDIDATE` và không gì cả. | Nguồn gắn vào dạng CANDIDATE mà **không bao giờ được thăng lên ACTIVE** (`attachAuthority` → `#reconcileAuthoritySlot`). Chưa truy tiếp |
+| 29 | **BTI tối hẳn — kẹt ở `CANDIDATE`** | 5/6 sàn `tab=ACTIVE`; BTI `tab=CANDIDATE hop5=NONE`, `HTTP_RESPONSE=0`, `decoded=0`, `BTI_COV[none]`, catalog **3.480s**, bảng mất **4.721 dòng (-25%)**. Vòng khoá: thăng lên ACTIVE cần catalog evidence, mà API chỉ lái nguồn khi đã ACTIVE. **Đã sửa một nửa** (mục 32): ứng viên kẹt giờ được hỏi lại sau 60s thay vì đúng một lần mỗi nhiệm kỳ. **Không cứu được BTI**: retry bám vào ACK của một envelope, mà BTI không phát envelope nào ngoài `TAB_STATE`. | Cần người vận hành mở lại tab BTI. Đường tự động không có gì để bám |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
@@ -116,6 +117,9 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"16 chữ số thập phân = giá bịa"** — sai, 931/942 quote APSPORT đều vậy.
 - **"Ô chứa quote của line khác"** — sai, `candidates=1`, line khớp hết.
 - **"APSPORT live còn sàn khác prematch"** — sai, `rows split on phase: 0`.
+- **Đổi tên lý do từ chối trong `saba-football-normalizer`** — phình phạm vi giữa
+  lúc sửa BTI, làm đỏ 5 test không liên quan. Đã hoàn nguyên. Việc đó không dính
+  gì tới lỗi đang sửa.
 - **"197 trận CMD bị loại là e-soccer"** — sai tỉ lệ. E-soccer chỉ **51/191**;
   phần lớn (130) là họ kèo bị từ chối có chủ ý. Tách tên ra mới biết.
 - **"SABA mất mảnh thứ 4 của ảnh chụp DOM, 511 lần"** — SAI. Ba bộ đếm bằng nhau
