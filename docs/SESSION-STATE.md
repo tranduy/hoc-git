@@ -2547,10 +2547,39 @@ BTI  CORNER_FT_LAST_TEAM    25 trận
 Dòng 237 `cmd-normalizer.ts` loại `((?:d+(?:ST|ND|RD|TH)s+)?(?:CORNER|BOOKING|CARD)S?)`
 — gộp chung prop thứ tự với thứ không so được. Có **~22 trận CMD** đang rơi vào đó.
 
-Muốn nhận vào thì còn phải: tách họ riêng ánh xạ sang `CORNER_FT_FIRST_TEAM` /
-`CARD_FT_FIRST_TEAM`, bóc hậu tố lấy lại tên đội, và **quan trọng nhất** xác minh
-mã bet type CMD dùng trên những dòng đó thật sự mang nghĩa "đội đá góc đầu tiên".
-Chưa có bằng chứng bet type → chưa sửa. Đoán chỗ này là chế ra chênh lệch ảo.
+#### Đã đo mã kèo — và kết luận là **vẫn không nhận**
+
+CMD không có trường "loại kèo": kèo là **cột** mà giá nằm ở đó. Đo trên roster sống:
+
+```
+betSlots: 1                ô chấp toàn trận (cột 10/40/41)
+refusedLineZero:    28     TẤT CẢ đều line = 0
+refusedLineNonZero:  0
+refusedLineAbsent:   0
+```
+
+Nghĩa là hai cửa đồng banh, **đúng cấu trúc** BTI's `CORNER_FT_FIRST_TEAM`. Nhưng
+nhận vào vẫn **sai**, vì lý do khác:
+
+```ts
+["CORNER_FT_FIRST_TEAM","FULL_TIME",/^(?:HOME|AWAY|NONE)$/u,"NONE"]
+```
+
+Không gian kết quả là **HOME | AWAY | NONE** (trận không có quả phạt góc nào).
+**Không sàn nào ra giá cho NONE** — BTI chỉ có 2 quote HOME/AWAY. Bắt HOME ở sàn
+này với AWAY ở sàn kia chính là **ghép 2 trong 3 cửa**, thứ mà dự án này đã tự
+chứng minh không phải kèo chắc.
+
+Điều còn thiếu là **luật thanh toán**: trận không có phạt góc thì hoàn tiền hay
+thua? Không nằm trong feed của sàn nào. Nếu ngày nào xác minh được **cả hai sàn
+đều hoàn tiền**, thì HOME+AWAY thành phân hoạch đầy đủ và mở được. Trước đó thì
+không.
+
+Test `cmd-normalizer.test.ts` giờ ghim đúng hình dạng CMD thật sự viết ra
+(`(1st Corner)`, `(1st Booking)`) kèm toàn bộ lý do, thay vì chỉ có
+`(11th Corner)` bịa ra.
+
+**Quy mô nếu mở được:** ~22 trận CMD/đêm, đối ứng BTI 25 trận góc + 13 trận thẻ.
 
 Khớp chéo với danh mục sống: 16 nhận được → **17 trận có kèo góc**; 6 → **6 trận có
 kèo thẻ**. Phần *nhận được* không hỏng; phần *bị loại* thì hỏng, xem trên.

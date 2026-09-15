@@ -582,6 +582,21 @@ describe("normalizeCmdCatalog", () => {
         teamNames: ["Shanghai Shenhua (11th Corner)", "Beijing Guoan (11th Corner)"] },
       { leagueName: "CHINA FOOTBALL SUPER LEAGUE - BOOKINGS",
         teamNames: ["Shanghai Shenhua (4th Booking)", "Beijing Guoan (4th Booking)"] },
+      // The shapes CMD actually writes, measured live: 16 corner and 6 booking
+      // fixtures a night, every one of them a two-way pick'em - slot 1, the
+      // full-time handicap, with a line of exactly zero on all 28 rows.
+      //
+      // BTI publishes the matching CORNER_FT_FIRST_TEAM and CARD_FT_FIRST_TEAM
+      // on 25 and 13 fixtures, so the temptation is to admit these and pair
+      // them. Do not, on this evidence: the market's own outcome space is
+      // HOME | AWAY | NONE, neither book prices NONE, and backing HOME on one
+      // book against AWAY on the other is the two-of-three pairing this project
+      // already proved is not an arb. Whether a match with no corner voids or
+      // loses is a settlement rule, and it is not in either feed.
+      { leagueName: "CHINA FOOTBALL SUPER LEAGUE - CORNERS",
+        teamNames: ["Shanghai Shenhua (1st Corner)", "Beijing Guoan (1st Corner)"] },
+      { leagueName: "CHINA FOOTBALL SUPER LEAGUE - BOOKINGS",
+        teamNames: ["Shanghai Shenhua (1st Booking)", "Beijing Guoan (1st Booking)"] },
       { leagueName: "SPECIFIC 15 MINS", teamNames: ["Alpha FC (00:00-15:00)", "Beta FC (00:00-15:00)"] },
       { leagueName: "WHICH TEAM WILL ADVANCE", teamNames: ["Alpha FC", "Beta FC"] },
       { leagueName: "SINGLE TEAM OVER/UNDER", teamNames: ["Alpha FC", "Beta FC"] },
