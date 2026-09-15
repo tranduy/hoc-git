@@ -1087,11 +1087,46 @@ export function hasValidComparisonPlayerBinding(cell: ComparisonCell): boolean {
       native.providerEventId === quote.providerEventId && native.providerMarketId === quote.providerMarketId));
 }
 
+/**
+ * Drop a provider's markets that stopped being republished while its other
+ * markets on the same fixture kept moving.
+ *
+ * Measured 2026-09-15: BTI carried two FT_TOTAL 2.5 markets on one fixture, one
+ * at sequence 308051 and one frozen at 83797. The frozen one priced OVER at
+ * 2.2903 against the live 2.1628, and pairing that against CMD's UNDER showed
+ * +0.16% for forty minutes without moving - a real edge is taken in seconds.
+ * That is an old price displayed as a current one, which this project refuses
+ * on principle, and it is invisible to a line or scope check because both
+ * markets agree on every field except how long ago anyone last saw them.
+ *
+ * Every quote in a catalog snapshot carries the sequence it was last observed
+ * at, so a market behind its own provider's newest is one the provider stopped
+ * sending. Nothing here compares sequences across providers: each counter is
+ * its own source's.
+ */
+function freshestProviderCells(cells: readonly ComparisonCell[]): readonly ComparisonCell[] {
+  const cellSequence = (cell: ComparisonCell): number =>
+    cell.quotes.reduce((highest, quote) => typeof quote.sequence === "number" && Number.isFinite(quote.sequence)
+      ? Math.max(highest, quote.sequence) : highest, Number.NEGATIVE_INFINITY);
+  const newestByProvider = new Map<ProviderId, number>();
+  for (const cell of cells) {
+    const sequence = cellSequence(cell);
+    if (!Number.isFinite(sequence)) continue;
+    newestByProvider.set(cell.provider, Math.max(newestByProvider.get(cell.provider) ?? sequence, sequence));
+  }
+  return cells.filter((cell) => {
+    const newest = newestByProvider.get(cell.provider);
+    if (newest === undefined) return true;
+    const sequence = cellSequence(cell);
+    return !Number.isFinite(sequence) ? true : sequence >= newest;
+  });
+}
+
 function eligibleTwoWayCells(cells: readonly ComparisonCell[], requireSameSettlement = true): readonly ComparisonCell[] {
   const marketType = cells[0]?.market.marketType;
   if (marketType === undefined || marketType === "FT_1X2" || marketType === "FH_1X2") return [];
   const domains = new Map<string, ComparisonCell[]>();
-  for (const cell of distinctResultSourceCells(cells)) {
+  for (const cell of freshestProviderCells(distinctResultSourceCells(cells))) {
     const selections = exactTwoWayOutcomeDomain(cell.market.marketType, cell.market.scope, cell.market.line)!;
     const signature = [selections.join("|"), requireSameSettlement ? cell.market.settlementProfile : "DISPLAY_ONLY"].join("|");
     const matching = domains.get(signature) ?? [];
