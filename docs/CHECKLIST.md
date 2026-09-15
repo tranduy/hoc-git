@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | **15.408** dòng / 777 trận | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | **15.257** dòng / 740 trận | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
@@ -36,19 +36,19 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 6 | Thôi báo lịch 03:00 không tồn tại | `scheduledHour` **3 → null** | `/api/maintenance` |
 | 7 | Đường gia hạn chỉ-phiên (Task 5 của plan 2026-08-17) | chạy, fail-closed, ghi journal | `%LOCALAPPDATA%/tool-chenh/maintenance/events.jsonl` |
 | 8 | CMD: đếm phủ sóng theo **trận**, không theo **event id** | `partialWanted` **68 → 0** | `CMD_NATIVE[...]` trong `/api/diag/pipeline` |
+| 9 | Chặn giá in-play lệch đồng hồ (hai lớp) | kèo dương **10 → 3**, cao nhất **66,25% → 0,31%**, in-play dương **0** | khối `by edge` + `positive rows by phase` |
+| 10 | APSPORT: kèo in-play của cùng một trận lệch nhau ~50.000 sequence | p50 **49.680** so với **0** ở CMD/SBOBET/BTI, **74** ở SABA | `coherentLiveQuotes` |
 
 ## ĐANG CHẠY — đã giao nhưng **chưa** chứng minh hết
 
 | # | Việc | Tình trạng thật |
 |---|---|---|
-| 9 | Chặn giá in-play lệch đồng hồ | Giảm được, **chưa dứt**. Ngưỡng 15 giây theo `observedAtMs` cấp catalog; nhưng catalog mới 2 giây vẫn chứa quote in-play cũ. `sourceTimestampMs` **null trên 100% quote của mọi sàn** nên không có mốc so chéo tốt hơn. |
-| 10 | SABA: set ảnh chụp DOM bị xé | Mới **đặt tên** cửa (`DOM_SET_TORN_<LOADER\|GENERATION\|PROBE>_AT_n_OF_m`), **chưa sửa gốc**. Thử nâng ba cửa ra ngoài vòng lặp → hỏng bảo đảm an toàn có chủ ý, đã hoàn nguyên. Chưa lần nào kích hoạt kể từ khi nạp lại. |
+| 11 | SABA: set ảnh chụp DOM bị xé | Mới **đặt tên** cửa (`DOM_SET_TORN_<LOADER\|GENERATION\|PROBE>_AT_n_OF_m`), **chưa sửa gốc**. Thử nâng ba cửa ra ngoài vòng lặp → hỏng một bảo đảm an toàn có chủ ý, đã hoàn nguyên. Chưa lần nào kích hoạt kể từ khi nạp lại. |
 
 ## CHƯA LÀM — có bằng chứng dẫn đường, không cần mò
 
 | # | Việc | Bằng chứng | Giá trị |
 |---|---|---|---|
-| 11 | **4 quote `HOME_AWAY` của APSPORT sai** | 4/319 quote `FT_DOUBLE_CHANCE` có giá > 2,0. DRAW 4,33 ⇒ phải ≈1,30, APSPORT nói 2,70 | Đang đẻ kèo ma **66,25%** và **53,04%** — lớn nhất còn lại |
 | 12 | `FT_HALF_FULL_RESULT` dùng chung tên selection `HOME_AWAY` | 324 quote, trung vị **46,9**, tất cả > 2,0 | **Chưa kiểm** có đường nào ghép nhầm nó với `DRAW` của 1X2 không |
 | 13 | CMD: 26 trận không có kèo More | 26/652, khớp sàn khác 26/26, trung bình 2,5 dòng so với 12,6 | ≈ **170/15.408 dòng (1,1%)** — nhỏ |
 
@@ -85,5 +85,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"16 chữ số thập phân = giá bịa"** — sai, 931/942 quote APSPORT đều vậy.
 - **"Ô chứa quote của line khác"** — sai, `candidates=1`, line khớp hết.
 - **"APSPORT live còn sàn khác prematch"** — sai, `rows split on phase: 0`.
+- **"4 quote `HOME_AWAY` của APSPORT sai"** — sai quy mô. Là **nửa số trận đang đá**
+  của APSPORT lệch sequence nội bộ; 4 quote chỉ là phần nhô lên trên mặt nước.
 - **"SABA gấp 2,6 lần là nhờ bản vá"** — sai, do extension nạp lại, không phải mã tôi sửa.
 - Không thấy log `[fabet-auth]` **không chứng minh được gì**: child stderr đi `stdio: "inherit"`, không vào file.
