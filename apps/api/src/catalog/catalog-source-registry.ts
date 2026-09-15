@@ -117,7 +117,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
   async resolveCatalogSource(id: string): Promise<CatalogSourceIdentity> {
     const pair = this.#pairsById.get(id);
     if (pair === undefined) {
-      if (id.startsWith("catalog-source:")) throw new Error("CATALOG_SOURCE_UNAVAILABLE");
+      if (id.startsWith("catalog-source:")) throw new Error("CATALOG_SOURCE_UNKNOWN");
       return this.#accounts.resolveCatalogSource(id);
     }
     const selected = await this.#resolveActive(pair);
@@ -137,7 +137,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
   ): Promise<T> {
     const pair = this.#pairsById.get(id);
     if (pair === undefined) {
-      if (id.startsWith("catalog-source:")) throw new Error("CATALOG_SOURCE_UNAVAILABLE");
+      if (id.startsWith("catalog-source:")) throw new Error("CATALOG_SOURCE_UNKNOWN");
       return this.#accounts.withActiveHandle(id, expectedProvider, consume, expectedCategory);
     }
     if (pair.provider !== expectedProvider) throw new Error("ACCOUNT_PROVIDER_MISMATCH");
@@ -148,7 +148,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
     const selected = await this.#resolveActive(pair);
     const handle = await this.#sessions.getActiveSecretHandle(selected.id);
     if (handle === null || handle.provider !== pair.provider || handle.category !== pair.category) {
-      throw new Error("CATALOG_SOURCE_UNAVAILABLE");
+      throw new Error("CATALOG_SOURCE_SECRET_UNAVAILABLE");
     }
     return consume(handle);
   }
@@ -156,7 +156,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
   async #resolveActive(pair: SupportedCatalogPair): Promise<RedactedSessionStatus> {
     const selected = newest((await this.#sessionStatuses()).filter((candidate) =>
       isPairAnchor(candidate, pair) && candidate.state === "ACTIVE"));
-    if (selected === null) throw new Error("CATALOG_SOURCE_UNAVAILABLE");
+    if (selected === null) throw new Error("CATALOG_SOURCE_NO_ACTIVE_SESSION");
     return selected;
   }
 

@@ -45,3 +45,35 @@ describe("a session that outlived its renewal deadline", () => {
     expect(status?.reason).toBe("UNAUTHORIZED");
   });
 });
+
+describe("why a catalog source refused", () => {
+  const withHandle = (handle: unknown, sessions: readonly RedactedSessionStatus[]) =>
+    new CatalogSourceRegistry({
+      sessions: { listStatuses: async () => ({ sessions }),
+        getActiveSecretHandle: async () => handle } as never,
+      accounts: {} as never,
+      supportedPairs: [{ provider: "BTI", category: "FOOTBALL", alias: "BTI" }] as never,
+      clock: { nowMs: () => NOW }
+    });
+
+  // One code used to cover an id typo, a book that never signed in, and a
+  // session whose secret is gone. They are three different problems with three
+  // different answers, and telling them apart is the whole point.
+  it("names an id that matches no configured pair", async () => {
+    await expect(withHandle(null, []).resolveCatalogSource("catalog-source:SABA:LOL"))
+      .rejects.toThrow("CATALOG_SOURCE_UNKNOWN");
+  });
+
+  it("names a configured pair with no ACTIVE session behind it", async () => {
+    await expect(withHandle(null, [session({ state: "ACTION_REQUIRED" })])
+      .resolveCatalogSource("catalog-source:BTI:FOOTBALL"))
+      .rejects.toThrow("CATALOG_SOURCE_NO_ACTIVE_SESSION");
+  });
+
+  it("names a live session whose secret is not there", async () => {
+    // Measured 2026-09-15: this is the door every preflight was hitting.
+    await expect(withHandle(null, [session()]).withActiveHandle(
+      "catalog-source:BTI:FOOTBALL", "BTI", async () => "unused", "FOOTBALL"))
+      .rejects.toThrow("CATALOG_SOURCE_SECRET_UNAVAILABLE");
+  });
+});

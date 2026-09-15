@@ -102,7 +102,7 @@ describe("createSessionServices", () => {
       expect.objectContaining({ id: "catalog-source:IM:FOOTBALL", provider: "IM", category: "FOOTBALL" })
     ]);
     await expect(services.catalogReader.sourceKey("catalog-source:BTI:LOL"))
-      .rejects.toThrow("CATALOG_SOURCE_UNAVAILABLE");
+      .rejects.toThrow("CATALOG_SOURCE_UNKNOWN");
     await services.close();
   });
 });

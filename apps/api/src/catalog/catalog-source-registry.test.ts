@@ -109,7 +109,7 @@ describe("CatalogSourceRegistry", () => {
 
     expect((await value.resolveCatalogSource("catalog-source:SABA:FOOTBALL")).sessionId).toBe("same-time-b");
     await expect(value.resolveCatalogSource("catalog-source:SABA:LOL"))
-      .rejects.toThrow("CATALOG_SOURCE_UNAVAILABLE");
+      .rejects.toThrow("CATALOG_SOURCE_NO_ACTIVE_SESSION");
     expect(await value.listStatuses()).toEqual([
       expect.objectContaining({ id: "catalog-source:SABA:FOOTBALL", sessionState: "ACTIVE", acquiredAtMs: 200 }),
       expect.objectContaining({ id: "catalog-source:SABA:LOL", sessionState: "ACTION_REQUIRED", reason: "EXPIRED" })
@@ -124,7 +124,7 @@ describe("CatalogSourceRegistry", () => {
     });
     expect(accounts.resolveCatalogSource).toHaveBeenCalledWith("manual-account");
     await expect(value.resolveCatalogSource("catalog-source:BTI:LOL"))
-      .rejects.toThrow("CATALOG_SOURCE_UNAVAILABLE");
+      .rejects.toThrow("CATALOG_SOURCE_UNKNOWN");
     await expect(value.withActiveHandle("catalog-source:SABA:FOOTBALL", "SBOBET",
       async () => "wrong", "FOOTBALL")).rejects.toThrow("ACCOUNT_PROVIDER_MISMATCH");
   });
@@ -166,7 +166,8 @@ describe("CatalogSourceRegistry", () => {
       supportedPairs: [{ provider: "IM", category: "LOL", alias: "TK88 IM", strategy: "TK88_CHROME",
         anchorProvider: "TK88", anchorCategory: null }]
     });
-    await expect(noTk88.resolveCatalogSource("catalog-source:IM:LOL")).rejects.toThrow("CATALOG_SOURCE_UNAVAILABLE");
+    await expect(noTk88.resolveCatalogSource("catalog-source:IM:LOL"))
+      .rejects.toThrow("CATALOG_SOURCE_NO_ACTIVE_SESSION");
   });
 
   it("coalesces repeated redacted session scans across source-key and status reads", async () => {
