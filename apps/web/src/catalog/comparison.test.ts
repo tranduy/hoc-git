@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import { buildComparisonEvents, createCompetitionLinkMemory, livePricedCatalogs, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
+import { buildComparisonEvents, COMPARISON_LIVE_LAG_LIMIT_MS, createCompetitionLinkMemory, livePricedCatalogs, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, selectionHandicapLine, selectionLabel, ticketMarketLabel,
   decimalOdds } from "./comparison.js";
 
@@ -1128,5 +1128,37 @@ describe("livePricedCatalogs", () => {
         events: [], markets: [], quotes: [] }) as unknown as LiveCatalogResponse
     ]);
     expect(kept).toHaveLength(2);
+  });
+});
+
+describe("in-play prices from a book read too long ago", () => {
+  const quote = (isLive: boolean) =>
+    ({ provider: "APSPORT", selection: "HOME", isLive, rawOdds: "1.90",
+      status: "OPEN" }) as unknown as ProviderQuote;
+  const catalog = (provider: string, observedAtMs: number, quotes: readonly ProviderQuote[]) =>
+    ({ provider, accountId: `catalog-source:${provider}:FOOTBALL`, observedAtMs,
+      events: [], markets: [], quotes }) as unknown as LiveCatalogResponse;
+
+  it("drops the live prices and keeps the prematch ones", () => {
+    // Measured 2026-09-15: four books were 1-13 seconds old and APSPORT was
+    // 151. Its prematch board was still worth comparing; its in-play board was
+    // a stale clock, and produced a 70.67% edge that did not exist.
+    const now = 1_700_000_000_000;
+    const [fresh, lagging] = livePricedCatalogs([
+      catalog("BTI", now, [quote(true), quote(false)]),
+      catalog("APSPORT", now - 151_000, [quote(true), quote(false)])
+    ]);
+    expect(fresh?.quotes).toHaveLength(2);
+    expect(lagging?.quotes).toHaveLength(1);
+    expect(lagging?.quotes[0]?.isLive).toBe(false);
+  });
+
+  it("leaves a book inside the live window completely alone", () => {
+    const now = 1_700_000_000_000;
+    const [, inside] = livePricedCatalogs([
+      catalog("BTI", now, [quote(true)]),
+      catalog("APSPORT", now - (COMPARISON_LIVE_LAG_LIMIT_MS - 1), [quote(true), quote(false)])
+    ]);
+    expect(inside?.quotes).toHaveLength(2);
   });
 });

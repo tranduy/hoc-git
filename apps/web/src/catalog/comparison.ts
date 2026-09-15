@@ -1682,21 +1682,50 @@ function withScheduledPhase(
 export const COMPARISON_PROVIDER_LAG_LIMIT_MS = 900_000;
 
 /**
+ * How far behind a book may be and still have its in-play prices compared.
+ *
+ * A prematch price survives a slow sample; an in-play price does not, because
+ * it moves on every touch of the ball. Books are read at different cadences -
+ * measured 2026-09-15, four books were 1-13 seconds old while APSPORT was 151 -
+ * so an in-play market at one book is routinely minutes ahead of the same
+ * market at another. Comparing those does not find an edge, it measures the gap
+ * between two clocks.
+ *
+ * Measured on the same board: of twelve positive rows, the seven in-play ones
+ * ran to 70.67% and the five prematch ones topped out at 0.62%. The absurd
+ * numbers were all clock skew, and a read-only pipeline could not have taken
+ * them even if they had been real.
+ */
+export const COMPARISON_LIVE_LAG_LIMIT_MS = 15_000;
+
+/**
  * Drop whole catalogs that are too far behind the freshest one. This is the
  * provider-scope twin of freshestProviderCells, which drops a single market
  * left behind by its own book.
  */
 export function livePricedCatalogs(
   catalogs: readonly LiveCatalogResponse[],
-  lagLimitMs: number = COMPARISON_PROVIDER_LAG_LIMIT_MS
+  lagLimitMs: number = COMPARISON_PROVIDER_LAG_LIMIT_MS,
+  liveLagLimitMs: number = COMPARISON_LIVE_LAG_LIMIT_MS
 ): readonly LiveCatalogResponse[] {
   const observed = catalogs
     .map((catalog) => catalog.observedAtMs)
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   if (observed.length === 0) return catalogs;
   const freshest = Math.max(...observed);
-  return catalogs.filter((catalog) => typeof catalog.observedAtMs !== "number" ||
-    !Number.isFinite(catalog.observedAtMs) || freshest - catalog.observedAtMs <= lagLimitMs);
+  const lagOf = (catalog: LiveCatalogResponse): number | null =>
+    typeof catalog.observedAtMs === "number" && Number.isFinite(catalog.observedAtMs)
+      ? freshest - catalog.observedAtMs : null;
+  return catalogs
+    .filter((catalog) => { const lag = lagOf(catalog); return lag === null || lag <= lagLimitMs; })
+    .map((catalog) => {
+      const lag = lagOf(catalog);
+      if (lag === null || lag <= liveLagLimitMs) return catalog;
+      // Keep the book, drop only the prices its lag invalidates. Its prematch
+      // board is still worth comparing; its in-play board is a stale clock.
+      const quotes = catalog.quotes.filter((quote) => !quote.isLive);
+      return quotes.length === catalog.quotes.length ? catalog : { ...catalog, quotes };
+    });
 }
 
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],

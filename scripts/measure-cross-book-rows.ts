@@ -112,6 +112,9 @@ async function main(): Promise<void> {
   };
   reportTopEdges(built as readonly unknown[], 3);
   blamePositiveRows(built as readonly unknown[]);
+  phaseDisagreement(built as readonly unknown[]);
+  ladderForWorstRow(built as readonly unknown[], catalogs as never);
+  livePositiveSplit(built as readonly unknown[]);
   top(pairCounts, "by book pair", 15);
   top(marketCounts, "by market type", 15);
 }
@@ -127,7 +130,8 @@ void main();
  */
 export function reportTopEdges(built: readonly unknown[], limit: number): void {
   type Cell = { provider?: string; quotes?: readonly { selection?: string; rawOdds?: string;
-    rawFormat?: string; sequence?: number; providerObservedAtMs?: number; status?: string }[] };
+    rawFormat?: string; sequence?: number; providerObservedAtMs?: number; status?: string;
+    isLive?: boolean }[] };
   type Row = { marketType: string; scope: string; line: string | null; margin: number | null;
     cells: readonly Cell[]; bestBySelection?: Readonly<Record<string, string>> };
   const found: { event: string; row: Row }[] = [];
@@ -154,6 +158,7 @@ export function reportTopEdges(built: readonly unknown[], limit: number): void {
         process.stdout.write(`           ${String(cell.provider).padEnd(8)} ` +
           `${String(quote.selection).padEnd(10)} raw=${String(quote.rawOdds).padEnd(8)} ` +
           `fmt=${String(quote.rawFormat).padEnd(7)} ` +
+          `${quote.isLive === true ? "LIVE " : "pre  "}` +
           `seq=${String(quote.sequence).padEnd(8)} ` +
           `age=${ageMs === null ? "?" : `${(ageMs / 1000).toFixed(0)}s`} ` +
           `${quote.status ?? ""}\n`);
@@ -210,4 +215,129 @@ positive rows: ${positives}
     process.stdout.write(`    ${provider.padEnd(10)} ${count}
 `);
   }
+}
+
+/**
+ * Whether the books on a row agree about which half of the match they are
+ * pricing. Two books quoting the same fixture at different phases are not
+ * quoting the same product, and pairing them reads as an edge when it is only
+ * a clock difference.
+ */
+export function phaseDisagreement(built: readonly unknown[]): void {
+  type Row = { margin: number | null;
+    cells: readonly { provider?: string; quotes?: readonly { isLive?: boolean }[] }[] };
+  let split = 0;
+  let splitPositive = 0;
+  let agreed = 0;
+  const splitBy = new Map<string, number>();
+  for (const event of built as readonly { rows: readonly Row[] }[]) {
+    for (const row of event.rows) {
+      const live = new Set<boolean>();
+      const liveProviders = new Set<string>();
+      for (const cell of row.cells) {
+        for (const quote of cell.quotes ?? []) {
+          live.add(quote.isLive === true);
+          if (quote.isLive === true) liveProviders.add(String(cell.provider));
+        }
+      }
+      if (live.size < 2) { agreed += 1; continue; }
+      split += 1;
+      if (typeof row.margin === "number" && row.margin > 0) splitPositive += 1;
+      for (const provider of liveProviders) splitBy.set(provider, (splitBy.get(provider) ?? 0) + 1);
+    }
+  }
+  process.stdout.write(`
+rows where books disagree on live/prematch
+`);
+  process.stdout.write(`  rows in phase agreement : ${agreed}
+`);
+  process.stdout.write(`  rows split on phase     : ${split}
+`);
+  process.stdout.write(`  of those, positive      : ${splitPositive}
+`);
+  for (const [provider, count] of [...splitBy].sort((a, b) => b[1] - a[1])) {
+    process.stdout.write(`    live side is ${provider.padEnd(9)} ${count}
+`);
+  }
+}
+
+/**
+ * The full line ladder each book publishes for the fixture and market behind
+ * the worst positive row. If one book's prices sit a rung away from everyone
+ * else's at the same labelled line, the line mapping is wrong; if its ladder
+ * simply stops short, the books are pricing different products.
+ */
+export function ladderForWorstRow(built: readonly unknown[],
+  catalogs: readonly { provider?: string; quotes?: readonly {
+    providerEventId?: string; marketType?: string; scope?: string; line?: string | null;
+    selection?: string; rawOdds?: string; rawFormat?: string; isLive?: boolean }[] }[]): void {
+  type Row = { marketType: string; scope: string; line: string | null; margin: number | null };
+  type Built = { providerEventIds?: Readonly<Record<string, string>>;
+    event?: { participantA?: string; participantB?: string }; rows: readonly Row[] };
+  let worst: { event: Built; row: Row } | null = null;
+  for (const event of built as readonly Built[]) {
+    for (const row of event.rows) {
+      if (typeof row.margin !== "number" || row.margin <= 0) continue;
+      if (worst === null || row.margin > (worst.row.margin ?? 0)) worst = { event, row };
+    }
+  }
+  if (worst === null) { process.stdout.write("\nno positive row to explain\n"); return; }
+  const { event, row } = worst;
+  process.stdout.write(`
+ladder behind the worst row: ${row.marketType}/${row.scope} ` +
+    `line=${row.line ?? "-"} at ${((row.margin ?? 0) * 100).toFixed(2)}%
+`);
+  process.stdout.write(`  ${event.event?.participantA ?? "?"} v ${event.event?.participantB ?? "?"}
+`);
+  for (const catalog of catalogs) {
+    const id = (event.providerEventIds ?? {})[String(catalog.provider)];
+    if (id === undefined) continue;
+    const ladder = new Map<string, string[]>();
+    for (const quote of catalog.quotes ?? []) {
+      if (quote.providerEventId !== id || quote.marketType !== row.marketType ||
+        quote.scope !== row.scope) continue;
+      const key = String(quote.line ?? "-");
+      const entries = ladder.get(key) ?? [];
+      entries.push(`${quote.selection}=${quote.rawOdds}${quote.isLive === true ? "*" : ""}`);
+      ladder.set(key, entries);
+    }
+    const lines = [...ladder.keys()].sort((a, b) => Number(a) - Number(b));
+    process.stdout.write(`  ${String(catalog.provider).padEnd(9)}` +
+      `${lines.length === 0 ? "(no ladder)" : ""}
+`);
+    for (const line of lines) {
+      process.stdout.write(`      line ${line.padEnd(7)} ${ladder.get(line)!.join("  ")}
+`);
+    }
+  }
+}
+
+/**
+ * Whether the positive rows are in-play. A live price moves every few seconds,
+ * so two books sampled seconds apart disagree by amounts that read as enormous
+ * edges and are only clock skew - and a read-only system could not act on them
+ * even if they were real.
+ */
+export function livePositiveSplit(built: readonly unknown[]): void {
+  type Row = { margin: number | null; marketType: string;
+    cells: readonly { quotes?: readonly { isLive?: boolean }[] }[] };
+  let livePositive = 0;
+  let prematchPositive = 0;
+  const liveEdges: number[] = [];
+  const prematchEdges: number[] = [];
+  for (const event of built as readonly { rows: readonly Row[] }[]) {
+    for (const row of event.rows) {
+      if (typeof row.margin !== "number" || row.margin <= 0) continue;
+      const live = row.cells.some((cell) => (cell.quotes ?? []).some((quote) => quote.isLive === true));
+      if (live) { livePositive += 1; liveEdges.push(row.margin); }
+      else { prematchPositive += 1; prematchEdges.push(row.margin); }
+    }
+  }
+  const describe = (edges: readonly number[]): string => edges.length === 0 ? "-"
+    : `max ${(Math.max(...edges) * 100).toFixed(2)}%`;
+  process.stdout.write("\npositive rows by phase\n");
+  process.stdout.write(`  in-play  : ${livePositive}  ${describe(liveEdges)}
+`);
+  process.stdout.write(`  prematch : ${prematchPositive}  ${describe(prematchEdges)}
+`);
 }
