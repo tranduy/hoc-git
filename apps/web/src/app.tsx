@@ -113,7 +113,7 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
       <h1>LoL is temporarily disabled</h1><p>Football realtime detection is the only active data flow.</p></header>
     : snapshot === undefined
     ? <header className="page-header"><h1>Loading {routeLabel}</h1><p>Waiting for a fresh local snapshot. No opportunity or mapping decision is available yet.</p></header>
-    : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} />
+    : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} freshnessApi={freshnessApi} />
     : route === "/football" ? <CategoryPage key="FOOTBALL" category="FOOTBALL" snapshot={snapshot} />
     : route === "/lol" ? <CategoryPage key="LOL" category="LOL" snapshot={snapshot} />
     : route === "/opportunities" ? <OpportunitiesPage snapshot={snapshot} connectionState={connectionState} />
