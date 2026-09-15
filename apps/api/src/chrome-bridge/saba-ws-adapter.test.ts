@@ -448,7 +448,7 @@ describe("SabaWsCatalogAdapter", () => {
     expect(catalog.nativeMarketObservations.filter((observation) =>
       observation.providerEventId === "133603577").map(({ disposition, reason }) =>
       [disposition, reason])).toEqual(Array.from({ length: 5 }, () =>
-      ["EXCLUDED", "EVENT_NOT_COMPARABLE"]));
+      ["EXCLUDED", "EVENT_TIME_UNRESOLVED"]));
   });
 
   it.each(["DOM", "WS"] as const)(
@@ -515,7 +515,10 @@ describe("SabaWsCatalogAdapter", () => {
       expect(new Set(native.map(({ providerMarketId }) => providerMarketId)))
         .toEqual(new Set([1, 3, 2, 7, 8].map((type) => String(id * 10 + type))));
       expect(native.every(({ disposition, reason }) => disposition === "EXCLUDED" &&
-        reason === "EVENT_NOT_COMPARABLE")).toBe(true);
+        // Two paths reach this fixture: the shared observed-football normalizer,
+        // which now names a SABA aggregate, and SABA's own normalizer, whose
+        // refusal is still the generic one.
+        (reason === "EVENT_MULTI_MATCH_AGGREGATE" || reason === "EVENT_NOT_COMPARABLE"))).toBe(true);
     }
   });
 

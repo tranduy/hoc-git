@@ -493,7 +493,7 @@ describe("SabaWsCatalogAdapter collector boundary", () => {
     expect(catalog.events.map(({ providerEventId }) => providerEventId)).not.toContain("unknown");
     expect(catalog.nativeMarketObservations).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerEventId: "unknown", disposition: "EXCLUDED",
-        reason: "EVENT_NOT_COMPARABLE" })
+        reason: "EVENT_TIME_UNRESOLVED" })
     ]));
   });
 
@@ -515,7 +515,7 @@ describe("SabaWsCatalogAdapter collector boundary", () => {
     expect(catalog).toMatchObject({ events: [], markets: [], quotes: [] });
     expect(catalog.nativeMarketObservations).toEqual([
       expect.objectContaining({ providerEventId: "unknown-only", disposition: "EXCLUDED",
-        reason: "EVENT_NOT_COMPARABLE" })
+        reason: "EVENT_TIME_UNRESOLVED" })
     ]);
   });
 

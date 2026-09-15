@@ -201,7 +201,21 @@ export function registerChromeBridgeRoute(
     // All per-connection indexes are provider-account scoped. A tab/source
     // replacement atomically overwrites its prior identity, keeping the route
     // bounded to the six supported provider accounts even before socket close.
-    const requestedSnapshots = new Map<ChromeBridgeProviderAccountId, number>();
+    // A candidate is promoted only when it produces catalog evidence, and the
+    // API drives a source only once it is active - so the snapshot asked for
+    // here is the one thing that breaks that circle. Remembering only the
+    // nonce meant asking exactly once per candidacy: if that single request
+    // landed while the page was mid-navigation or its collector was not yet
+    // ready, the book went dark until something else replaced the candidate.
+    //
+    // Measured 2026-09-16: BTI sat at tab=CANDIDATE hop5=NONE for forty-four
+    // minutes with HTTP_RESPONSE at zero and a live tab still sending
+    // TAB_STATE, costing the board 4,721 cross-book rows, while the other five
+    // books were active. Keep the nonce guard against per-ACK spam, and let a
+    // candidate that is still a candidate be asked again.
+    const CANDIDATE_SNAPSHOT_RETRY_MS = 60_000;
+    const requestedSnapshots = new Map<ChromeBridgeProviderAccountId,
+      { readonly nonce: number; readonly atMs: number }>();
     const keepAliveIntervalMs = options.keepAliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
     const keepAlive = setInterval(() => {
       if (writableSocket.readyState !== 1) return;
@@ -244,14 +258,20 @@ export function registerChromeBridgeRoute(
         // the reject alone is the whole recovery.
         if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") return;
         const observation = result.context?.authorityObservation;
-        if (control.kind === "ACK" && observation?.disposition === "CANDIDATE" &&
-          requestedSnapshots.get(observation.token.accountId) !== observation.token.nonce) {
-          requestedSnapshots.set(observation.token.accountId, observation.token.nonce);
+        const candidateToken = observation?.disposition === "CANDIDATE" ? observation.token : null;
+        const lastRequest = candidateToken === null
+          ? undefined : requestedSnapshots.get(candidateToken.accountId);
+        const candidateDue = candidateToken !== null && (lastRequest === undefined ||
+          lastRequest.nonce !== candidateToken.nonce ||
+          now() - lastRequest.atMs >= CANDIDATE_SNAPSHOT_RETRY_MS);
+        if (control.kind === "ACK" && candidateToken !== null && candidateDue) {
+          requestedSnapshots.set(candidateToken.accountId,
+            { nonce: candidateToken.nonce, atMs: now() });
           // A loopback reconnect is not authorization to hard-reload a provider
           // tab. The extension resolves this command with a DOM capture,
           // provider API call, or socket-only reconnect inside the current tab.
-          if (options.controlPlane?.requestCandidateSnapshot(observation.token) !== 1 &&
-            registry.authorityCoordinator.snapshot(observation.token.accountId).candidateToken === observation.token) {
+          if (options.controlPlane?.requestCandidateSnapshot(candidateToken) !== 1 &&
+            registry.authorityCoordinator.snapshot(candidateToken.accountId).candidateToken === candidateToken) {
             socket.send(JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: parsed.data.sourceId }));
           }
         }

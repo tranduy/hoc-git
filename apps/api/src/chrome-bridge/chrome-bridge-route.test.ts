@@ -541,6 +541,46 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
+  it("asks a stuck candidate again instead of once for the life of its token", async () => {
+    // Promotion to ACTIVE needs catalog evidence, and the API drives a source
+    // only once it is active, so this snapshot is the one thing that breaks
+    // that circle. Asking exactly once per candidacy meant a request that
+    // landed while the page was mid-navigation left the book dark for good.
+    //
+    // Measured 2026-09-16: BTI sat at tab=CANDIDATE hop5=NONE for forty-four
+    // minutes with HTTP_RESPONSE at zero and a live tab still sending
+    // TAB_STATE, costing the board 4,721 cross-book rows.
+    let now = 1_700_000_000_000;
+    const { app, controlPlane } = await appWithRoute(true, { now: () => now });
+    const asked = vi.spyOn(controlPlane, "requestCandidateSnapshot");
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+
+    let sequence = 0;
+    const send = async (): Promise<void> => {
+      socket.send(JSON.stringify({ ...validEnvelope, lobby: "KSPORT", sourceId: "chrome:KSPORT:7",
+        sequence: sequence++, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence }));
+      await new Promise((resolve) => { setTimeout(resolve, 40); });
+    };
+
+    await send();
+    expect(asked).toHaveBeenCalledTimes(1);
+
+    // Inside the retry window the candidacy is not asked again.
+    await send();
+    expect(asked).toHaveBeenCalledTimes(1);
+
+    // Past it, a candidate that is still a candidate is asked once more.
+    now += 60_000;
+    await send();
+    expect(asked).toHaveBeenCalledTimes(2);
+
+    socket.terminate();
+    await app.close();
+  });
+
   it("rejects a replaced candidate and requests only the exact current candidate", async () => {
     const { app } = await appWithRoute();
     const firstSocket = await app.injectWS("/api/chrome-bridge", {
