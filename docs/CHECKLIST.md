@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | **15.257** dòng / 740 trận | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | **19.132** dòng / 855 trận | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
@@ -38,6 +38,9 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 8 | CMD: đếm phủ sóng theo **trận**, không theo **event id** | `partialWanted` **68 → 0** | `CMD_NATIVE[...]` trong `/api/diag/pipeline` |
 | 9 | Chặn giá in-play lệch đồng hồ (hai lớp) | kèo dương **10 → 3**, cao nhất **66,25% → 0,31%**, in-play dương **0** | khối `by edge` + `positive rows by phase` |
 | 10 | APSPORT: kèo in-play của cùng một trận lệch nhau ~50.000 sequence | p50 **49.680** so với **0** ở CMD/SBOBET/BTI, **74** ở SABA | `coherentLiveQuotes` |
+| 12 | `FT_HALF_FULL_RESULT` dùng chung tên selection `HOME_AWAY` — **an toàn** | 0 dòng được tạo; `footballResultMarketSpec` chỉ nhận 6 loại, không có nó | `marginBearingMarkets` |
+| 14 | Ghép kèo nhiều cửa chưa ai so | HT/FT **0 → 180**, RESULT_BTTS **0 → 99**, HIGHEST_SCORING_HALF **0 → 436** | `by market type` |
+| 15 | Ráp phân hoạch bị sàn tách thành nhiều market gốc | HT/FT 72 → **180** sau khi ráp | `partitionRowsForTest` |
 
 ## ĐANG CHẠY — đã giao nhưng **chưa** chứng minh hết
 
@@ -49,8 +52,10 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Bằng chứng | Giá trị |
 |---|---|---|---|
-| 12 | `FT_HALF_FULL_RESULT` dùng chung tên selection `HOME_AWAY` | 324 quote, trung vị **46,9**, tất cả > 2,0 | **Chưa kiểm** có đường nào ghép nhầm nó với `DRAW` của 1X2 không |
-| 13 | CMD: 26 trận không có kèo More | 26/652, khớp sàn khác 26/26, trung bình 2,5 dòng so với 12,6 | ≈ **170/15.408 dòng (1,1%)** — nhỏ |
+| 13 | CMD: 26 trận không có kèo More | 26/652, khớp sàn khác 26/26, trung bình 2,5 dòng so với 12,6 | ≈ **170 dòng (1%)** — nhỏ, và đường lấy không tồn tại |
+| 16 | 215 loại kèo thu về mà không so sánh | Đã xử phần sạch. Phần còn lại phần lớn **một sàn** hoặc không phải phân hoạch | Cần audit từng loại |
+| 17 | `FT_DRAW_NO_BET` (3 sàn, 285 trận) | Hai cửa sạch **nhưng hoà thì hoàn tiền** — có nhánh đẩy, `partitionMargin` giả định không đẩy | Cần mô hình đẩy riêng |
+| 18 | `FT_GOAL_RANGE` (4 sàn, 1.114 trận) | Mỗi sàn chia khoảng khác nhau: `0-1/2-3/4-5/6+` vs `0-0/1-1/2-2/3-3` vs `4-6/7+` | **Không ghép được** — khác sản phẩm |
 
 ## CHẶN — không sửa được bằng mã
 
@@ -85,6 +90,8 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"16 chữ số thập phân = giá bịa"** — sai, 931/942 quote APSPORT đều vậy.
 - **"Ô chứa quote của line khác"** — sai, `candidates=1`, line khớp hết.
 - **"APSPORT live còn sàn khác prematch"** — sai, `rows split on phase: 0`.
+- **"215 loại kèo bị bỏ phí"** — đọc sai một phần: `FT_DOUBLE_CHANCE` đứng đầu bảng
+  chỉ vì nó góp ô vào dòng `FT_1X2`, không sinh dòng mang tên nó.
 - **"4 quote `HOME_AWAY` của APSPORT sai"** — sai quy mô. Là **nửa số trận đang đá**
   của APSPORT lệch sequence nội bộ; 4 quote chỉ là phần nhô lên trên mặt nước.
 - **"SABA gấp 2,6 lần là nhờ bản vá"** — sai, do extension nạp lại, không phải mã tôi sửa.
