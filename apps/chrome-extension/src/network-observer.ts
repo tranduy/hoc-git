@@ -7468,7 +7468,13 @@ export class NetworkObserver {
       // and five minutes on a page showing live prices, while CMD, SBOBET,
       // APSPORT and IM captured hundreds each. BTI was attached to iframes
       // only, because workers were listed for KSPORT and SABA by name.
+      // A service worker is the case that hid BTI: it intercepts the page's
+      // fetches, so every API call leaves from a session nobody watched and
+      // HTTP_RESPONSE stayed at zero on a page visibly serving live odds.
+      // Measured 2026-09-16 with the census above finally counting BTI:
+      // targets[service_worker:1] and nothing else.
       const observeChild = targetInfo?.type === "iframe" || targetInfo?.type === "worker" ||
+        targetInfo?.type === "service_worker" ||
         (source.lobby === "SABA" && targetInfo?.type === "shared_worker");
       if (childSessionId !== null && observeChild) {
         const targetId = typeof targetInfo.targetId === "string" ? targetInfo.targetId : undefined;

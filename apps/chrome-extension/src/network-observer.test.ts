@@ -8614,13 +8614,14 @@ describe("NetworkObserver", () => {
     // five minutes on a page showing live prices, while CMD, SBOBET, APSPORT
     // and IM captured hundreds each. Workers were listed for KSPORT and SABA by
     // name, so BTI was attached to iframes only.
-    for (const lobby of ["BTI", "CMD", "TSPORT", "IM"] as const) {
+    for (const [lobby, targetType] of [["BTI", "service_worker"], ["CMD", "worker"],
+      ["TSPORT", "worker"], ["IM", "service_worker"]] as const) {
       const sendCommand = vi.fn(async () => ({}));
       const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
       const observer = new NetworkObserver({ sendCommand, forward });
 
       await observer.handleEvent({ lobby, sourceId: `chrome:${lobby}:9`, tabId: 9 },
-        "Target.attachedToTarget", { sessionId: `${lobby}-worker`, targetInfo: { type: "worker" } });
+        "Target.attachedToTarget", { sessionId: `${lobby}-worker`, targetInfo: { type: targetType } });
 
       expect(sendCommand, lobby).toHaveBeenCalledWith(9, "Network.enable",
         expect.any(Object), `${lobby}-worker`);
