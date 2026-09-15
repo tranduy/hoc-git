@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import { buildComparisonEvents, createCompetitionLinkMemory, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
+import { buildComparisonEvents, createCompetitionLinkMemory, livePricedCatalogs, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, selectionHandicapLine, selectionLabel, ticketMarketLabel,
   decimalOdds } from "./comparison.js";
 
@@ -1094,5 +1094,39 @@ describe("competition identity learned from shared fixtures", () => {
     const paired = buildComparisonEvents([left, right]).filter((entry) => entry.providers.length > 1);
 
     expect(paired).toHaveLength(0);
+  });
+});
+
+describe("livePricedCatalogs", () => {
+  const catalog = (provider: string, observedAtMs: number) =>
+    ({ provider, accountId: `catalog-source:${provider}:FOOTBALL`, observedAtMs,
+      events: [], markets: [], quotes: [] }) as unknown as LiveCatalogResponse;
+
+  it("drops a book that stopped feeding days ago", () => {
+    // Measured 2026-09-15: IM had been dead 55.7 hours, was still served, and
+    // was named best on 74 of the 80 positive rows on the board. The next
+    // slowest book was 151 seconds behind.
+    const now = 1_700_000_000_000;
+    const kept = livePricedCatalogs([
+      catalog("BTI", now), catalog("APSPORT", now - 151_000), catalog("IM", now - 200_660_000)
+    ]);
+    expect(kept.map((item) => item.provider)).toEqual(["BTI", "APSPORT"]);
+  });
+
+  it("keeps a whole board that is late together", () => {
+    // Lag is relative to the freshest catalog, so a board that is uniformly
+    // behind still compares against itself instead of emptying.
+    const old = 1_600_000_000_000;
+    const kept = livePricedCatalogs([catalog("BTI", old), catalog("CMD", old - 1_000)]);
+    expect(kept).toHaveLength(2);
+  });
+
+  it("never drops a catalog whose observation time is unusable", () => {
+    const kept = livePricedCatalogs([
+      catalog("BTI", 1_700_000_000_000),
+      ({ provider: "CMD", accountId: "catalog-source:CMD:FOOTBALL", observedAtMs: Number.NaN,
+        events: [], markets: [], quotes: [] }) as unknown as LiveCatalogResponse
+    ]);
+    expect(kept).toHaveLength(2);
   });
 });

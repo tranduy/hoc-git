@@ -1665,10 +1665,45 @@ function withScheduledPhase(
   });
 }
 
+/**
+ * How far behind the freshest book a catalog may be and still be priced.
+ *
+ * A book that stops feeding keeps its last catalog, and the API keeps serving
+ * it. Pairing those prices against live ones does not find an arbitrage, it
+ * manufactures one. Measured 2026-09-15: IM had been dead for 55.7 hours and
+ * was still served; it was named the best side on 74 of the 80 positive rows
+ * on the board, while the next-slowest book was 151 seconds behind.
+ *
+ * The bound is relative to the freshest catalog rather than a wall clock, so a
+ * whole board that is briefly late is still compared against itself. Fifteen
+ * minutes sits far above any legitimately slow book and far below a dead one -
+ * it is not a threshold to loosen when the row count looks thin.
+ */
+export const COMPARISON_PROVIDER_LAG_LIMIT_MS = 900_000;
+
+/**
+ * Drop whole catalogs that are too far behind the freshest one. This is the
+ * provider-scope twin of freshestProviderCells, which drops a single market
+ * left behind by its own book.
+ */
+export function livePricedCatalogs(
+  catalogs: readonly LiveCatalogResponse[],
+  lagLimitMs: number = COMPARISON_PROVIDER_LAG_LIMIT_MS
+): readonly LiveCatalogResponse[] {
+  const observed = catalogs
+    .map((catalog) => catalog.observedAtMs)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (observed.length === 0) return catalogs;
+  const freshest = Math.max(...observed);
+  return catalogs.filter((catalog) => typeof catalog.observedAtMs !== "number" ||
+    !Number.isFinite(catalog.observedAtMs) || freshest - catalog.observedAtMs <= lagLimitMs);
+}
+
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
   competitionMemory?: CompetitionLinkMemory,
   options: { readonly playerComparisonsOnly?: boolean } = {}): readonly ComparisonEvent[] {
-  const orderedCatalogs = sortProviderItems(withScheduledPhase(catalogs), (catalog) => catalog.provider,
+  const orderedCatalogs = sortProviderItems(withScheduledPhase(livePricedCatalogs(catalogs)),
+    (catalog) => catalog.provider,
     (left, right) => left.accountId.localeCompare(right.accountId));
   const catalogIndexes = new Map<LiveCatalogResponse, {
     readonly marketsByEvent: ReadonlyMap<string, readonly ProviderMarket[]>;
