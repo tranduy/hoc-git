@@ -1,7 +1,8 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import type { CatalogSourceStatus } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ProviderFreshnessStrip, classifyFreshness, formatAge } from "./provider-freshness-strip.js";
+import { ProviderFreshnessStrip, classifyFreshness, formatAge, sessionNeedsAttention }
+  from "./provider-freshness-strip.js";
 
 const source = (provider: CatalogSourceStatus["provider"], acquiredAtMs: number | null,
   sessionState: CatalogSourceStatus["sessionState"] = "ACTIVE"): CatalogSourceStatus => ({
@@ -63,6 +64,31 @@ describe("ProviderFreshnessStrip", () => {
     // The strip keeps polling.
     await act(async () => { vi.advanceTimersByTime(2_000); await Promise.resolve(); });
     expect(list.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("says a book needs signing in even while its catalog is perfectly fresh", async () => {
+    // Freshness and session health are independent: the extension reads a
+    // logged-in tab and never touches the stored secret, so an expired session
+    // has no symptom here. Measured 2026-09-15, every session was past renewal,
+    // the newest by twenty-seven hours, and this strip read Fresh for all six.
+    const now = 1_000_000;
+    const list = vi.fn(async () => [
+      { ...source("SABA", now - 3_000), reason: "EXPIRED" as const },
+      source("BTI", now - 3_000)
+    ]);
+
+    render(<ProviderFreshnessStrip api={{ list }} category="FOOTBALL" pollMs={60_000} now={() => now} />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByTestId("provider-freshness-SABA").textContent).toContain("Fresh");
+    expect(screen.getByTestId("provider-session-SABA").textContent).toBe("session expired");
+    expect(screen.queryByTestId("provider-session-BTI")).toBeNull();
+  });
+
+  it("separates an expired session from a book that never signed in", () => {
+    expect(sessionNeedsAttention({ ...source("SABA", 1), reason: "EXPIRED" })).toBe(true);
+    expect(sessionNeedsAttention(source("SABA", 1, "ACTION_REQUIRED"))).toBe(true);
+    expect(sessionNeedsAttention(source("SABA", 1))).toBe(false);
   });
 
   it("surfaces a fetch failure instead of hiding the strip", async () => {

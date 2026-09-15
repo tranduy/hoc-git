@@ -599,8 +599,14 @@ export class ChromeCatalogDataPlane {
       } catch { /* a non-live provider must fail closed */ }
       if (live && catalog !== undefined) {
         this.#nonLiveSinceMs.delete(status.id);
+        // A live feed proves the data is arriving and says nothing whatever
+        // about the stored session secret, which the extension never touches.
+        // Clearing every reason here erased that second fact: measured
+        // 2026-09-15, all fifteen sessions were past renewal and every preflight
+        // was refused, while this line reported each book clean.
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTIVE",
-          acquiredAtMs: catalog.observedAtMs, reason: null });
+          acquiredAtMs: catalog.observedAtMs,
+          reason: status.reason === "EXPIRED" ? "EXPIRED" : null });
       }
       if (status.sessionState === "ACTIVE") {
         // A feed that cannot be read right now is not the same as a book that

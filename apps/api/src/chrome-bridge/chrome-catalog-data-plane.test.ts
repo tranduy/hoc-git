@@ -1235,6 +1235,21 @@ describe("ChromeCatalogDataPlane", () => {
     });
   });
 
+  it("keeps an expired session visible while the feed is perfectly live", async () => {
+    // Catalogs arrive through a logged-in tab and never touch the stored session
+    // secret, so a live feed is no evidence at all about the session. This
+    // overlay used to blank every reason on that evidence: measured 2026-09-15,
+    // fifteen sessions were past renewal and every preflight was refused while
+    // all five books read clean here.
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    seedKsport(plane, [101], [102], {});
+
+    await expect(plane.overlayStatuses([{ ...activeSbobet, reason: "EXPIRED" }]))
+      .resolves.toMatchObject([{ sessionState: "ACTIVE", reason: "EXPIRED" }]);
+    await expect(plane.overlayStatuses([activeSbobet]))
+      .resolves.toMatchObject([{ sessionState: "ACTIVE", reason: null }]);
+  });
+
   it("owns exactly the six configured Football feeds", () => {
     const plane = new ChromeCatalogDataPlane();
     expect(["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"]
