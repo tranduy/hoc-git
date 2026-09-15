@@ -230,12 +230,29 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         groupsCoveredTwice: owners.filter((owner) => (owner.covered?.size ?? 0) > 1).length,
         // And whether anything uncovered is even wanted: an uncovered event no
         // other book carries is not a gap.
+        //
+        // Nor is an uncovered event id whose fixture a sibling id already
+        // covered. groupsSeveralMatches has stayed 0 - every multi-event group
+        // holds several ids of ONE match, never two matches - so naming one id
+        // still delivers that fixture's markets. Counting ids instead of
+        // fixtures reported 68 on 2026-09-15 when only 17 CMD fixtures were
+        // actually missing hidden markets, which sends the next reader after
+        // four times the real gap.
         partialWanted: owners.filter((owner) => {
           if (!(owner.doneAt > 0) || (owner.covered?.size ?? 0) >= owner.events.size) return false;
           const scheduler = root.__fieldlineCollectionSchedulerV1;
           if (!scheduler || typeof scheduler.dueReason !== 'function') return false;
-          return [...owner.events].some((id) => !owner.covered?.has(id) &&
-            scheduler.dueReason(id, null) !== 'UNPLANNED');
+          const coveredFixtures = new Set();
+          for (const id of owner.covered ?? []) {
+            const fixture = state.eventFixture?.get(id);
+            if (fixture !== undefined) coveredFixtures.add(fixture);
+          }
+          return [...owner.events].some((id) => {
+            if (owner.covered?.has(id)) return false;
+            const fixture = state.eventFixture?.get(id);
+            if (fixture !== undefined && coveredFixtures.has(fixture)) return false;
+            return scheduler.dueReason(id, null) !== 'UNPLANNED';
+          });
         }).length,
         failed: owners.filter((owner) => owner.failed).length, active: state.active.size,
         rosterActive: state.rosterActive, rosterFailed: state.rosterFailed, rosterAtMs: state.rosterAtMs,
@@ -344,6 +361,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       // it is decides whether the rest are missing markets or have none to miss.
       // Fingerprints never leave this closure; only the counts do.
       const fixtures = new Map();
+      const eventFixture = new Map();
       // Which filter each roster row dies to. 52 paired fixtures inside 72 hours
       // carried no More while the walk reported nothing due, and "pending"
       // cannot say whether their group was never discovered or never asked.
@@ -356,8 +374,14 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         events.add(String(row[0]));
         let names = fixtures.get(row[34]);
         if (!names) fixtures.set(row[34], names = new Set());
-        names.add(String(row[37]) + '|' + String(row[38]) + '|' + String(row[39]));
+        const fixture = String(row[37]) + '|' + String(row[38]) + '|' + String(row[39]);
+        names.add(fixture);
+        // Which fixture an event id belongs to, so coverage can be counted in
+        // fixtures. A group carries several ids of one match far more often
+        // than it carries two matches, and only the second is a real gap.
+        eventFixture.set(String(row[0]), fixture);
       }
+      state.eventFixture = eventFixture;
       const owners = new Map();
       // A replaced owner loses doneAt while the scheduler keeps its receipt, so
       // the group reads as collected while carrying nothing. Count how often

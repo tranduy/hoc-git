@@ -5,10 +5,13 @@ import { buildCmdNativeCatalogRefreshExpression,
 
 const START = 1_788_862_500_000;
 const group = (index: number) => `fa97fe7b-13d3-4b03-96db-${String(index).padStart(12, "0")}`;
-const row = (id: number, groupId = group(id)) => {
+// `fixture` names the match a row belongs to. Rows sharing one default to the
+// same match, which is what a multi-event group almost always holds: several
+// ids of one fixture rather than two fixtures.
+const row = (id: number, groupId = group(id), fixture = "Home") => {
   const value = Array(91).fill(0);
   value[0] = id; value[3] = 100; value[34] = groupId;
-  value[37] = "Football league"; value[38] = "Home"; value[39] = "Away";
+  value[37] = "Football league"; value[38] = fixture; value[39] = "Away";
   value[51] = "S"; value[53] = "12:00"; value[56] = "09/09";
   return value;
 };
@@ -83,7 +86,11 @@ describe("CMD native catalog collector", () => {
       sort: (ids: string[]) => [...ids], completed: vi.fn()
     };
     h.tick();
-    h.commit([row(1, group(1)), row(2, group(1)), row(3, group(3)), row(4, group(3))], []);
+    // Group 3 holds two different matches, so the id the provider did not name
+    // really is a fixture with no hidden markets. Group 1 holds two ids of one
+    // match, which is the ordinary case and not a gap.
+    h.commit([row(1, group(1)), row(2, group(1)),
+      row(3, group(3)), row(4, group(3), "Other home")], []);
     const first = h.more().find((r) => JSON.parse(r.body).m_groupId === group(1))!;
     const second = h.more().find((r) => JSON.parse(r.body).m_groupId === group(3))!;
     h.complete(first, 1);
@@ -521,5 +528,40 @@ describe("CMD native catalog collector", () => {
     expect(h.more()).toHaveLength(2);
     h.tick();
     expect(h.more()).toHaveLength(4);
+  });
+});
+
+describe("counting coverage in fixtures rather than event ids", () => {
+  it("does not call a group partial when its other id is the same match", () => {
+    // Measured 2026-09-15: groupsSeveralMatches has stayed 0 - every
+    // multi-event group held several ids of ONE match - yet partialWanted
+    // counted 68 while only 17 CMD fixtures were actually missing hidden
+    // markets. Naming one id delivers that fixture's markets, so the sibling
+    // id is not a gap and must not be reported as one.
+    const h = harness();
+    const root = (h.globals.document as any).documentElement;
+    root.__fieldlineCollectionSchedulerV1 = {
+      dueReason: () => null, due: () => true, policy: () => ({ refreshMs: 10_000 }),
+      sort: (ids: string[]) => [...ids], completed: vi.fn()
+    };
+    h.tick();
+    h.commit([row(1, group(1)), row(2, group(1))], []);
+    h.complete(h.more()[0]!, 1);
+
+    expect(h.tick()).toMatchObject({ partialGroups: 1, partialWanted: 0 });
+  });
+
+  it("still calls a group partial when its other id is a different match", () => {
+    const h = harness();
+    const root = (h.globals.document as any).documentElement;
+    root.__fieldlineCollectionSchedulerV1 = {
+      dueReason: () => null, due: () => true, policy: () => ({ refreshMs: 10_000 }),
+      sort: (ids: string[]) => [...ids], completed: vi.fn()
+    };
+    h.tick();
+    h.commit([row(1, group(1)), row(2, group(1), "Other home")], []);
+    h.complete(h.more()[0]!, 1);
+
+    expect(h.tick()).toMatchObject({ partialGroups: 1, partialWanted: 1 });
   });
 });

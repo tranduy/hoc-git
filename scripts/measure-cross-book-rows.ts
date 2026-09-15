@@ -116,6 +116,7 @@ async function main(): Promise<void> {
   phaseDisagreement(built as readonly unknown[]);
   ladderForWorstRow(built as readonly unknown[], catalogs as never);
   livePositiveSplit(built as readonly unknown[]);
+  cmdMoreValue(built as readonly unknown[], catalogs as never);
   top(pairCounts, "by book pair", 15);
   top(marketCounts, "by market type", 15);
 }
@@ -424,4 +425,55 @@ export function namesBehindPositiveRows(built: readonly unknown[],
 `);
     }
   }
+}
+
+/**
+ * What CMD's hidden markets are worth in cross-book rows. CMD's More call names
+ * a group and no event, so a group whose answer covers one fixture leaves its
+ * siblings without hidden markets. This measures the cost of that in the only
+ * currency that matters: rows the board would lose.
+ */
+export function cmdMoreValue(built: readonly unknown[],
+  catalogs: readonly { provider?: string;
+    markets?: readonly { providerEventId?: string; marketType?: string }[] }[]): void {
+  const MAIN = new Set(["FT_AH", "FT_TOTAL", "FT_1X2", "FH_AH", "FH_TOTAL", "FH_1X2"]);
+  const cmd = catalogs.find((item) => item.provider === "CMD");
+  if (cmd === undefined) { process.stdout.write("\nno CMD catalog\n"); return; }
+  const typesByEvent = new Map<string, Set<string>>();
+  for (const market of cmd.markets ?? []) {
+    const id = String(market.providerEventId);
+    const set = typesByEvent.get(id) ?? new Set<string>();
+    set.add(String(market.marketType));
+    typesByEvent.set(id, set);
+  }
+  const thin = new Set([...typesByEvent]
+    .filter(([, types]) => [...types].every((type) => MAIN.has(type)))
+    .map(([id]) => id));
+
+  let thinMatched = 0;
+  let thinRows = 0;
+  let richMatched = 0;
+  let richRows = 0;
+  for (const event of built as readonly { providerEventIds?: Readonly<Record<string, string>>;
+    rows: readonly { cells: readonly { provider?: string }[] }[] }[]) {
+    const id = (event.providerEventIds ?? {}).CMD;
+    if (id === undefined) continue;
+    const rows = event.rows.filter((row) => row.cells.some((cell) => cell.provider === "CMD")).length;
+    if (thin.has(id)) { thinMatched += 1; thinRows += rows; }
+    else { richMatched += 1; richRows += rows; }
+  }
+  const mean = (total: number, count: number): string => count === 0 ? "-" : (total / count).toFixed(1);
+  process.stdout.write("\nwhat CMD's hidden markets are worth\n");
+  process.stdout.write(`  CMD fixtures with only main markets : ${thin.size}
+`);
+  process.stdout.write(`    of those, matched to another book : ${thinMatched}
+`);
+  process.stdout.write(`    rows they carry a CMD side on     : ${thinRows} (mean ${mean(thinRows, thinMatched)})
+`);
+  process.stdout.write(`  CMD fixtures with hidden markets    : ${typesByEvent.size - thin.size}
+`);
+  process.stdout.write(`    of those, matched to another book : ${richMatched}
+`);
+  process.stdout.write(`    rows they carry a CMD side on     : ${richRows} (mean ${mean(richRows, richMatched)})
+`);
 }
