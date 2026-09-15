@@ -5,7 +5,8 @@ import { providerFeedPolicies } from "./chrome-bridge/provider-feed-policies.js"
 import type { ProviderFeedSnapshot, ProviderRecoveryRequest } from "./chrome-bridge/provider-feed-types.js";
 import { PipelineTelemetry } from "./diagnostics/pipeline-telemetry.js";
 import { localWarpAuthEnabled, readExtensionBuildIdentity, startExtensionReloadSweep,
-  resolveApsportPrematchWindowHours, startProviderRecoverySweep } from "./server.js";
+  resolveApsportPrematchWindowHours, startProviderRecoverySweep,
+  shouldRunLegacySessionMaintenance, shouldRunSessionRenewalSweep } from "./server.js";
 import * as serverModule from "./server.js";
 
 const SABA = "catalog-source:SABA:FOOTBALL";
@@ -519,5 +520,22 @@ describe("extension reload announcement", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("shouldRunSessionRenewalSweep", () => {
+  it("runs unless explicitly switched off", () => {
+    expect(shouldRunSessionRenewalSweep({})).toBe(true);
+    expect(shouldRunSessionRenewalSweep({ SESSION_RENEWAL_SWEEP_ENABLED: "1" })).toBe(true);
+    expect(shouldRunSessionRenewalSweep({ SESSION_RENEWAL_SWEEP_ENABLED: "0" })).toBe(false);
+    expect(shouldRunSessionRenewalSweep({ SESSION_RENEWAL_SWEEP_ENABLED: "false" })).toBe(false);
+  });
+
+  it("is the opposite default from legacy maintenance, which resets every source", () => {
+    // Legacy maintenance opens a persistent browser and resets all six books;
+    // the renewal sweep renews a session and restarts no reader, so the two
+    // switches must not share a default.
+    expect(shouldRunLegacySessionMaintenance({})).toBe(false);
+    expect(shouldRunSessionRenewalSweep({})).toBe(true);
   });
 });

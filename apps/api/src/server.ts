@@ -16,6 +16,7 @@ import { resolveProviderFees } from "./providers/provider-fees.js";
 import { FileBetHistory } from "./history/file-bet-history.js";
 import { createSessionMaintenanceRunner, MaintenanceJournal,
   SessionRefreshControl } from "./session-maintenance.js";
+import { createSessionRenewalSweep } from "./sessions/session-renewal-sweep.js";
 import { DurableCatalogStore } from "./catalog/durable-catalog-store.js";
 import { bindGracefulShutdown } from "./process-shutdown.js";
 import { chromeBridgeProviderAccountIdForLobby } from "./chrome-bridge/chrome-bridge-account.js";
@@ -291,6 +292,20 @@ function captureLobbies(value: string | undefined): readonly ChromeLobbyId[] | u
   if (value === undefined || value.trim() === "") return undefined;
   return value.split(",").map((item) => item.trim().toUpperCase())
     .filter((item): item is ChromeLobbyId => chromeLobbyIds.has(item as ChromeLobbyId));
+}
+
+/**
+ * On unless explicitly disabled, which is the opposite of the legacy
+ * maintenance switch and deliberately so: that path opens a persistent browser
+ * and resets every source, while this one renews a session whose own deadline
+ * has passed and touches nothing else. Measured 2026-09-15, with nothing
+ * watching that deadline: sixty-one sessions, zero usable.
+ */
+export function shouldRunSessionRenewalSweep(
+  env: Readonly<Record<string, string | undefined>>
+): boolean {
+  const value = env.SESSION_RENEWAL_SWEEP_ENABLED?.trim();
+  return value !== "0" && value?.toLowerCase() !== "false";
 }
 
 export function shouldRunLegacySessionMaintenance(
@@ -789,10 +804,25 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     sessionTimer = setInterval(() => { void maintainSessions(); }, 60_000);
     sessionTimer.unref();
   }
+  // The proactive half of session recovery. The reactive half already exists
+  // (a 401 from a provider read calls reportProviderFailure); nothing watched
+  // a session's own renewAfterMs after the 03:00 job was removed on 2026-09-04,
+  // and the 03:00 job is not coming back because its global reset destroyed
+  // healthy provider sockets. This renews sessions and restarts no reader.
+  const renewalSweep = createSessionRenewalSweep({
+    list: async () => (await sessionServices.manager.listStatuses()).sessions,
+    renew: (id) => sessionServices.manager.renew(id),
+    record: (level, message) => { maintenanceJournal.record(level, message); }
+  });
+  if (shouldRunSessionRenewalSweep(env)) {
+    renewalSweep.start();
+    void renewalSweep.runOnce();
+  }
   return {
     app,
     runtime,
     async stop(): Promise<void> {
+      renewalSweep.stop();
       if (sessionTimer !== null) clearInterval(sessionTimer);
       controller.abort();
       await app.close();
