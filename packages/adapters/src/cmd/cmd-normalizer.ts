@@ -284,16 +284,34 @@ function classifyCmdEvent(rawCompetition: string, rawTeams: readonly string[]): 
  * as intended or the classifier failing on real football. The first is fine and
  * the second is a bug, and they read identically.
  */
+/**
+ * Why classifyCmdEvent gave up. A statistic league whose team names do not carry
+ * the suffix it needs is a corner or card fixture we could have priced and did
+ * not; a fantasy or specific-minutes league is one we refuse on purpose. Both
+ * arrived as EVENT_SETTLEMENT_FAMILY_UNSUPPORTED, and the project's goal is
+ * corner arbitrages, so the difference is the whole point.
+ */
+function cmdClassificationRefusal(rawCompetition: string, rawTeams: readonly string[]): string {
+  const competition = removeLoadingSuffix(rawCompetition);
+  const statisticLeague = /\b(?:CORNERS?|BOOKINGS?|CARDS?)\b/iu.test(competition);
+  const statisticTeam = rawTeams.some((team) =>
+    /\((?:\d+(?:ST|ND|RD|TH)\s+)?(?:CORNER|BOOKING|CARD)S?\)\s*$/iu.test(team));
+  if (statisticLeague || statisticTeam) return "EVENT_STATISTIC_LEAGUE_UNRESOLVED";
+  return "EVENT_SETTLEMENT_FAMILY_UNSUPPORTED";
+}
+
 function eventComparabilityRefusal(input: {
   readonly sportId: string;
   readonly matchId: string;
+  readonly competition: string;
+  readonly teams: readonly string[];
   readonly classified: { readonly competition: string; readonly teams: readonly string[] } | null;
   readonly isSabaAggregate: boolean;
   readonly timeUnresolved: boolean;
 }): string | null {
   if (input.sportId !== "1") return "EVENT_NOT_FOOTBALL";
   if (input.matchId.trim() === "") return "EVENT_ID_MISSING";
-  if (input.classified === null) return "EVENT_SETTLEMENT_FAMILY_UNSUPPORTED";
+  if (input.classified === null) return cmdClassificationRefusal(input.competition, input.teams);
   if (virtualFootballEvidence(input.classified.competition, input.classified.teams)) {
     return "EVENT_VIRTUAL_FOOTBALL";
   }
@@ -507,6 +525,7 @@ export function observeNativeCmdMarkets(
       isSabaMultiMatchAggregate(record.leagueName, record.teamNames);
     const comparabilityRefusal = eventComparabilityRefusal({
       sportId: record.sportId, matchId: record.matchId, classified, isSabaAggregate,
+      competition: record.leagueName, teams: record.teamNames,
       timeUnresolved: provider === "SABA" && recordEventTime(provider, record, options) === null
     });
     const comparableEvent = comparabilityRefusal === null;

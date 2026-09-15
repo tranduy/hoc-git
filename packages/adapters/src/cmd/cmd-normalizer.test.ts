@@ -879,5 +879,13 @@ describe("why an event is not comparable", () => {
     expect(reasons(record({ matchId: "   " }))).toBe("EVENT_ID_MISSING");
     expect(reasons(record({ leagueName: "FANTASY MATCHES" }))).toBe("EVENT_SETTLEMENT_FAMILY_UNSUPPORTED");
     expect(reasons(record({ leagueName: "E-SOCCER LEAGUE" }))).toBe("EVENT_VIRTUAL_FOOTBALL");
+
+    // A corner or card league whose team names lack the suffix the classifier
+    // needs is a fixture we could have priced, not one we refuse on purpose,
+    // and the project's goal is corner arbitrages.
+    expect(reasons(record({ leagueName: "PREMIER LEAGUE - CORNERS" })))
+      .toBe("EVENT_STATISTIC_LEAGUE_UNRESOLVED");
+    expect(reasons(record({ leagueName: "PREMIER LEAGUE - BOOKINGS" })))
+      .toBe("EVENT_STATISTIC_LEAGUE_UNRESOLVED");
   });
 });
