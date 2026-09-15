@@ -37,3 +37,23 @@ describe("btiCoverageShape", () => {
     expect(btiCoverageShape("{\"other\":1}")).toBe("no-known-fields:11");
   });
 });
+
+describe("a collector that is waiting, not absent", () => {
+  it("tells a paused collector apart from no collector at all", () => {
+    // BTI_COV[none] used to mean both, and they want opposite responses: a
+    // paused collector needs time, an absent one needs the tab reopened.
+    // Measured 2026-09-16, BTI reported none for eighty-four minutes while its
+    // page was live and serving odds.
+    expect(btiCoverageShape(undefined)).toBe("none");
+    expect(btiCoverageShape(JSON.stringify({
+      phase: "PAUSED", authBlocked: true, requestPaused: true,
+      requestStatus: 403, requestRetryInMs: 240_000
+    }))).toBe("phase:PAUSED;authBlocked:1;requestPaused:1;requestStatus:403;requestRetryInMs:240000");
+  });
+
+  it("names each way a run gives up", () => {
+    for (const phase of ["ROSTER_BACKOFF", "SESSION_LOST", "CANCELLED"]) {
+      expect(btiCoverageShape(JSON.stringify({ phase }))).toBe(`phase:${phase}`);
+    }
+  });
+});

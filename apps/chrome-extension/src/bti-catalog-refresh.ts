@@ -86,7 +86,17 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     sameSession: (auth, context) => auth === authValue && context === contextValue };
   root[detailStateKey] = detailState;
   const ownsSession = () => root[detailStateKey] === detailState && detailState.sameSession(readAuth(), readContext());
-  const cancelled = () => ({ status: 'catalog-failed', responses: [] });
+  // A cancelled run used to return no coverage at all, and the diagnostic then
+  // reported BTI_COV[none] - the same thing it reports when no collector is in
+  // the page. Those are opposite problems: one is waiting, the other needs the
+  // tab reopened. Measured 2026-09-16, BTI showed none for eighty-four minutes
+  // while its page was live and serving odds, and nothing said which it was.
+  const cancelled = (phase) => ({ status: 'catalog-failed', responses: [],
+    coverage: JSON.stringify({ phase: phase || 'CANCELLED',
+      authBlocked: detailState.authBlocked === true,
+      requestPaused: requestsPaused(),
+      requestStatus: Number(detailState.requestStatus) || 0,
+      requestRetryInMs: Math.max(0, Number(detailState.requestRetryAtMs) - Date.now()) }) });
   const publishResult = (result) => ownsSession() && result?.status === 'catalog-requested' &&
     detailState.committed?.generation === result.generation
       ? detailState.committed.snapshot() : result;
@@ -134,8 +144,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     root[detailBodiesKey] = cache;
   };
   const existingRosterWorker = root[rosterWorkerKey];
-  if (requestsPaused()) return detailState.committed?.snapshot?.() || cancelled();
-  if (!detailState.committed && now < detailState.rosterRetryAtMs) return cancelled();
+  if (requestsPaused()) return detailState.committed?.snapshot?.() || cancelled('PAUSED');
+  if (!detailState.committed && now < detailState.rosterRetryAtMs) return cancelled('ROSTER_BACKOFF');
   if (existingRosterWorker && existingRosterWorker.result &&
     (now - Number(existingRosterWorker.completedAt || 0) <= 12000 || now < detailState.rosterRetryAtMs)) {
     existingRosterWorker.pump?.();
@@ -587,7 +597,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     };
   };
   const partitions = await Promise.all(initialPlans.map(hydratePartition));
-  if (!ownsSession()) return cancelled();
+  if (!ownsSession()) return cancelled('SESSION_LOST');
   if (!partitions.every(Boolean)) {
     detailState.rosterRefreshFailed = true;
     detailState.rosterRetryAtMs = Date.now() + 12000;
@@ -1145,7 +1155,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     pump();
   }
   const snapshot = () => {
-  if (!ownsSession()) return cancelled();
+  if (!ownsSession()) return cancelled('SESSION_LOST');
   const detailCache = partitions.length === initialPlans.length && partitions.every(Boolean) &&
     Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
   rosterWorker.coverage.detailCachedBytes = detailCache.reduce((sum, item) => sum +
@@ -1255,7 +1265,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     origin: location.origin || ('https://' + location.hostname),
     responses: listResponses.map((item) => ({ url: item.path, body: item.body })) };
   })().then((result) => {
-    if (!ownsSession()) return cancelled();
+    if (!ownsSession()) return cancelled('SESSION_LOST');
     if (root[rosterWorkerKey] === rosterWorker) {
       rosterWorker.result = result;
       rosterWorker.completedAt = Date.now();
@@ -1264,7 +1274,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     }
     return result;
   }).catch(() => {
-    if (!ownsSession()) return cancelled();
+    if (!ownsSession()) return cancelled('SESSION_LOST');
     stats.failed += 1;
     rosterWorker.coverage.phase = 'FAILED';
     rosterWorker.coverage.failed += 1;
