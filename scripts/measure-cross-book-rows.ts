@@ -119,6 +119,7 @@ async function main(): Promise<void> {
   cmdMoreValue(built as readonly unknown[], catalogs as never);
   marginBearingMarkets(built as readonly unknown[]);
   unusedMarketTypes(built as readonly unknown[], catalogs as never);
+  whyUnpriced(built as readonly unknown[]);
   top(pairCounts, "by book pair", 15);
   top(marketCounts, "by market type", 15);
 }
@@ -552,4 +553,52 @@ market types collected but never compared: ${ranked.length}
       `bookFixtures=${fixtures.get(type)?.size ?? 0}  [${[...bookSet].sort().join(",")}]
 `);
   }
+}
+
+/**
+ * Why a cross-book row carries no margin. Three answers are possible and they
+ * mean very different things: one book holding the best price on every outcome
+ * is not an arbitrage and must not be priced, a domain the board could not fill
+ * is missing inventory, and anything else is a gate worth naming.
+ */
+export function whyUnpriced(built: readonly unknown[]): void {
+  type Row = { marketType: string; margin: number | null;
+    bestBySelection?: Readonly<Record<string, string>>;
+    cells: readonly { provider?: string }[] };
+  let singleBookBest = 0;
+  let domainUnfilled = 0;
+  let other = 0;
+  const byTypeSingle = new Map<string, number>();
+  const byTypeUnfilled = new Map<string, number>();
+  for (const event of built as readonly { rows: readonly Row[] }[]) {
+    for (const row of event.rows) {
+      if (typeof row.margin === "number" && Number.isFinite(row.margin)) continue;
+      const best = Object.values(row.bestBySelection ?? {});
+      const providers = new Set(row.cells.map((cell) => String(cell.provider)));
+      if (best.length > 0 && new Set(best).size < 2 && providers.size >= 2) {
+        singleBookBest += 1;
+        byTypeSingle.set(row.marketType, (byTypeSingle.get(row.marketType) ?? 0) + 1);
+      } else if (best.length === 0) {
+        domainUnfilled += 1;
+        byTypeUnfilled.set(row.marketType, (byTypeUnfilled.get(row.marketType) ?? 0) + 1);
+      } else other += 1;
+    }
+  }
+  process.stdout.write("\nwhy a cross-book row carries no margin\n");
+  process.stdout.write(`  one book best on every outcome (correct) : ${singleBookBest}
+`);
+  process.stdout.write(`  no best for some outcome (missing side)  : ${domainUnfilled}
+`);
+  process.stdout.write(`  something else                           : ${other}
+`);
+  const top = (counts: ReadonlyMap<string, number>, label: string): void => {
+    process.stdout.write(`  ${label}
+`);
+    for (const [type, count] of [...counts].sort((a, b) => b[1] - a[1]).slice(0, 6)) {
+      process.stdout.write(`      ${type.padEnd(24)} ${count}
+`);
+    }
+  };
+  top(byTypeSingle, "by type, one book best:");
+  top(byTypeUnfilled, "by type, missing side:");
 }
