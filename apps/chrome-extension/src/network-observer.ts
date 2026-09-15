@@ -8751,11 +8751,29 @@ export class NetworkObserver {
           this.#domSnapshotOrdinals.set(source.sourceId, ordinal);
           const snapshotId = `cmd:${source.tabId}:${nowMs}:${ordinal}`;
           const chunks = chunkCmdSnapshot(group.records, snapshotId, undefined, group.sweep);
+          // Bailing between chunks is deliberate - a document that navigated
+          // away must not have its rows attributed to the new one - but it
+          // leaves the receiver holding a partial set it can never assemble,
+          // and a snapshot that never assembles is a feed with no baseline.
+          // Measured 2026-09-15 on SABA: chunks 1, 2 and 3 of 4 arrived 511
+          // times each and chunk 4 never once, holding HOP6 in SOFT_RECOVERY
+          // on BASELINE_TIMEOUT. Name which gate closes and on which chunk, so
+          // the next person reads it instead of inferring it from counts.
+          let sentChunks = 0;
           for (const chunk of chunks) {
+            const torn = (gate: string): void => {
+              this.#noteCaptureExit(source,
+                `DOM_SET_TORN_${gate}_AT_${sentChunks + 1}_OF_${chunks.length}`);
+            };
             if (group.frameId !== null && group.loaderId !== null &&
-              currentFrameLoader(await readFrameTree(), group.frameId) !== group.loaderId) return;
-            if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
-            if (!probeVersionIsCurrent()) return;
+              currentFrameLoader(await readFrameTree(), group.frameId) !== group.loaderId) {
+              torn("LOADER"); return;
+            }
+            if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) {
+              torn("GENERATION"); return;
+            }
+            if (!probeVersionIsCurrent()) { torn("PROBE"); return; }
+            sentChunks += 1;
             await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
               encoding: "UTF8", body: JSON.stringify(chunk)
             }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration, tabGeneration,
