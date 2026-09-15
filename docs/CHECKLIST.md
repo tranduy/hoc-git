@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | **19.132** dòng / 855 trận | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | **19.253** dòng / 866 trận | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
@@ -41,21 +41,21 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 12 | `FT_HALF_FULL_RESULT` dùng chung tên selection `HOME_AWAY` — **an toàn** | 0 dòng được tạo; `footballResultMarketSpec` chỉ nhận 6 loại, không có nó | `marginBearingMarkets` |
 | 14 | Ghép kèo nhiều cửa chưa ai so | HT/FT **0 → 180**, RESULT_BTTS **0 → 99**, HIGHEST_SCORING_HALF **0 → 436** | `by market type` |
 | 15 | Ráp phân hoạch bị sàn tách thành nhiều market gốc | HT/FT 72 → **180** sau khi ráp | `partitionRowsForTest` |
+| 19 | Kèo có nhánh hoàn tiền (DNB, first-corner) | **0 → 126** dòng; tách bảng riêng, `hasVoidBranch` phân biệt | `by market type` |
 
 ## ĐANG CHẠY — đã giao nhưng **chưa** chứng minh hết
 
 | # | Việc | Tình trạng thật |
 |---|---|---|
-| 11 | SABA: set ảnh chụp DOM bị xé | Mới **đặt tên** cửa (`DOM_SET_TORN_<LOADER\|GENERATION\|PROBE>_AT_n_OF_m`), **chưa sửa gốc**. Thử nâng ba cửa ra ngoài vòng lặp → hỏng một bảo đảm an toàn có chủ ý, đã hoàn nguyên. Chưa lần nào kích hoạt kể từ khi nạp lại. |
+| 11 | ~~SABA: set ảnh chụp DOM bị xé~~ | **Chẩn đoán SAI, đã rút.** `dom-chunk-1/2/3-of-4-awaiting-rest` bằng nhau và không có `4-of-4` là hình dạng của **ráp THÀNH CÔNG** — mảnh cuối hoàn tất nên không ghi note. 774 lần bằng nhau = 774 lần ráp xong. SABA đói baseline vì `BASELINE_TIMEOUT`, không phải vì mất mảnh. Phần giữ lại: cửa xé set giờ tự khai tên nếu thật sự xảy ra. |
 
 ## CHƯA LÀM — có bằng chứng dẫn đường, không cần mò
 
 | # | Việc | Bằng chứng | Giá trị |
 |---|---|---|---|
-| 13 | CMD: 26 trận không có kèo More | 26/652, khớp sàn khác 26/26, trung bình 2,5 dòng so với 12,6 | ≈ **170 dòng (1%)** — nhỏ, và đường lấy không tồn tại |
-| 16 | 215 loại kèo thu về mà không so sánh | Đã xử phần sạch. Phần còn lại phần lớn **một sàn** hoặc không phải phân hoạch | Cần audit từng loại |
-| 17 | `FT_DRAW_NO_BET` (3 sàn, 285 trận) | Hai cửa sạch **nhưng hoà thì hoàn tiền** — có nhánh đẩy, `partitionMargin` giả định không đẩy | Cần mô hình đẩy riêng |
-| 18 | `FT_GOAL_RANGE` (4 sàn, 1.114 trận) | Mỗi sàn chia khoảng khác nhau: `0-1/2-3/4-5/6+` vs `0-0/1-1/2-2/3-3` vs `4-6/7+` | **Không ghép được** — khác sản phẩm |
+| 13 | CMD: 26 trận không có kèo More | 26/652, trung bình 2,5 dòng so với 12,6 | ≈ **170 dòng (1%)**, đường lấy không tồn tại |
+| 16 | Đuôi 215 loại kèo | **Đã cạn.** 11 ứng viên ≥2 sàn cùng bộ cửa; **8 có trùng khớp trận = 0**; 3 cái còn lại đã mở ở mục 19 | Hết |
+| 18 | `FT_GOAL_RANGE` (4 sàn, 1.114 trận) | Mỗi sàn chia khoảng khác nhau | **Không ghép được** — khác sản phẩm |
 
 ## CHẶN — không sửa được bằng mã
 
@@ -90,6 +90,8 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"16 chữ số thập phân = giá bịa"** — sai, 931/942 quote APSPORT đều vậy.
 - **"Ô chứa quote của line khác"** — sai, `candidates=1`, line khớp hết.
 - **"APSPORT live còn sàn khác prematch"** — sai, `rows split on phase: 0`.
+- **"SABA mất mảnh thứ 4 của ảnh chụp DOM, 511 lần"** — SAI. Ba bộ đếm bằng nhau
+  và thiếu bộ thứ tư chính là dấu hiệu **ráp thành công**. Đã rút, sửa cả trong mã.
 - **"215 loại kèo bị bỏ phí"** — đọc sai một phần: `FT_DOUBLE_CHANCE` đứng đầu bảng
   chỉ vì nó góp ô vào dòng `FT_1X2`, không sinh dòng mang tên nó.
 - **"4 quote `HOME_AWAY` của APSPORT sai"** — sai quy mô. Là **nửa số trận đang đá**

@@ -8753,12 +8753,16 @@ export class NetworkObserver {
           const chunks = chunkCmdSnapshot(group.records, snapshotId, undefined, group.sweep);
           // Bailing between chunks is deliberate - a document that navigated
           // away must not have its rows attributed to the new one - but it
-          // leaves the receiver holding a partial set it can never assemble,
-          // and a snapshot that never assembles is a feed with no baseline.
-          // Measured 2026-09-15 on SABA: chunks 1, 2 and 3 of 4 arrived 511
-          // times each and chunk 4 never once, holding HOP6 in SOFT_RECOVERY
-          // on BASELINE_TIMEOUT. Name which gate closes and on which chunk, so
-          // the next person reads it instead of inferring it from counts.
+          // leaves the receiver holding a partial set it can never assemble.
+          //
+          // Do not read the dom-chunk-N-of-M-awaiting-rest counters as damage.
+          // A successful four-chunk assembly notes chunks 1, 2 and 3 as
+          // awaiting the rest and notes nothing for the fourth, which completes
+          // it - so three equal counts and no fourth is what SUCCESS looks
+          // like. That shape was misread on 2026-09-15 as chunk four never
+          // arriving; SABA's starvation then was BASELINE_TIMEOUT, not a torn
+          // set. Name the gate that actually closes, so the next reader has a
+          // fact instead of an inference from counts.
           let sentChunks = 0;
           for (const chunk of chunks) {
             const torn = (gate: string): void => {
