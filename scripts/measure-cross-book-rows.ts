@@ -110,7 +110,8 @@ async function main(): Promise<void> {
       process.stdout.write(`  ${key.padEnd(24)} ${count}\n`);
     }
   };
-  reportTopEdges(built as readonly unknown[], 3);
+  reportTopEdges(built as readonly unknown[], 12);
+  namesBehindPositiveRows(built as readonly unknown[], catalogs as never);
   blamePositiveRows(built as readonly unknown[]);
   phaseDisagreement(built as readonly unknown[]);
   ladderForWorstRow(built as readonly unknown[], catalogs as never);
@@ -131,7 +132,7 @@ void main();
 export function reportTopEdges(built: readonly unknown[], limit: number): void {
   type Cell = { provider?: string; quotes?: readonly { selection?: string; rawOdds?: string;
     rawFormat?: string; sequence?: number; providerObservedAtMs?: number; status?: string;
-    isLive?: boolean }[] };
+    isLive?: boolean; line?: string | null }[] };
   type Row = { marketType: string; scope: string; line: string | null; margin: number | null;
     cells: readonly Cell[]; bestBySelection?: Readonly<Record<string, string>> };
   const found: { event: string; row: Row }[] = [];
@@ -151,18 +152,62 @@ export function reportTopEdges(built: readonly unknown[], limit: number): void {
     process.stdout.write(`\n  ${((row.margin ?? 0) * 100).toFixed(2).padStart(7)}%  ` +
       `${row.marketType}/${row.scope}${row.line === null ? "" : ` line=${row.line}`}  ${event}\n`);
     process.stdout.write(`           best=${JSON.stringify(row.bestBySelection ?? {})}\n`);
+    // Only the quotes the margin actually used, with the line each came from.
+    // A winning quote whose line differs from the row's is the row pricing two
+    // different products against each other.
+    const decimal = (raw: string, fmt: string): number | null => {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) return null;
+      if (fmt === "DECIMAL") return value;
+      if (fmt === "HK") return value + 1;
+      if (fmt === "MALAY") return value === 0 ? null : value > 0 ? value + 1 : 1 + 1 / Math.abs(value);
+      return null;
+    };
+    let implied = 0;
+    let usable = true;
+    for (const [selection, provider] of Object.entries(row.bestBySelection ?? {})) {
+      // A provider can hold several cells on one row; search them all.
+      const winners = row.cells.filter((item) => item.provider === provider)
+        .flatMap((item) => item.quotes ?? []).filter((quote) => quote.selection === selection);
+      const best = winners
+        .map((quote) => ({ quote, dec: decimal(String(quote.rawOdds), String(quote.rawFormat)) }))
+        .filter((item): item is { quote: typeof winners[number]; dec: number } => item.dec !== null)
+        .sort((a, b) => b.dec - a.dec)[0];
+      if (best === undefined) { usable = false; continue; }
+      implied += 1 / best.dec;
+      const sameLine = (best.quote.line ?? null) === row.line;
+      process.stdout.write(`           USED ${String(provider).padEnd(8)} ` +
+        `${selection.padEnd(10)} raw=${String(best.quote.rawOdds).padEnd(8)} ` +
+        `${String(best.quote.rawFormat).padEnd(7)} dec=${best.dec.toFixed(4).padEnd(8)} ` +
+        `line=${String(best.quote.line ?? "-").padEnd(6)}${sameLine ? "" : "  <-- LINE MISMATCH"}` +
+        `  candidates=${winners.length}
+`);
+    }
+    // A book prices both sides of its own market with an overround. If its own
+    // two sides imply less than 1, the quotes are not a book - they are a
+    // decoding or line-mapping error, and any edge built on them is invented.
     for (const cell of row.cells) {
+      const own = new Map<string, number>();
       for (const quote of cell.quotes ?? []) {
-        const ageMs = typeof quote.providerObservedAtMs === "number"
-          ? now - quote.providerObservedAtMs : null;
-        process.stdout.write(`           ${String(cell.provider).padEnd(8)} ` +
-          `${String(quote.selection).padEnd(10)} raw=${String(quote.rawOdds).padEnd(8)} ` +
-          `fmt=${String(quote.rawFormat).padEnd(7)} ` +
-          `${quote.isLive === true ? "LIVE " : "pre  "}` +
-          `seq=${String(quote.sequence).padEnd(8)} ` +
-          `age=${ageMs === null ? "?" : `${(ageMs / 1000).toFixed(0)}s`} ` +
-          `${quote.status ?? ""}\n`);
+        if (quote.status !== "OPEN") continue;
+        const dec = decimal(String(quote.rawOdds), String(quote.rawFormat));
+        if (dec === null || (quote.line ?? null) !== row.line) continue;
+        const selection = String(quote.selection);
+        if (!own.has(selection) || dec > own.get(selection)!) own.set(selection, dec);
       }
+      if (own.size < 2) continue;
+      const sum = [...own.values()].reduce((total, dec) => total + 1 / dec, 0);
+      const flag = sum < 1 ? "  <-- BOOK ARBS ITSELF" : "";
+      process.stdout.write(`           own  ${String(cell.provider).padEnd(8)} ` +
+        `sides=${own.size} impliedSum=${sum.toFixed(4)} ` +
+        `overround=${((sum - 1) * 100).toFixed(2)}%${flag}
+`);
+    }
+    if (usable) {
+      process.stdout.write(`           implied sum=${implied.toFixed(5)} ` +
+        `=> margin ${((1 / implied - 1) * 100).toFixed(2)}% (row says ` +
+        `${((row.margin ?? 0) * 100).toFixed(2)}%)
+`);
     }
   }
 }
@@ -340,4 +385,43 @@ export function livePositiveSplit(built: readonly unknown[]): void {
 `);
   process.stdout.write(`  prematch : ${prematchPositive}  ${describe(prematchEdges)}
 `);
+}
+
+/**
+ * What each book calls the fixture behind a positive row. Cross-book matching
+ * links fixtures by name and kickoff; if the books are actually describing
+ * different games - a reserve side, an age-group match - the row compares two
+ * different events and the edge is invented.
+ */
+export function namesBehindPositiveRows(built: readonly unknown[],
+  catalogs: readonly { provider?: string;
+    events?: readonly { providerEventId?: string; participantA?: string; participantB?: string;
+      competition?: string; startAtUtcMs?: number; isLive?: boolean }[] }[]): void {
+  type Built = { providerEventIds?: Readonly<Record<string, string>>;
+    rows: readonly { margin: number | null }[] };
+  const seen = new Set<string>();
+  process.stdout.write("\nfixture identity behind each positive row\n");
+  for (const event of built as readonly Built[]) {
+    const best = event.rows.reduce<number | null>((top, row) =>
+      typeof row.margin === "number" && row.margin > 0 ? Math.max(top ?? row.margin, row.margin) : top, null);
+    if (best === null) continue;
+    const key = JSON.stringify(event.providerEventIds ?? {});
+    if (seen.has(key)) continue;
+    seen.add(key);
+    process.stdout.write(`
+  best ${(best * 100).toFixed(2)}%
+`);
+    for (const catalog of catalogs) {
+      const id = (event.providerEventIds ?? {})[String(catalog.provider)];
+      if (id === undefined) continue;
+      const found = (catalog.events ?? []).find((item) => item.providerEventId === id);
+      if (found === undefined) { process.stdout.write(`    ${String(catalog.provider).padEnd(9)} (event missing)
+`); continue; }
+      const kick = typeof found.startAtUtcMs === "number"
+        ? new Date(found.startAtUtcMs).toISOString().slice(5, 16).replace("T", " ") : "?";
+      process.stdout.write(`    ${String(catalog.provider).padEnd(9)}${found.isLive === true ? "LIVE " : "pre  "}` +
+        `${kick}  ${found.participantA} v ${found.participantB}  [${found.competition ?? "?"}]
+`);
+    }
+  }
 }
