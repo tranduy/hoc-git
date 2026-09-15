@@ -12,7 +12,8 @@ export function formatCmdNativeCatalogDiagnostic(value: unknown): string {
     "rowsNotSport", "rowsLiveGroup", "eventsDiscovered",
     "groupsCoveredTwice", "partialWanted",
     "cornerRows", "cornerSuffixOk", "cornerLooseOk", "cornerOneSided", "cornerNoParen",
-    "bookingRows", "bookingSuffixOk", "shapesBlind", "failed",
+    "bookingRows", "bookingSuffixOk", "shapesBlind",
+    "refusedLineZero", "refusedLineNonZero", "refusedLineAbsent", "failed",
     "active", "rosterActive", "requestStatus", "requestRetryInMs"]) {
     const count = status[name];
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) fields.push(`${name}:${count}`);
@@ -83,6 +84,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
     state.cornerRows ??= 0; state.cornerSuffixOk ??= 0;
     state.cornerLooseOk ??= 0; state.cornerOneSided ??= 0; state.cornerNoParen ??= 0;
     state.cornerShapes ??= []; state.shapesBlind ??= 0; state.betSlots ??= [];
+    state.refusedLineZero ??= 0; state.refusedLineNonZero ??= 0; state.refusedLineAbsent ??= 0;
     state.bookingRows ??= 0; state.bookingSuffixOk ??= 0;
     const retire = () => {
       state.owners.clear(); state.queue = []; state.cycle = null; state.nextRosterAt = 0;
@@ -208,6 +210,8 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         cornerLooseOk: state.cornerLooseOk, cornerOneSided: state.cornerOneSided,
         cornerNoParen: state.cornerNoParen, cornerShapes: state.cornerShapes,
         shapesBlind: state.shapesBlind, betSlots: state.betSlots,
+        refusedLineZero: state.refusedLineZero, refusedLineNonZero: state.refusedLineNonZero,
+        refusedLineAbsent: state.refusedLineAbsent,
         bookingRows: state.bookingRows, bookingSuffixOk: state.bookingSuffixOk,
         rowsNotSport: state.rowsNotSport, rowsLiveGroup: state.rowsLiveGroup,
         eventsDiscovered: state.eventsDiscovered,
@@ -419,6 +423,18 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
         const number = Number(value);
         return Number.isFinite(number) && number > 1;
       };
+      // A handicap line of zero is a pick'em - the same shape as BTI's two-way
+      // first-team market. A real handicap is a different market and must stay
+      // refused. Classify only; the line value itself never leaves.
+      const lineClass = (row) => {
+        const raw = row[10];
+        if (typeof raw !== 'number' && typeof raw !== 'string') return 'absent';
+        if (raw === '') return 'absent';
+        const parts = String(raw).split('/').map(Number);
+        if (parts.some((part) => !Number.isFinite(part))) return 'absent';
+        const average = parts.reduce((sum, part) => sum + part, 0) / parts.length;
+        return average === 0 ? 'zero' : 'nonzero';
+      };
       const slotSignature = (row) => {
         const names = [];
         for (const [name, columns] of Object.entries(twoWay)) {
@@ -436,6 +452,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       const shapes = new Set();
       let shapesBlind = 0;
       const slots = new Set();
+      const refusedLines = { zero: 0, nonzero: 0, absent: 0 };
       for (const row of [...today, ...early]) {
         const league = String(row[37]);
         const teams = [String(row[38]), String(row[39])];
@@ -450,6 +467,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
             // the same bounded public-label evidence the SABA walk already
             // reports, and the one thing that says what to widen the rule to.
             if (slots.size < 6) slots.add(slotSignature(row));
+            refusedLines[lineClass(row)] += 1;
             for (const team of teams) {
               if (shapes.size >= 6) break;
               const match = anyParen.exec(team) ?? tail.exec(team);
@@ -463,6 +481,7 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
           if (teams.every((team) => bookingTeam.test(team))) bookingSuffix += 1;
           else for (const team of teams) {
             if (slots.size < 6) slots.add(slotSignature(row));
+            refusedLines[lineClass(row)] += 1;
             if (shapes.size >= 6) break;
             const match = anyParen.exec(team) ?? tail.exec(team);
             if (match === null) { shapesBlind += 1; continue; }
@@ -477,6 +496,9 @@ export function buildCmdNativeCatalogRefreshExpression(generation: string): stri
       state.cornerShapes = [...shapes];
       state.shapesBlind = shapesBlind;
       state.betSlots = [...slots];
+      state.refusedLineZero = refusedLines.zero;
+      state.refusedLineNonZero = refusedLines.nonzero;
+      state.refusedLineAbsent = refusedLines.absent;
       state.bookingRows = bookingRows; state.bookingSuffixOk = bookingSuffix;
       state.rowsNotSport = notSport;
       state.rowsLiveGroup = inLiveGroup;

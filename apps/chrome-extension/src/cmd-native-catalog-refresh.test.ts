@@ -142,6 +142,23 @@ describe("CMD native catalog collector", () => {
     expect(formatCmdNativeCatalogDiagnostic({ cornerShapes: "(No. of Corners)" })).toBe("CMD_NATIVE[]");
   });
 
+  it("classifies the handicap line of a refused row without carrying its value", () => {
+    // A zero line is a pick'em, the same shape as BTI's two-way first-team
+    // market. A real handicap is a different market and stays refused.
+    const h = harness();
+    const priced = (id: number, line: unknown, home: string) => {
+      const value = row(id, group(id));
+      value[37] = "PREMIER LEAGUE - CORNERS"; value[38] = home; value[39] = "Away (1st Corner)";
+      value[10] = line; value[40] = 0.9; value[41] = -0.95;
+      return value;
+    };
+    h.tick();
+    h.commit([priced(1, 0, "Home (1st Corner)"), priced(2, "0/0.5", "Home (1st Corner)"),
+      priced(3, "", "Home (1st Corner)")], []);
+    expect(h.tick()).toMatchObject({ betSlots: ["1"],
+      refusedLineZero: 1, refusedLineNonZero: 1, refusedLineAbsent: 1 });
+  });
+
   it("carries a slot signature from a closed vocabulary and nothing else", () => {
     expect(formatCmdNativeCatalogDiagnostic({ betSlots: ["1+3", "5x3", "none", "OE+DCx2"] }))
       .toBe("CMD_NATIVE[betSlots:1+3|5x3|none|OE+DCx2]");
