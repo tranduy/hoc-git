@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { LOBBY_HOSTNAMES } from "./lobby-signatures.js";
 
@@ -10,8 +11,11 @@ interface Manifest {
   content_scripts?: Array<{ world?: string; js?: string[]; matches?: string[]; include_globs?: string[] }>;
 }
 
-const manifest = JSON.parse(
-  readFileSync(resolve(process.cwd(), "public/manifest.json"), "utf8")) as Manifest;
+// Resolved from this file, not the working directory: the suite is run both
+// from the repository root and from the app, and only one of those has
+// public/manifest.json underneath it.
+const manifest = JSON.parse(readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../public/manifest.json"), "utf8")) as Manifest;
 
 /** Chrome's host match syntax, reduced to the part the manifest uses. */
 function matches(pattern: string, hostname: string): boolean {
