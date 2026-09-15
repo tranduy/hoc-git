@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | **19.253** dòng / 866 trận | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | **19.253** dòng / 866 trận, 2.025 trận khớp | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
@@ -42,6 +42,9 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 14 | Ghép kèo nhiều cửa chưa ai so | HT/FT **0 → 180**, RESULT_BTTS **0 → 99**, HIGHEST_SCORING_HALF **0 → 436** | `by market type` |
 | 15 | Ráp phân hoạch bị sàn tách thành nhiều market gốc | HT/FT 72 → **180** sau khi ráp | `partitionRowsForTest` |
 | 19 | Kèo có nhánh hoàn tiền (DNB, first-corner) | **0 → 126** dòng; tách bảng riêng, `hasVoidBranch` phân biệt | `by market type` |
+| 20 | Vì sao 20% bảng không có giá | **3.408/3.408** là "một sàn tốt nhất ở mọi cửa" — đúng thiết kế. 0 dòng thiếu chân | `whyUnpriced` |
+| 21 | Trần kèo góc, đo qua bộ ghép thật | **49** trận có góc ở ≥2 sàn / 2.025 trận; **302** dòng góc | `cornerCoverage` |
+| 22 | Kèo góc có bị thu sót không | **Không.** SBOBET **0**, CMD **0** kèo góc thấy-mà-không-chuẩn-hoá-được | `nativeMarketObservations` |
 
 ## ĐANG CHẠY — đã giao nhưng **chưa** chứng minh hết
 
@@ -51,11 +54,19 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 ## CHƯA LÀM — có bằng chứng dẫn đường, không cần mò
 
-| # | Việc | Bằng chứng | Giá trị |
+Mọi cửa từ chối đều tự khai tên. Đo bằng:
+`curl -s "http://127.0.0.1:4310/api/catalog/accounts/catalog-source:<SÀN>:FOOTBALL?nativeDetail=summary"`
+rồi gom theo `nativeMarketObservations[].reason`.
+
+| # | Việc | Số đo được | Ghi chú |
 |---|---|---|---|
-| 13 | CMD: 26 trận không có kèo More | 26/652, trung bình 2,5 dòng so với 12,6 | ≈ **170 dòng (1%)**, đường lấy không tồn tại |
-| 16 | Đuôi 215 loại kèo | **Đã cạn.** 11 ứng viên ≥2 sàn cùng bộ cửa; **8 có trùng khớp trận = 0**; 3 cái còn lại đã mở ở mục 19 | Hết |
-| 18 | `FT_GOAL_RANGE` (4 sàn, 1.114 trận) | Mỗi sàn chia khoảng khác nhau | **Không ghép được** — khác sản phẩm |
+| 23 | `OTHER_SCORE_DOMAIN_REQUIRED` | APSPORT **802**/404 trận, SBOBET **122**/74 | Kèo tỉ số chính xác cần cửa "tỉ số khác". Nếu sàn có phát cửa đó thì sửa được; nếu không thì là trần thật. **Chưa kiểm** |
+| 24 | BTI `UNPAIRED_OR_INVALID_NATIVE_SELECTIONS` | **2.466**/169 trận | Cửa từ chối lớn nhất của BTI. **Chưa kiểm** là hỏng thật hay đúng |
+| 25 | CMD `NATIVE_MR_ODDS_UNPROVEN` | **1.290** | Định dạng odds chưa chứng minh được |
+| 26 | CMD `EVENT_NOT_COMPARABLE` | **1.782** | Trận không ghép được sang sàn khác |
+| 27 | CMD `NATIVE_MARKET_HIDDEN` | **2.026** | Kèo ẩn chưa mở — liên quan mục 13 |
+| 13 | CMD: 26 trận không có kèo More | ≈ **170 dòng (1%)** | Đường lấy không tồn tại |
+| 18 | `FT_GOAL_RANGE` (4 sàn, 1.114 trận) | — | **Không ghép được**, mỗi sàn chia khoảng khác nhau |
 
 ## CHẶN — không sửa được bằng mã
 
@@ -76,6 +87,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | Việc | Số |
 |---|---|
+| **Kèo góc: trận có góc ở ≥2 sàn** | **49** / 2.025. Không phải lỗi thu thập — SBOBET và CMD bỏ sót **0** kèo góc |
 | CMD: trận ngoài 72h bị chính sách PASSIVE loại | **392** (cố ý) |
 | SABA: More mở ra rỗng | 52/52 |
 | SABA: giải góc trong feed | 0 |

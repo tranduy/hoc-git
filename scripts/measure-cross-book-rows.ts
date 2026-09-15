@@ -120,6 +120,7 @@ async function main(): Promise<void> {
   marginBearingMarkets(built as readonly unknown[]);
   unusedMarketTypes(built as readonly unknown[], catalogs as never);
   whyUnpriced(built as readonly unknown[]);
+  cornerCoverage(built as readonly unknown[], catalogs as never);
   top(pairCounts, "by book pair", 15);
   top(marketCounts, "by market type", 15);
 }
@@ -601,4 +602,68 @@ export function whyUnpriced(built: readonly unknown[]): void {
   };
   top(byTypeSingle, "by type, one book best:");
   top(byTypeUnfilled, "by type, missing side:");
+}
+
+/**
+ * Corner coverage, measured through the board's own matcher rather than a name
+ * comparison. The project's goal is parity on positive corner arbitrages, so
+ * the number that matters is how many fixtures carry a corner market at two
+ * books at once - and, for the fixtures where only one book does, whether the
+ * others were matched to that fixture at all. A fixture matched but without
+ * corners is a book not offering them; a fixture not matched is ours to fix.
+ */
+export function cornerCoverage(built: readonly unknown[],
+  catalogs: readonly { provider?: string;
+    quotes?: readonly { marketType?: string; providerEventId?: string }[] }[]): void {
+  const cornerFixtures = new Map<string, Set<string>>();
+  for (const catalog of catalogs) {
+    const set = new Set<string>();
+    for (const quote of catalog.quotes ?? []) {
+      if (/^(?:HOME_|AWAY_)?CORNER_/u.test(String(quote.marketType))) set.add(String(quote.providerEventId));
+    }
+    cornerFixtures.set(String(catalog.provider), set);
+  }
+  let matchedFixtures = 0;
+  let withCornerAtOne = 0;
+  let withCornerAtTwo = 0;
+  let cornerRows = 0;
+  let cornerRowsCross = 0;
+  const missedBooks = new Map<string, number>();
+  for (const event of built as readonly { providerEventIds?: Readonly<Record<string, string>>;
+    rows: readonly { marketType: string; cells: readonly { provider?: string }[] }[] }[]) {
+    const ids = event.providerEventIds ?? {};
+    matchedFixtures += 1;
+    const booksWithCorner = Object.entries(ids)
+      .filter(([provider, id]) => cornerFixtures.get(provider)?.has(String(id)) === true)
+      .map(([provider]) => provider);
+    if (booksWithCorner.length >= 1) withCornerAtOne += 1;
+    if (booksWithCorner.length >= 2) withCornerAtTwo += 1;
+    // When exactly one book prices corners here, name the books that were
+    // matched to the fixture and simply do not offer them.
+    if (booksWithCorner.length === 1) {
+      for (const provider of Object.keys(ids)) {
+        if (provider === booksWithCorner[0]) continue;
+        missedBooks.set(provider, (missedBooks.get(provider) ?? 0) + 1);
+      }
+    }
+    for (const row of event.rows) {
+      if (!/^(?:HOME_|AWAY_)?CORNER_/u.test(row.marketType)) continue;
+      cornerRows += 1;
+      if (new Set(row.cells.map((cell) => String(cell.provider))).size >= 2) cornerRowsCross += 1;
+    }
+  }
+  process.stdout.write("\ncorner coverage, through the board's own matcher\n");
+  process.stdout.write(`  fixtures on the board                  : ${matchedFixtures}
+`);
+  process.stdout.write(`  with a corner market at one book       : ${withCornerAtOne}
+`);
+  process.stdout.write(`  with a corner market at two or more    : ${withCornerAtTwo}
+`);
+  process.stdout.write(`  corner rows (cross-book)               : ${cornerRows} (${cornerRowsCross})
+`);
+  process.stdout.write("  matched to a corner fixture but offering none:\n");
+  for (const [provider, count] of [...missedBooks].sort((a, b) => b[1] - a[1])) {
+    process.stdout.write(`      ${provider.padEnd(10)} ${count}
+`);
+  }
 }
