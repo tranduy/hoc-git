@@ -1,5 +1,36 @@
 # Trạng thái làm việc — 2026-09-13
 
+## Phiên chết mà không sàn nào kêu — 2026-09-15
+
+**Triệu chứng:** mọi preflight bị từ chối, không có lý do ở đâu cả. Trên web sáu
+sàn đều "Fresh".
+
+**Số đo lúc phát hiện:** 61 phiên, **0 phiên dùng được**. Phiên mới nhất đã quá
+hạn gia hạn **27,7 giờ**, phiên cũ nhất 864 giờ. `nextRetryAtMs` = null trên cả
+61 — **không ai đang thử gia hạn, và không ai ghi lại rằng nó chết.**
+
+**Vì sao im lặng — hai tầng, phải sửa cả hai:**
+
+1. `catalog-source-registry.ts` — một phiên vẫn để `state: "ACTIVE"` sau khi qua
+   `renewAfterMs`. `reason` để null. Mã `EXPIRED` có sẵn trong từ vựng
+   `SessionHealthReason` nhưng **chưa bao giờ được gán cho ai**.
+2. `chrome-catalog-data-plane.ts` → `overlayStatuses` — khi feed còn đọc được thì
+   hard-code `reason: null`, xoá luôn kết luận của tầng 1.
+
+**Điều dễ hiểu nhầm, ghi lại cho lần sau:** feed sống **không phải bằng chứng gì
+về phiên**. Extension đọc tab đã đăng nhập; nó không bao giờ chạm vào secret của
+phiên. Nên một phiên chết **không có triệu chứng nào** trên chỉ số tươi/cũ. Hai
+sự thật độc lập, đừng để cái này trả lời thay cái kia.
+
+**Ưu tiên khi cả hai cùng nói:** lý do do chính nhà cái trả về (vd `UNAUTHORIZED`)
+**thắng** đồng hồ của mình — nó nói cho người vận hành nhiều hơn `EXPIRED`.
+
+**Sau khi sửa:** `/api/catalog/sources` báo `reason=EXPIRED` cho cả 6 sàn, khớp
+đúng 61/61 phiên không dùng được. Web hiện "session expired".
+
+**Chưa xong:** đây mới là phần *nói ra sự thật*. Phiên vẫn chết. Gốc là phiên
+FABET, gia hạn cần đăng nhập — tôi không làm đăng nhập.
+
 ## Phục hồi: "đọc được" không có nghĩa là "khỏe" — 2026-09-13 checkpoint
 
 Cả máy phục hồi hỏi đúng một câu: *sàn còn sống không*. SABA sống — feed
