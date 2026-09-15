@@ -63,7 +63,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI kẹt `HARD_RECOVERY`** | baseline cũ **752s** (ngưỡng 90s), `quoteChanges300s=0`, market **82.942 → 29.618**. Bảng mất **4.721 dòng (-25%)** | **Người vận hành.** Envelope vẫn về (`lastSeq` tăng, tuổi 2,3s) nên tab sống; nhưng `awaiting-list-live-initial` không bao giờ xong. Đường relaunch bị `browserRefreshEnabled=false` đóng; ảnh chụp sảnh đã thử **15 lần** không lên |
+| 29 | **BTI kẹt `HARD_RECOVERY`** | baseline **841s** (ngưỡng 90s), `quoteChanges300s=0`, market **82.942 → 29.618**, bảng mất **4.721 dòng (-25%)**. Gốc: BTI commit **một** generation (`commit-listed-events-1000+:1`) rồi không đúc generation mới; mọi payload sau bị từ chối `generation-already-committed` (**441**). Cổng đó **đúng** — phát lại cùng generation không cập nhật được gì. | **Chặn ở chẩn đoán.** BTI là sàn **duy nhất** không phơi bộ đếm collector: CMD có `CMD_NATIVE`, SBOBET có `SBO_DISCOVERY`, APSPORT có `AP_WALK/AP_DET/AP_MG`, BTI chỉ có `BTI_COV[chars:N]`. Không truy được vì sao generation đứng |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
