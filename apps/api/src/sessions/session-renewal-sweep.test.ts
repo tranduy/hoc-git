@@ -121,3 +121,66 @@ describe("createSessionRenewalSweep", () => {
     expect(cleared).toEqual(["timer-1"]);
   });
 });
+
+describe("backoff the sweep owns", () => {
+  const failing = (state: RedactedSessionStatus["state"], reason: string) =>
+    async (id: string): Promise<RedactedSessionStatus> =>
+      ({ ...session({ id }), state, reason } as RedactedSessionStatus);
+
+  it("stops asking at full cadence when the answer cannot change", async () => {
+    // session-manager writes nextRetryAtMs when its own Fabet parent renewal
+    // fails, but renew() does not, so a sweep honouring only nextRetryAtMs
+    // retries forever. Measured 2026-09-16: eight identical
+    // AUTH_EGRESS_UNAVAILABLE entries in one hour, five minutes apart, each a
+    // login attempt that could not have succeeded.
+    let now = NOW;
+    const renew = vi.fn(failing("INVALID", "AUTH_EGRESS_UNAVAILABLE"));
+    const records: string[] = [];
+    const value = createSessionRenewalSweep({
+      list: async () => [session()], renew, clock: { nowMs: () => now },
+      record: (level, message) => { records.push(`${level}:${message}`); }
+    });
+
+    await value.runOnce();
+    expect(renew).toHaveBeenCalledOnce();
+
+    // Inside the window the sweep asks nothing and says nothing.
+    now += 299_000;
+    await value.runOnce();
+    expect(renew).toHaveBeenCalledOnce();
+    expect(records).toHaveLength(1);
+
+    now += 2_000;
+    await value.runOnce();
+    expect(renew).toHaveBeenCalledTimes(2);
+  });
+
+  it("names the wait so a quiet journal is not mistaken for a quiet failure", async () => {
+    const records: string[] = [];
+    const value = createSessionRenewalSweep({
+      list: async () => [session()], renew: failing("INVALID", "AUTH_EGRESS_UNAVAILABLE"),
+      clock: { nowMs: () => NOW }, record: (level, message) => { records.push(`${level}:${message}`); }
+    });
+    await value.runOnce();
+    expect(records[0]).toContain("AUTH_EGRESS_UNAVAILABLE");
+    expect(records[0]).toContain("5 phút");
+  });
+
+  it("forgets the backoff the moment a renewal works", async () => {
+    let now = NOW;
+    let succeed = false;
+    const renew = vi.fn(async (id: string) => succeed
+      ? session({ id, renewAfterMs: now + 86_400_000 })
+      : ({ ...session({ id }), state: "INVALID", reason: "AUTH_EGRESS_UNAVAILABLE" } as RedactedSessionStatus));
+    const value = createSessionRenewalSweep({
+      list: async () => [session()], renew, clock: { nowMs: () => now }
+    });
+    await value.runOnce();
+    succeed = true;
+    now += 300_000;
+    await value.runOnce();
+    now += 1_000;
+    await value.runOnce();
+    expect(renew).toHaveBeenCalledTimes(3);
+  });
+});

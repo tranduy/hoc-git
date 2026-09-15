@@ -67,6 +67,16 @@ export function createSessionRenewalSweep(options: SessionRenewalSweepOptions): 
   const setTimer = options.setTimer ?? ((callback, delayMs) => {
     const timer = setInterval(callback, delayMs); timer.unref?.(); return timer;
   });
+  // Backoff the sweep owns, because the path it calls does not set one.
+  //
+  // session-manager writes nextRetryAtMs when its own Fabet parent renewal
+  // fails, but renew() does not, so a sweep that only honours nextRetryAtMs
+  // retries at full cadence forever. Measured 2026-09-16: eight identical
+  // "AUTH_EGRESS_UNAVAILABLE" entries in one hour, one every five minutes,
+  // each one a login attempt that could not have succeeded.
+  const failures = new Map<string, number>();
+  const retryAfter = new Map<string, number>();
+  const backoffMs = (count: number): number => Math.min(3_600_000, 300_000 * 2 ** (count - 1));
   const clearTimer = options.clearTimer ??
     ((timer) => { clearInterval(timer as ReturnType<typeof setInterval>); });
   let timer: unknown = null;
@@ -77,18 +87,31 @@ export function createSessionRenewalSweep(options: SessionRenewalSweepOptions): 
     if (due.length === 0) return 0;
     let renewed = 0;
     for (const id of due) {
+      const waitUntil = retryAfter.get(id);
+      if (waitUntil !== undefined && clock.nowMs() < waitUntil) continue;
       // Sequential on purpose: concurrent Fabet logins race the same
       // credential source and the loser leaves a half-published launch set.
       try {
         const status = await options.renew(id);
         if (status.state === "ACTIVE") {
           renewed += 1;
+          failures.delete(id);
+          retryAfter.delete(id);
           record("INFO", "Đã gia hạn phiên quá hạn mà không khởi động lại reader nào");
         } else {
-          // Silence here is what cost twelve days, so a refusal says so.
-          record("WARN", `Gia hạn phiên không thành: ${status.state}/${status.reason ?? "KHÔNG RÕ"}`);
+          // Silence here is what cost twelve days, so a refusal says so - but
+          // it says so once per backoff window, not once per sweep.
+          const count = (failures.get(id) ?? 0) + 1;
+          failures.set(id, count);
+          const delayMs = backoffMs(count);
+          retryAfter.set(id, clock.nowMs() + delayMs);
+          record("WARN", `Gia hạn phiên không thành: ${status.state}/${status.reason ?? "KHÔNG RÕ"}` +
+            `; thử lại sau ${Math.round(delayMs / 60_000)} phút`);
         }
       } catch (error) {
+        const count = (failures.get(id) ?? 0) + 1;
+        failures.set(id, count);
+        retryAfter.set(id, clock.nowMs() + backoffMs(count));
         record("ERROR", `Gia hạn phiên lỗi: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
