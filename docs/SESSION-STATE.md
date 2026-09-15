@@ -1,5 +1,56 @@
 # Trạng thái làm việc — 2026-09-13
 
+## Đường gia hạn chỉ-phiên: đã dựng, chạy, và lộ ra chặn tiếp theo — 2026-09-15
+
+**Đây là Task 5 ("Automatic Triggers") của `plans/2026-08-17-automatic-session-recovery.md`**,
+nửa chưa bao giờ được xây. Không phải việc mới nghĩ ra.
+
+Phục hồi phiên đáng lẽ có hai kích hoạt:
+
+| | |
+|---|---|
+| Phản ứng (sàn trả 401) | `onAuthenticationFailure` → `reportProviderFailure` — **đã có từ trước** |
+| Chủ động (trước khi hết hạn) | **không tồn tại** — lịch 03:00 gánh thay, rồi bị gỡ 04/09 |
+
+`apps/api/src/sessions/session-renewal-sweep.ts` — chỉ gia hạn phiên. **Không khởi
+động lại reader, không reset source, không đóng socket nào.** Backoff vẫn do
+`session-recovery-policy` sở hữu. Từ chối thì ghi vào maintenance journal, không nuốt.
+
+Chỉ gia hạn **Fabet cha**; con giữ launch URL chứ không giữ credentials, gia hạn con
+song song sẽ làm nó hết hạn trước khi cha kịp giữ lại identity đã xác minh.
+
+Công tắc `SESSION_RENEWAL_SWEEP_ENABLED`, **mặc định bật** — ngược với
+`SESSION_MAINTENANCE_ENABLED`, và cố ý ngược: đường kia mở browser rồi reset cả sáu
+sàn, đường này chỉ gia hạn phiên.
+
+**Chạy thật lúc deploy, kết quả:**
+
+```
+[WARN] Gia hạn phiên không thành: INVALID/AUTH_EGRESS_UNAVAILABLE
+```
+
+Sáu sàn vẫn chạy nguyên sau đó (`firstFailingHop = null`, trừ IM vốn đã chết) — đúng
+lời hứa không đụng feed.
+
+**Chặn tiếp theo, đã truy đến tận nơi:** `AUTH_EGRESS_UNAVAILABLE` ném từ
+`fabet-browser.ts:376` — *mọi egress đã thử và đều hỏng* — chứ không phải guard đầu
+hàm ở dòng 338 (`server.ts` không truyền `automation`, nên
+`PlaywrightFabetAutomation` mặc định có đủ `authenticate` và
+`openDirectAuthenticatedLobby`).
+
+Egress thực tế có trên máy:
+
+| | |
+|---|---|
+| `FABET_AUTH_PROXY_URL` | chưa đặt → **không có** proxy egress |
+| `FABET_LOCAL_WARP_AUTH` | chưa đặt → **không có** WARP egress |
+| `warp-cli` trên PATH | **có** — cài rồi nhưng bị cờ env tắt |
+| Còn lại | đúng một `DirectAuthEgress`, và nó hỏng |
+
+**Bẫy suýt mắc:** stderr của API child đi `stdio: "inherit"` ra console supervisor,
+**không vào file**. Không thấy dòng `[fabet-auth]` trong thư mục log **không chứng
+minh được gì**. Suýt kết luận sai là lỗi ở guard dòng 338.
+
 ## Vì sao không ai gia hạn phiên nữa — 2026-09-15, gốc thật
 
 **Hai công tắc tắt độc lập, không phải một lỗi:**
