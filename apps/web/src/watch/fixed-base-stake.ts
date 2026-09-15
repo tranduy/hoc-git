@@ -1,8 +1,8 @@
 import { sameNativePlayer, footballBinaryMarketSpec, type ProviderId, type ProviderQuote, type ProviderStakeConstraint, type ProviderPlayerIdentity } from "@tool-chenh/contracts";
 import { Decimal, effectiveDecimal, type FeeModel } from "@tool-chenh/core";
-import { comparisonOutcomeDomain, comparisonSettlementCases, isResultOppositionCell, distinctResultSourceCells,
-  isAvailableTwoWayTicket, hasValidComparisonPlayerBinding, sameComparisonPlayer, type TwoWaySettlementCase,
-  type ComparisonCell, type ComparisonRow } from "../catalog/comparison.js";
+import { comparisonOutcomeDomain, comparisonSettlementCases, exactPartitionOutcomeDomain, isResultOppositionCell,
+  distinctResultSourceCells, isAvailableTwoWayTicket, hasValidComparisonPlayerBinding, sameComparisonPlayer,
+  type TwoWaySettlementCase, type ComparisonCell, type ComparisonRow } from "../catalog/comparison.js";
 
 export interface FixedBaseStakePolicy {
   readonly currency: string;
@@ -339,6 +339,136 @@ function buildPlanForPair(row: StakeComparableRow, pair: OpposingLegPair,
   };
 }
 
+/**
+ * Cells a partition ticket may draw a leg from. exactMarketCells cannot serve
+ * here: it resolves the two-way domain first and a partition row has none, so
+ * it returns nothing at all.
+ *
+ * One cell per provider. A provider showing the same market twice is ambiguous
+ * about which price is real, and an ambiguous leg is not a leg.
+ */
+function partitionCells(row: StakeComparableRow, selectedProviders: ReadonlySet<ProviderId>,
+  domain: readonly string[]): readonly ComparisonCell[] {
+  const wanted = [...domain].sort().join("|");
+  const byProvider = new Map<ProviderId, ComparisonCell[]>();
+  for (const cell of distinctResultSourceCells(row.cells)) {
+    if (!selectedProviders.has(cell.provider)) continue;
+    if (cell.market.marketType !== row.marketType || cell.market.scope !== row.scope ||
+      cell.market.line !== null) continue;
+    const selections = cell.quotes.map((quote) => quote.selection);
+    if (selections.length !== domain.length || new Set(selections).size !== selections.length ||
+      [...selections].sort().join("|") !== wanted) continue;
+    if (!hasValidComparisonPlayerBinding(cell)) continue;
+    byProvider.set(cell.provider, [...(byProvider.get(cell.provider) ?? []), cell]);
+  }
+  return [...byProvider.values()].flatMap((cells) => cells.length === 1 ? [cells[0]!] : []);
+}
+
+/**
+ * Stakes for a market whose outcomes partition with nothing to push, one leg on
+ * each. Equal payout is the whole plan: with no push there is no result where
+ * two legs pay together, so the anchor fixes the payout and every other leg buys
+ * that same payout at its own price.
+ *
+ * Kept apart from the pair builder rather than folded into it. That one searches
+ * a single hedge stake across settlement scenarios that can refund or split, and
+ * none of that arithmetic has a meaning here.
+ */
+function buildPartitionPlan(row: StakeComparableRow, policy: FixedBaseStakePolicy,
+  selectedProviders: ReadonlySet<ProviderId>, requireProfit: boolean,
+  observedAtMs?: number, anchorInput?: AnchoredStakeInput): FixedBaseStakePlan | null {
+  const domain = exactPartitionOutcomeDomain(row.marketType, row.scope, row.line);
+  if (domain === null || domain.length < 2) return null;
+  const cells = partitionCells(row, selectedProviders, domain);
+  // One leg per outcome, each the best price on it, every leg settling the same way.
+  const bestByOutcome = domain.map((selection) => cells.flatMap((cell) => {
+    if (cell.market.status !== "OPEN") return [];
+    return cell.quotes.filter((quote) => quote.selection === selection && quote.status === "OPEN")
+      .flatMap((quote) => {
+        const odds = oddsOf(quote);
+        return odds === null ? [] : [{ provider: cell.provider, selection, odds,
+          settlementProfile: cell.market.settlementProfile,
+          providerSelectionId: quote.providerSelectionId, providerMarketId: quote.providerMarketId,
+          providerEventId: quote.providerEventId }];
+      });
+  }).sort((left, right) => right.odds.comparedTo(left.odds) ||
+    left.provider.localeCompare(right.provider) ||
+    left.providerSelectionId.localeCompare(right.providerSelectionId))[0]);
+  if (bestByOutcome.some((leg) => leg === undefined)) return null;
+  const legsIn = bestByOutcome as NonNullable<(typeof bestByOutcome)[number]>[];
+  if (new Set(legsIn.map((leg) => leg.settlementProfile)).size !== 1) return null;
+  // One book holding every outcome is not a cross-book ticket.
+  if (new Set(legsIn.map((leg) => leg.provider)).size < 2) return null;
+
+  const constraints = legsIn.map((leg) => resolveConstraint(leg.provider, policy, observedAtMs));
+  if (constraints.some((constraint) => constraint === null)) return null;
+  const resolved = constraints as NonNullable<(typeof constraints)[number]>[];
+  const effective = legsIn.map((leg, index) => effectiveDecimal(leg.odds, resolved[index]!.fee));
+  if (effective.some((odds) => !odds.gt(1))) return null;
+
+  const anchorIndex = anchorInput === undefined ? 0
+    : legsIn.findIndex((leg) => leg.provider === anchorInput.provider && leg.selection === anchorInput.selection);
+  if (anchorIndex < 0) return null;
+  const anchorStake = policyDecimal(anchorInput?.stake ?? policy.baseStake);
+  const anchorConstraint = resolved[anchorIndex]!;
+  if (anchorStake === null || anchorStake.lt(anchorConstraint.minStake) ||
+    anchorStake.gt(anchorConstraint.maxStake) || anchorStake.gt(anchorConstraint.balance) ||
+    !anchorStake.mod(anchorConstraint.stakeStep).isZero()) return null;
+
+  // The payout the anchor buys. Every other leg is rounded to its own step both
+  // ways, and the combination with the best worst case wins.
+  const target = anchorStake.times(effective[anchorIndex]!);
+  const options = legsIn.map((leg, index) => {
+    void leg;
+    if (index === anchorIndex) return [anchorStake];
+    const constraint = resolved[index]!;
+    const exact = target.div(effective[index]!);
+    const rounded = [exact.div(constraint.stakeStep).floor().times(constraint.stakeStep),
+      exact.div(constraint.stakeStep).ceil().times(constraint.stakeStep)]
+      .filter((stake) => stake.gt(0) && stake.gte(constraint.minStake) &&
+        stake.lte(constraint.maxStake) && stake.lte(constraint.balance));
+    return [...new Map(rounded.map((stake) => [plain(stake), stake])).values()];
+  });
+  if (options.some((choices) => choices.length === 0)) return null;
+
+  type PartitionCandidate = { stakes: Decimal[]; total: Decimal; profits: Decimal[]; worst: Decimal };
+  let best: PartitionCandidate | null = null;
+  const walk = (index: number, chosen: Decimal[]): void => {
+    if (index === options.length) {
+      const total = chosen.reduce((sum, stake) => sum.plus(stake), new Decimal(0));
+      const profits = chosen.map((stake, legIndex) => stake.times(effective[legIndex]!).minus(total));
+      const worst = Decimal.min(...profits);
+      if (best === null || worst.gt(best.worst) || (worst.eq(best.worst) && total.lt(best.total))) {
+        best = { stakes: [...chosen], total, profits, worst };
+      }
+      return;
+    }
+    for (const stake of options[index]!) walk(index + 1, [...chosen, stake]);
+  };
+  walk(0, []);
+  if (best === null) return null;
+  const plan = best as PartitionCandidate;
+  if (requireProfit && !plan.worst.gt(0)) return null;
+
+  const legs: readonly FixedBaseStakeLeg[] = legsIn.map((leg, index) => ({
+    provider: leg.provider, selection: leg.selection, providerEventId: leg.providerEventId,
+    providerMarketId: leg.providerMarketId, providerSelectionId: leg.providerSelectionId,
+    decimalOdds: plain(leg.odds), stake: plain(plan.stakes[index]!),
+    payout: plain(plan.stakes[index]!.times(effective[index]!)), profit: plain(plan.profits[index]!),
+    role: index === anchorIndex ? "BASE" : "HEDGE",
+    feeType: resolved[index]!.feeType, feeRate: resolved[index]!.feeRate
+  }));
+  return {
+    fingerprint: [row.key, plain(anchorStake), ...legs.map((leg, index) =>
+      `${leg.provider}|${leg.selection}|${legsIn[index]!.providerEventId}` +
+      `|${legsIn[index]!.providerMarketId}|${legsIn[index]!.providerSelectionId}` +
+      `|${leg.decimalOdds}|${leg.stake}`)].join("::"),
+    currency: policy.currency, legs, totalStake: plain(plan.total),
+    profitsBySelection: Object.fromEntries(legs.map((leg, index) => [leg.selection, plain(plan.profits[index]!)])),
+    worstCaseProfit: plain(plan.worst), roi: plain(plan.worst.div(plan.total))
+  };
+}
+
 export function buildFixedBaseStakePlanForPair(row: ComparisonRow, pair: OpposingLegPair,
   policy: FixedBaseStakePolicy, observedAtMs?: number): FixedBaseStakePlan | null {
   return buildPlanForPair(row, pair, policy, true, observedAtMs);
@@ -352,6 +482,9 @@ function bestPlan(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId>
     ? new Set([...selectedProviders].filter(provider => resolveConstraint(provider, policy, observedAtMs) !== null))
     : selectedProviders;
   if (eligibleProviders.size < 2) return null;
+  if (exactPartitionOutcomeDomain(row.marketType, row.scope, row.line) !== null) {
+    return buildPartitionPlan(row, policy, eligibleProviders, requireProfit, observedAtMs);
+  }
   return enumerateOpposingLegPairs(row, eligibleProviders)
     .flatMap((pair) => {
       const plan = buildPlanForPair(row, pair, policy, requireProfit, observedAtMs);
