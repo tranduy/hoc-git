@@ -1,5 +1,41 @@
 # Trạng thái làm việc — 2026-09-13
 
+## Vì sao không ai gia hạn phiên nữa — 2026-09-15, gốc thật
+
+**Hai công tắc tắt độc lập, không phải một lỗi:**
+
+1. `SESSION_MAINTENANCE_ENABLED` mặc định `"0"` (`scripts/live-stack-config.mjs:20`)
+   → `sessionTimer` không bao giờ được tạo → `tick()` không bao giờ chạy. **Cố ý** —
+   đường này mở trình duyệt Playwright hiện hình, phải là hành động người vận hành.
+
+2. Lịch 03:00 (`createDailyMaintenanceScheduler`) bị gỡ khỏi `server.ts` ngày
+   **2026-09-04**, commit `69cdf30`. Cũng **cố ý**, lý do ghi ngay tại chỗ gọi:
+   *"Automatic 03:00 maintenance was removed because it destroyed healthy provider
+   sockets."* Hàm và test của nó vẫn còn nguyên, chỉ không ai gọi.
+
+**Bằng chứng từ nhật ký bền** (`%LOCALAPPDATA%/tool-chenh/maintenance/events.jsonl`,
+355 dòng, sống sót qua mọi restart):
+
+| | |
+|---|---|
+| Lần chạy theo lịch | **16**, mỗi ngày 2026-08-17 → 2026-09-02 |
+| Từ 2026-09-02 đến nay | **0** |
+| Khoảng trống | **12,6 ngày** |
+
+**Hệ quả không ai tính đến:** bỏ global reset là đúng — nó giết socket đang khỏe.
+Nhưng global reset **cũng là thứ duy nhất gia hạn secret của phiên**. Phần feed có
+per-source recovery gánh; **phần phiên không ai gánh.** Đây đúng là nhầm lẫn
+"feed sống = phiên khỏe" một lần nữa, lần này ở tầng *phục hồi* thay vì tầng *báo cáo*.
+
+Giờ chỉ còn **nút Reset thủ công** gia hạn phiên. Không bấm thì phiên chết dần.
+
+**Đừng nối lại lịch 03:00 cũ** — nó kéo theo global reset. Nếu làm, phải làm đường
+gia hạn **chỉ phiên**, không đụng socket.
+
+**Đã sửa phần nói dối:** `MaintenanceStatus.scheduledHour` từng là số 3 viết cứng,
+báo cho người vận hành một cái lịch không tồn tại suốt 12 ngày. Giờ là
+`number | null`, chỉ khác null khi thật sự có timer được lên (`armSchedule`).
+
 ## Phiên chết mà không sàn nào kêu — 2026-09-15
 
 **Triệu chứng:** mọi preflight bị từ chối, không có lý do ở đâu cả. Trên web sáu
