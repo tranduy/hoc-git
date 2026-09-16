@@ -49,7 +49,12 @@ describe("CatalogRevisionStore", () => {
     const replacement = { ...first, observedAtMs: 102, quotes: nextQuotes };
     const changed = publish(replacement);
     expect(changed.revision).not.toBe(before.revision);
-    expect(reads).toBe(257 + 127);
+    // Was 257 + 127: one changed quote invalidated its 128-row block and the
+    // other 127 originals in it were serialised again. Every provider keeps a
+    // per-record digest now, so they are read from cache and the count does
+    // not move. This is the whole point of the block cache, finally true for
+    // APSPORT as well.
+    expect(reads).toBe(257);
     const cold = new CatalogRevisionStore({ now: () => 100 }); stores.push(cold);
     expect(changed.revision).toBe(cold.publish(replacement.accountId, replacement,
       { snapshotState: "FRESH", freshnessMs: 20 }).revision);
@@ -136,8 +141,11 @@ describe("CatalogRevisionStore", () => {
       const digest = (record: unknown) => createHash("sha256").update(JSON.stringify(record)).digest("base64url");
       const catalog = Object.fromEntries(Object.entries(projected).map(([key, records]) => {
         if (!Array.isArray(records)) return [key, records];
-        const rows = key === "nativeMarketObservations" || value.provider === "BTI" || value.provider === "SBOBET"
-          ? records.map(digest) : records;
+        // Every provider digests its records now, not just the two largest.
+        // The gate here mirrored production and was widened with it: without
+        // a record digest the block hash is taken over whole records, which is
+        // what put this on the API hot path.
+        const rows = records.map(digest);
         return [key, Array.from({ length: Math.ceil(rows.length / 128) }, (_, index) =>
           digest(rows.slice(index * 128, (index + 1) * 128)))];
       }));

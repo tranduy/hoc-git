@@ -42,9 +42,15 @@ export class CatalogRevisionHasher {
         hash.update(JSON.stringify(value));
         continue;
       }
+      // Every provider, not just the two largest. Profiled 2026-09-16: the
+      // API sat at 92% of one core and this projection was its hottest code
+      // with the garbage collector right behind it. Without a record cache the
+      // block digest is taken over 128 whole records, so each pass re-projects
+      // and re-serialises them; with one it is taken over 128 short digests.
+      // All three caches are WeakMaps keyed by the record, so widening them
+      // costs no retention -- a retired record releases its digest with it.
       const cache = key === "nativeMarketObservations" ? this.#native
-        : catalog.provider !== "BTI" && catalog.provider !== "SBOBET" ? undefined
-          : key === "quotes" ? this.#quotes : this.#records;
+        : key === "quotes" ? this.#quotes : this.#records;
       hash.update("[");
       const kind = `${catalog.provider}:${key}`;
       for (let index = 0; index < value.length; index += 128) {
