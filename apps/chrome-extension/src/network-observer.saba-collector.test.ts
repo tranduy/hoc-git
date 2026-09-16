@@ -204,6 +204,8 @@ describe("NetworkObserver SABA hidden collector wiring", () => {
       // Rows carrying their own date in the time text, against rows showing
       // only a clock. This fixture's rows carry their own date, so none do.
       timeShapes: "t2.u0,e2.u0",
+      // Attribute names on undated rows. These rows are dated, so none.
+      dateAttrs: "",
       restore: "c1.r0.m0.e0.w0", frozen: null,
       domBlocked: false, probeBlocked: false, lastErrorCode: null, currentPeriod: "TODAY",
       mainRosterComplete: true, hiddenMarketsComplete: false });

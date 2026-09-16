@@ -566,6 +566,18 @@ describe("SABA owner counts", () => {
   });
 
 
+  it("accepts the attribute-name shapes, backslashes intact", () => {
+    for (const dateAttrs of ["data-matchid+data-toggle:103", "data-a+data-b:12 data-c:4", "title:7"]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), dateAttrs }), dateAttrs)
+        .toMatchObject({ dateAttrs });
+    }
+    for (const bad of ["", " x", "data-x:d", "data-x", "DATA-X:1"]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), dateAttrs: bad }), bad)
+        .not.toHaveProperty("dateAttrs");
+    }
+  });
+
+
   it("still refuses anything that is not a count", () => {
     for (const owners of ["td.md.dd,ed.md.dd", "Arsenal", "", "t1.m1.d1"]) {
       expect(sabaCollectorDiagnosticForTests(collector(owners))?.owners, owners).toBeUndefined();

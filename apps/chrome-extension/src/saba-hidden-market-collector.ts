@@ -45,6 +45,8 @@ export interface SabaCollectorRosterOwner extends SabaCollectorReadClock {
   readonly record: SabaCollectorRecord;
   readonly control: "ELIGIBLE_MORE" | "NO_ELIGIBLE_CONTROL";
   readonly kickoffDate: SabaCollectorKickoffDate;
+  /** Attribute NAMES seen on the time cell, row and table for an undated row. Names only. */
+  readonly dateAttrs?: string;
 }
 
 export interface SabaCollectorRosterResult {
@@ -392,6 +394,27 @@ export class SabaHiddenMarketCollector {
       return `${period === "TODAY" ? "t" : "e"}${roster.length}.m${more.length}.d${due}`;
     }).join(",");
   }
+
+  /**
+   * For rows that show only a clock: which attribute names the page actually
+   * carries on the time cell, its row and its table. Names only, never values.
+   * dates=x0 says no date is ever found; this says what the page does offer,
+   * which is the difference between reading the wrong attribute and there
+   * being no date in the DOM to read.
+   */
+  dateAttrShapes(): string {
+    const shapes = new Map<string, number>();
+    for (const period of PERIODS) {
+      for (const owner of this.#periods[period].roster ?? []) {
+        const shape = owner.dateAttrs ?? "";
+        if (shape === "") continue;
+        shapes.set(shape, (shapes.get(shape) ?? 0) + 1);
+      }
+    }
+    return [...shapes].sort((left, right) => right[1] - left[1]).slice(0, 4)
+      .map(([shape, count]) => `${shape}:${count}`).join(" ");
+  }
+
 
   /**
    * Per period: roster rows whose time text already carries its own calendar

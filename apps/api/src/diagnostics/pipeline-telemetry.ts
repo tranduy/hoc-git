@@ -718,6 +718,8 @@ interface SabaCollectorDiagnostic {
   readonly dates?: string;
   /** Per period: roster rows carrying their own date in the time text, and rows showing only a clock. */
   readonly timeShapes?: string;
+  /** Attribute names present on undated rows, names only, most common first. */
+  readonly dateAttrs?: string;
   /** Why the collector is frozen, if it is. */
   readonly frozen?: string;
 }
@@ -744,6 +746,9 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     ...(typeof entry.owners === "string" &&
       /^t-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5},e-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5}$/u.test(entry.owners)
       ? { owners: entry.owners } : {}),
+    ...(typeof entry.dateAttrs === "string" && entry.dateAttrs.length <= 240 &&
+      /^(?:[a-z0-9-]{1,32}(?:\+[a-z0-9-]{1,32}){0,11}:\d{1,5})(?: [a-z0-9-]{1,32}(?:\+[a-z0-9-]{1,32}){0,11}:\d{1,5}){0,3}$/u.test(entry.dateAttrs)
+      ? { dateAttrs: entry.dateAttrs } : {}),
     ...(typeof entry.timeShapes === "string" &&
       /^t\d{1,5}\.u\d{1,5},e\d{1,5}\.u\d{1,5}$/u.test(entry.timeShapes)
       ? { timeShapes: entry.timeShapes } : {}),
