@@ -59,6 +59,7 @@ export interface AppOptions {
   readonly recoverIm?: (url: string) => number;
   readonly cmdHiddenMarketProbe?: CmdHiddenMarketProbeLike;
   readonly pipelineDiagnostics?: PipelineDiagnosticsLike;
+  readonly revisionCache?: () => Record<string, string>;
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
@@ -193,7 +194,9 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.cmdHiddenMarketProbe !== undefined) {
     registerCmdHiddenMarketProbeRoute(app, options.cmdHiddenMarketProbe);
   }
-  if (options.pipelineDiagnostics !== undefined) registerDiagnosticRoutes(app, options.pipelineDiagnostics);
+  if (options.pipelineDiagnostics !== undefined) {
+    registerDiagnosticRoutes(app, options.pipelineDiagnostics, options.revisionCache);
+  }
   if (options.chromeBridge !== undefined) void app.register(async (instance) => {
     registerChromeBridgeRoute(instance, options.chromeBridge!.registry, {
       installationKey: options.chromeBridge!.installationKey,

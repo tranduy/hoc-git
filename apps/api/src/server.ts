@@ -705,6 +705,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     catalogTelemetry,
     catalogStore,
     catalogRevisions,
+    revisionCache: () => catalogRevisions.cacheTally(),
     pipelineDiagnostics: {
       list: () => pipelineTelemetry.diagnostics({
         listSources: () => pipelineDiagnosticSources(chromeBridgeRegistry),

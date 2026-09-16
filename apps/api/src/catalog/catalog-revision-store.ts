@@ -29,6 +29,9 @@ export class CatalogRevisionStore {
   readonly #entries = new Map<string, StoredCatalogRevision>();
   readonly #listeners = new Set<Listener>();
   readonly #hasher = new CatalogRevisionHasher();
+
+  /** Cache hit rates per provider, so the hasher cost can be attributed. */
+  cacheTally(): Record<string, string> { return this.#hasher.cacheTally(); }
   readonly #pending = new Map<string, { readonly catalog: ObservedProviderCatalog;
     readonly freshUntilMs: number }>();
   #publicationTimer: ReturnType<typeof setTimeout> | undefined;

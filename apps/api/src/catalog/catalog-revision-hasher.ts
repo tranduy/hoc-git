@@ -22,6 +22,31 @@ export class CatalogRevisionHasher {
   // Weak owners prevent the retention bound itself from keeping old catalogs
   // alive after source retirement. A live first row owns its cached block.
   readonly #blockOrder = new Set<WeakRef<object>>();
+  /**
+   * The record and block caches are keyed by object identity, so they only
+   * pay off while an adapter reuses the record objects it did not change. An
+   * adapter that rebuilds every row each round misses every time and the
+   * caches become pure overhead. Nothing said which was happening, so the API
+   * burning a core could not be attributed further than "the hasher".
+   */
+  readonly #tally = new Map<string, { blockHit: number; blockMiss: number;
+    recordHit: number; recordMiss: number }>();
+
+  cacheTally(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [provider, t] of this.#tally) {
+      out[provider] = `block ${t.blockHit}/${t.blockHit + t.blockMiss}`
+        + ` record ${t.recordHit}/${t.recordHit + t.recordMiss}`;
+    }
+    return out;
+  }
+
+  #count(provider: string, field: "blockHit" | "blockMiss" | "recordHit" | "recordMiss"): void {
+    const current = this.#tally.get(provider)
+      ?? { blockHit: 0, blockMiss: 0, recordHit: 0, recordMiss: 0 };
+    current[field] += 1;
+    this.#tally.set(provider, current);
+  }
 
   revisionFor(catalog: ObservedProviderCatalog, snapshotState: SnapshotState): string {
     const cached = this.#catalogs.get(catalog);
@@ -59,12 +84,14 @@ export class CatalogRevisionHasher {
         if (cachedBlock?.kind === kind && cachedBlock.rows.length === Math.min(128, value.length - index) &&
           cachedBlock.rows.every((record, offset) => record === value[index + offset])) {
           this.#blockOrder.delete(cachedBlock.owner); this.#blockOrder.add(cachedBlock.owner);
+          this.#count(catalog.provider, "blockHit");
           if (index > 0) hash.update(",");
           hash.update(JSON.stringify(cachedBlock.digest));
           continue;
         }
         const group = value.slice(index, index + 128).map((record: object) => {
           const digest = cache?.get(record);
+          this.#count(catalog.provider, digest === undefined ? "recordMiss" : "recordHit");
           if (digest !== undefined) return digest;
           let projected: object = record;
           if (key === "quotes") {
@@ -81,6 +108,7 @@ export class CatalogRevisionHasher {
           cache.set(record, next);
           return next;
         });
+        this.#count(catalog.provider, "blockMiss");
         const digest = createHash("sha256").update(JSON.stringify(group)).digest("base64url");
         if (cachedBlock !== undefined) this.#blockOrder.delete(cachedBlock.owner);
         if (this.#blockOrder.size >= MAX_RETAINED_BLOCKS) {

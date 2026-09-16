@@ -7,7 +7,8 @@ export interface PipelineDiagnosticsLike {
   get(accountId: string): Promise<PipelineDiagnostic | null>;
 }
 
-export function registerDiagnosticRoutes(app: FastifyInstance, diagnostics: PipelineDiagnosticsLike): void {
+export function registerDiagnosticRoutes(app: FastifyInstance, diagnostics: PipelineDiagnosticsLike,
+  revisionCache?: () => Record<string, string>): void {
   app.get("/api/diag/runtime", async () => {
     const memory = process.memoryUsage();
     const cpu = process.cpuUsage();
@@ -16,6 +17,10 @@ export function registerDiagnosticRoutes(app: FastifyInstance, diagnostics: Pipe
       heapLimitBytes: getHeapStatistics().heap_size_limit,
       cpuUserMicros: cpu.user, cpuSystemMicros: cpu.system };
   });
+  // Hasher cache hit rate per provider. Its own endpoint because
+  // /api/diag/runtime is contractually numbers only.
+  app.get("/api/diag/revision-cache", async () => revisionCache?.() ?? {});
+
   app.get("/api/diag/pipeline", async (_request, reply) => {
     try {
       return { accounts: await diagnostics.list() };
