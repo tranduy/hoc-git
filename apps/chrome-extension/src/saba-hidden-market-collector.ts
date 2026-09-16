@@ -394,6 +394,23 @@ export class SabaHiddenMarketCollector {
   }
 
   /**
+   * Per period: roster rows whose time text already carries its own calendar
+   * date, and rows that show only a clock. Only the second kind needs the page
+   * to supply a date, so this is the denominator dateCounts is missing: x0 on
+   * rows that all carry their own date costs nothing, x0 on rows that do not
+   * costs every one of them.
+   */
+  timeShapeCounts(): string {
+    return PERIODS.map((period) => {
+      const roster = this.#periods[period].roster ?? [];
+      const dated = roster.filter((owner) =>
+        /^\s*\d{1,2}\/\d{1,2}\s/u.test(owner.record.timeText)).length;
+      return `${period === "TODAY" ? "t" : "e"}${dated}.u${roster.length - dated}`;
+    }).join(",");
+  }
+
+
+  /**
    * Per period: roster size, how many carry an explicit kick-off date, and how
    * many do not. A SABA row that shows only a clock needs the page to supply
    * the calendar date; without one the fixture is refused rather than dated by

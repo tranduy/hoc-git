@@ -554,6 +554,18 @@ describe("SABA owner counts", () => {
   });
 
 
+  it("accepts the time-shape counts, backslashes intact", () => {
+    for (const timeShapes of ["t0.u118,e0.u115", "t131.u0,e0.u0", "t0.u0,e0.u0"]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), timeShapes }), timeShapes)
+        .toMatchObject({ timeShapes });
+    }
+    for (const bad of ["td.ud,ed.ud", "t1.u1", "t1.x1,e1.x1", ""]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), timeShapes: bad }), bad)
+        .not.toHaveProperty("timeShapes");
+    }
+  });
+
+
   it("still refuses anything that is not a count", () => {
     for (const owners of ["td.md.dd,ed.md.dd", "Arsenal", "", "t1.m1.d1"]) {
       expect(sabaCollectorDiagnosticForTests(collector(owners))?.owners, owners).toBeUndefined();

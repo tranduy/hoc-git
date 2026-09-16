@@ -716,6 +716,8 @@ interface SabaCollectorDiagnostic {
   readonly restore?: string;
   /** Per period: roster size, how many carry an explicit kick-off date, how many do not. */
   readonly dates?: string;
+  /** Per period: roster rows carrying their own date in the time text, and rows showing only a clock. */
+  readonly timeShapes?: string;
   /** Why the collector is frozen, if it is. */
   readonly frozen?: string;
 }
@@ -742,6 +744,9 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     ...(typeof entry.owners === "string" &&
       /^t-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5},e-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5}$/u.test(entry.owners)
       ? { owners: entry.owners } : {}),
+    ...(typeof entry.timeShapes === "string" &&
+      /^t\d{1,5}\.u\d{1,5},e\d{1,5}\.u\d{1,5}$/u.test(entry.timeShapes)
+      ? { timeShapes: entry.timeShapes } : {}),
     ...(typeof entry.dates === "string" &&
       /^t\d{1,5}\.x\d{1,5}\.n\d{1,5},e\d{1,5}\.x\d{1,5}\.n\d{1,5}$/u.test(entry.dates)
       ? { dates: entry.dates } : {}),
