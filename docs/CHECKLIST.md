@@ -54,12 +54,15 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 36 | Ghi kết quả bật Network trên chính tab | Trước `await` trần: hỏng là `start()` đứt và không ai biết. Nay `main-net-ok` / `main-net-<lý do>` — chính nó loại bỏ giả thuyết "gắn hỏng" | `catalogShape` |
 | 24 | BTI `UNPAIRED_OR_INVALID_NATIVE_SELECTIONS` — **không phải lỗ hổng** | 2.466 market/144 trận là bản tổng hợp trùng; **144/144 trận đã có sẵn** cả thang tài xỉu lẫn kèo chấp. **0** trận bị từ chối mà không có gì thay thế | `nativeDetail=summary` |
 | 23 | `OTHER_SCORE_DOMAIN_REQUIRED` — **trần thật** | APSPORT **0/805**, SBOBET **0/184** market có cửa vét "tỉ số khác". Không có cửa đó thì không định giá được | `nativeDetail=summary` |
+| 37 | Tên lối thoát roster bị chính bộ lọc hiển thị nuốt | `lastRosterFailure` in ra `none` rồi **biến mất** đúng lúc collector bắt đầu đặt tên. Bộ lọc chỉ cho qua `[A-Za-z_]`; mọi tên thật (`early-inventory-null`, `threw-TypeError-live`) đều có gạch nối. Một trường **biến mất** bị đọc thành **không có lỗi** — đúng cái bẫy đã mắc 4 lần | `bti-coverage-shape.test.ts` |
+| 29 | **BTI tối 11 giờ: lịch xa kéo theo cả live và prematch** | Đọc được tên thật: `early-inventory-unusable`. Cổng sau `Promise.all` đòi **đủ 3** phân hoạch, nên `early` hỏng thì **vứt luôn** live + prematch đã dựng xong. Nay chỉ live + prematch là bắt buộc; `early` vắng thì đứng thế bằng **rỗng**, không phải bằng bản cũ — trận rời khỏi danh mục chứ không giữ giá không ai xác nhận. **`catalogAgeMs` 39.481.000 → 10.513**; BTI **380 trận / 2.732 market / 6.193 quote**, ghép **1.191 dòng với IM, 1.017 CMD, 965 APSPORT, 961 SBOBET, 18 SABA** | `catalogShape` + `measure-cross-book-rows.ts` |
 | 26 | CMD `EVENT_NOT_COMPARABLE` — tách 5 nguyên nhân | 1.170/130 trận họ kèo bị từ chối có chủ ý · 459/51 e-soccer · 190/10 còn sót. **`EVENT_STATISTIC_LEAGUE_UNRESOLVED` = 0** → không mất giải góc nào | `nativeDetail=summary` |
 
 ## ĐANG CHẠY — đã giao nhưng **chưa** chứng minh hết
 
 | # | Việc | Tình trạng thật |
 |---|---|---|
+| 38 | BTI: `early` vẫn hỏng, kèo ẩn vẫn tắt | `earlyLeagues:0`, `lastRosterFailure` nay chỉ đúng một trong ba: `early-inventory-no-ids` / `-null` / `-thin`. `COMPLETE`, lập kế hoạch detail và tái dùng cache detail **vẫn đòi đủ 3** phân hoạch, nên BTI hiện chỉ có kèo chính (2.732 market/380 trận ≈ 7 mỗi trận), chưa có kèo ẩn. Chưa đo được nó đáng bao nhiêu dòng. |
 | 11 | ~~SABA: set ảnh chụp DOM bị xé~~ | **Chẩn đoán SAI, đã rút.** `dom-chunk-1/2/3-of-4-awaiting-rest` bằng nhau và không có `4-of-4` là hình dạng của **ráp THÀNH CÔNG** — mảnh cuối hoàn tất nên không ghi note. 774 lần bằng nhau = 774 lần ráp xong. SABA đói baseline vì `BASELINE_TIMEOUT`, không phải vì mất mảnh. Phần giữ lại: cửa xé set giờ tự khai tên nếu thật sự xảy ra. |
 
 ## CHƯA LÀM — chỉ còn thứ thật sự chặn
@@ -70,7 +73,6 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI: roster hỏng lại mỗi 12 giây, chưa biết ở nhánh nào** | Chuỗi đã thu hẹp còn một điểm: `BTI_COV[phase:ROSTER_BACKOFF;rosterRefreshFailed:1;authBlocked:0;requestPaused:0;requestStatus:0;rosterRetryInMs:~5000;lostSession:0;fetchNull:0]`. Không chặn xác thực, không tạm dừng, không lỗi HTTP, `Network.enable` ok trên tab lẫn worker, `bti-eval-ok` đếm 55 lần chạy thành công. Backoff chỉ 12 giây nên việc nó luôn còn hạn = **hỏng mới liên tục**. Đã gắn tên cho 3 lối thoát của `hydratePartition`, cả 3 **không được chạm** (`lastRosterFailure` vẫn rỗng) ⇒ hỏng đi qua nhánh `throw new Error('ROSTER_UNAVAILABLE')` chưa gắn. | **Bước tiếp theo, một chỗ:** gắn tên cho nhánh throw đó rồi đọc lại |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
