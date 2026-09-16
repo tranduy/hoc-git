@@ -448,7 +448,7 @@ describe("SabaWsCatalogAdapter", () => {
     expect(catalog.nativeMarketObservations.filter((observation) =>
       observation.providerEventId === "133603577").map(({ disposition, reason }) =>
       [disposition, reason])).toEqual(Array.from({ length: 5 }, () =>
-      ["EXCLUDED", "EVENT_TIME_UNRESOLVED"]));
+      ["EXCLUDED", "EVENT_TIME_TEXT_UNRECOGNISED"]));
   });
 
   it.each(["DOM", "WS"] as const)(

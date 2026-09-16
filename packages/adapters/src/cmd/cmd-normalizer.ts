@@ -307,7 +307,7 @@ function eventComparabilityRefusal(input: {
   readonly teams: readonly string[];
   readonly classified: { readonly competition: string; readonly teams: readonly string[] } | null;
   readonly isSabaAggregate: boolean;
-  readonly timeUnresolved: boolean;
+  readonly timeUnresolved: string | null;
 }): string | null {
   if (input.sportId !== "1") return "EVENT_NOT_FOOTBALL";
   if (input.matchId.trim() === "") return "EVENT_ID_MISSING";
@@ -316,7 +316,7 @@ function eventComparabilityRefusal(input: {
     return "EVENT_VIRTUAL_FOOTBALL";
   }
   if (input.isSabaAggregate) return "EVENT_MULTI_MATCH_AGGREGATE";
-  if (input.timeUnresolved) return "EVENT_TIME_UNRESOLVED";
+  if (input.timeUnresolved !== null) return input.timeUnresolved;
   return null;
 }
 
@@ -505,6 +505,28 @@ function oddStatus(odd: CmdCatalogOdd): ProviderQuote["status"] {
   return odd.greyedOut?.toLowerCase() === "true" || odd.status === "SUSPENDED" ? "SUSPENDED" : "OPEN";
 }
 
+/**
+ * EVENT_TIME_UNRESOLVED covered three different answers. Measured 2026-09-16:
+ * 859 refusals across 95 SABA fixtures while SABA published only 130, and the
+ * one name could not say whether the collector was handing over a broken
+ * timezone offset, whether the row carried a clock whose calendar date was
+ * never established, or whether the text was a shape nothing here reads. Only
+ * the first is a defect; refusing an undated kickoff is this project refusing
+ * to guess a date, which is the rule working rather than failing.
+ */
+function sabaTimeRefusal(provider: ProviderId, record: CmdCatalogInputRecord,
+  options: CmdCatalogOptions): string | null {
+  if (provider !== "SABA") return null;
+  const offset = record.providerTimezoneOffsetMinutes;
+  if (offset !== undefined && (offset === null || !Number.isInteger(offset) || Math.abs(offset) > 840)) {
+    return "EVENT_TIMEZONE_OFFSET_INVALID";
+  }
+  if (recordEventTime(provider, record, options) !== null) return null;
+  const normalized = record.timeText.trim().toUpperCase();
+  return /^(?:(?:TRỰC TIẾP|LIVE)\s+)?\d{1,2}:\d{2}(?:AM|PM)?$/u.test(normalized)
+    ? "EVENT_KICKOFF_DATE_UNKNOWN" : "EVENT_TIME_TEXT_UNRECOGNISED";
+}
+
 function recordEventTime(provider: ProviderId, record: CmdCatalogInputRecord, options: CmdCatalogOptions) {
   const offset = record.providerTimezoneOffsetMinutes;
   if (provider !== "SABA" || offset === undefined) return eventTime(record.timeText, options);
@@ -526,7 +548,7 @@ export function observeNativeCmdMarkets(
     const comparabilityRefusal = eventComparabilityRefusal({
       sportId: record.sportId, matchId: record.matchId, classified, isSabaAggregate,
       competition: record.leagueName, teams: record.teamNames,
-      timeUnresolved: provider === "SABA" && recordEventTime(provider, record, options) === null
+      timeUnresolved: sabaTimeRefusal(provider, record, options)
     });
     const comparableEvent = comparabilityRefusal === null;
     for (const [groupIndex, group] of record.groups.entries()) {

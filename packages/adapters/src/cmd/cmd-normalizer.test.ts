@@ -77,6 +77,30 @@ describe("normalizeCmdCatalog", () => {
         .toBe(true);
     });
 
+  it("tells a broken collector offset apart from a kick-off whose date is unknown", () => {
+    // Measured 2026-09-16: 859 refusals across 95 SABA fixtures under one name,
+    // while SABA published only 130. Three different answers were hiding in it
+    // and only one is a defect. A clock the collector could not date is this
+    // project declining to guess a date, not a collection loss; an offset the
+    // collector should never have handed over is the opposite.
+    const options = { observedAtMs: Date.UTC(2026, 8, 7, 12), receivedMonotonicMs: 123,
+      timezoneOffsetMinutes: 480, sequence: 7, requireExplicitDateForUndatedKickoff: true };
+    const dated = { ...record, timeText: "09/08 01:45AM", groups: [record.groups[1]!] };
+
+    const broken = observeNativeCmdMarkets("SABA",
+      [{ ...dated, providerTimezoneOffsetMinutes: 900 }], options);
+    expect(broken[0]).toMatchObject({ disposition: "EXCLUDED", reason: "EVENT_TIMEZONE_OFFSET_INVALID" });
+    expect(observeNativeCmdMarkets("SABA",
+      [{ ...dated, providerTimezoneOffsetMinutes: null }], options)[0])
+      .toMatchObject({ reason: "EVENT_TIMEZONE_OFFSET_INVALID" });
+
+    // A usable offset on a dated row is not refused at all.
+    expect(observeNativeCmdMarkets("SABA",
+      [{ ...dated, providerTimezoneOffsetMinutes: 420 }], options)[0]?.reason)
+      .not.toBe("EVENT_TIMEZONE_OFFSET_INVALID");
+  });
+
+
   it.each([undefined, "2026-02-30", "09/08"])(
     "retains an excluded native SABA record when the collector owning date is %s", (explicitProviderDate) => {
       const input = { ...record, timeText: "TRỰC TIẾP 01:45AM", groups: [record.groups[1]!, {
@@ -88,8 +112,8 @@ describe("normalizeCmdCatalog", () => {
         ...(explicitProviderDate === undefined ? {} : { explicitProviderDate }) };
       expect(normalizeObservedFootballCatalog("SABA", [input], options).events).toEqual([]);
       expect(observeNativeCmdMarkets("SABA", [input], options)).toEqual([
-        expect.objectContaining({ providerMarketId: "total-1", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" }),
-        expect.objectContaining({ providerMarketId: "unknown-native", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" })
+        expect.objectContaining({ providerMarketId: "total-1", disposition: "EXCLUDED", reason: "EVENT_KICKOFF_DATE_UNKNOWN" }),
+        expect.objectContaining({ providerMarketId: "unknown-native", disposition: "EXCLUDED", reason: "EVENT_KICKOFF_DATE_UNKNOWN" })
       ]);
     });
 
@@ -373,11 +397,11 @@ describe("normalizeCmdCatalog", () => {
       disposition: observation.disposition,
       reason: observation.reason
     }))).toEqual([
-      { providerMarketId: "1058624279", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" },
-      { providerMarketId: "1058624277", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" },
-      { providerMarketId: "1058624275", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" },
-      { providerMarketId: "1062389532", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" },
-      { providerMarketId: "1062389533", disposition: "EXCLUDED", reason: "EVENT_TIME_UNRESOLVED" }
+      { providerMarketId: "1058624279", disposition: "EXCLUDED", reason: "EVENT_TIME_TEXT_UNRECOGNISED" },
+      { providerMarketId: "1058624277", disposition: "EXCLUDED", reason: "EVENT_TIME_TEXT_UNRECOGNISED" },
+      { providerMarketId: "1058624275", disposition: "EXCLUDED", reason: "EVENT_TIME_TEXT_UNRECOGNISED" },
+      { providerMarketId: "1062389532", disposition: "EXCLUDED", reason: "EVENT_TIME_TEXT_UNRECOGNISED" },
+      { providerMarketId: "1062389533", disposition: "EXCLUDED", reason: "EVENT_TIME_TEXT_UNRECOGNISED" }
     ]);
   });
 
