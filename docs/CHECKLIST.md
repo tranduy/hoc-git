@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | 2026-09-16, đủ 6 sàn: **21.910 dòng / 2.125 trận**. Trong phiên: BTI chết 13.145 → BTI có kèo ẩn 16.807 → 21.910. Kèo dương **4**, cao nhất **2,23%**, **2/4 là kèo góc**. Cùng một lần chạy mới so được — hai lần chạy cách nhau vài phút là hai ảnh chụp giá khác nhau | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | 2026-09-16, đủ 6 sàn: **22.988 dòng / 2.290 trận**. Trong phiên: BTI chết 13.145 → BTI có kèo ẩn 16.807 → **22.988**. Kèo dương **10**, cao nhất **2,01%**. Chỉ so trong **cùng một lần chạy** — hai lần cách nhau vài phút là hai ảnh chụp giá khác nhau | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
@@ -77,6 +77,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
+| 45 | **Dashboard tải 204 MB mỗi vòng, BTI chiếm 110 MB** | Anh báo click 2-3s mới nhúc nhích. API **không chậm** (TTFB 10–100ms) — là khối lượng. Mỗi vòng: BTI **109,8 MB** · APSPORT 43,5 · SBOBET 24,2 · IM 15,0 · CMD 10,7 · SABA 1,0. Lấy riêng BTI 4 lần: **2,5s · 1,9s · 1,5s · 7,6s**, cộng parse ~0,5s. **ETag vô dụng** vì revision BTI đổi gần như mỗi vòng → không bao giờ ăn `304`. Cắt được ngay: `marketTypes=paired` **đã có sẵn trong API**, đo được BTI **109,8 → 71,9 MB (−35%)**, và **không mất dòng nào** — loại kèo không sàn nào khác có thì sinh 0 dòng (riêng BTI có **40.072** market kèo cầu thủ, 5 sàn kia đều 0). Dashboard hiện chỉ dùng nó ở view từng trận (`apps/web/src/api/catalog.ts:251`), không dùng ở vòng tải chính (`live-catalog-page.tsx:52`) | **Chờ anh đồng ý** đổi vòng tải chính |
 | — | **Cảnh báo phép đo:** lần census SABA đầu tiên lấy lúc SABA đang hồi phục (130 trận) và cho thứ hạng **sai** — `EVENT_TIME_UNRESOLVED` trông như gap lớn nhất. Đủ roster (649 trận) thì `NATIVE_TYPE_UNMAPPED` (572 trận) mới là lớn nhất. Đừng xếp hạng gap khi một sàn chưa hồi đủ | |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
