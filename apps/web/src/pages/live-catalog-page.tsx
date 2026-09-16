@@ -317,7 +317,19 @@ function ProviderSelector({ accounts, eventCounts, marketCounts, nativeCoverageC
 }) {
   return <fieldset className="provider-selector provider-selector--grid"><legend>Books to compare</legend>{comparisonProviders.map((provider) => {
     const providerAccounts = accounts.filter((account) => account.provider === provider);
-    const activeAccounts = providerAccounts.filter((account) => account.sessionState === "ACTIVE");
+    // A book is dropped from every comparison the moment its session is
+    // flagged, and PROVIDER_VALIDATION_FAILED is not a session failure at all:
+    // the data plane derives it when a feed goes quiet past a grace period.
+    // Measured 2026-09-17 on Cartagines v Deportivo Saprissa, kicking off in
+    // 5h50m: BetBurger paired BTI Odd 2.13 with CMD Even 1.91 for +0.70%. Both
+    // legs were in our catalogs -- BTI at Malay -0.885 and CMD at 0.91 -- but
+    // CMD was greyed out, so the row fell back to SABA at 1.86 and read -0.71%.
+    // Prices already collected stay usable; the flag belongs to collecting more
+    // of them. Per-quote freshness is judged separately and still applies, so
+    // this widens no age threshold. A genuinely expired or schema-broken
+    // session is still refused.
+    const activeAccounts = providerAccounts.filter((account) => account.sessionState === "ACTIVE"
+      || (account.sessionState === "ACTION_REQUIRED" && account.reason === "PROVIDER_VALIDATION_FAILED"));
     const activeAccount = activeAccounts[0];
     const detail = providerAccounts.length === 0 ? (loaded ? "not connected" : "loading source…")
       : providerAccounts.some((account) => account.reason === "EXPIRED") ? "nguồn hết hạn"
