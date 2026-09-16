@@ -10457,7 +10457,7 @@ export function btiCoverageShape(reported: string | undefined): string {
   for (const field of BTI_COVERAGE_FIELDS) {
     const value = record[field];
     if (value === undefined) continue;
-    if (typeof value === "string") { if (/^[A-Za-z_]{1,32}$/u.test(value)) parts.push(`${field}:${value}`); continue; }
+    if (typeof value === "string") { if (/^[A-Za-z0-9_-]{1,40}$/u.test(value)) parts.push(`${field}:${value}`); continue; }
     if (typeof value === "boolean") { parts.push(`${field}:${value ? 1 : 0}`); continue; }
     if (typeof value === "number" && Number.isFinite(value)) parts.push(`${field}:${Math.round(value)}`);
   }

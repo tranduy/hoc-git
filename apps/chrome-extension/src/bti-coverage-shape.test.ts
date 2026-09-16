@@ -56,4 +56,26 @@ describe("a collector that is waiting, not absent", () => {
       expect(btiCoverageShape(JSON.stringify({ phase }))).toBe(`phase:${phase}`);
     }
   });
+
+  it("keeps a hyphenated failure name instead of dropping the field", () => {
+    // Measured 2026-09-16: the collector had started recording which roster
+    // exit fired, and lastRosterFailure disappeared from BTI_COV entirely the
+    // moment it stopped being the word "none". The filter here only passed
+    // letters, so every name the collector can actually produce --
+    // threw-TypeError-live, null-live-prematch, roster-unavailable -- failed
+    // it silently. A field vanishing read as no failure recorded.
+    for (const name of ["roster-unavailable", "threw-TypeError-live", "null-live-prematch", "none"]) {
+      expect(btiCoverageShape(JSON.stringify({ lastRosterFailure: name })))
+        .toBe(`lastRosterFailure:${name}`);
+    }
+  });
+
+  it("still drops a string the collector could not have sanitised", () => {
+    // The collector writes through /[^A-Za-z0-9_-]+/ and caps at 40. Anything
+    // wider did not come from there, so it does not belong in a shape line.
+    expect(btiCoverageShape(JSON.stringify({ lastRosterFailure: "https://host/path" })))
+      .toBe("no-known-fields:41");
+    expect(btiCoverageShape(JSON.stringify({ lastRosterFailure: "x".repeat(41) })))
+      .toBe("no-known-fields:65");
+  });
 });
