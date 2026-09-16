@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | Cùng phiên 2026-09-16: BTI chết **13.145** dòng / 1.291 trận → BTI đủ kèo ẩn **16.807** / 2.057 trận. Ghép của riêng BTI: SBOBET **9.590**, APSPORT **9.430**, IM **8.705**, CMD **7.343**, SABA **382** | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | 2026-09-16, đủ 6 sàn: **21.910 dòng / 2.125 trận**. Trong phiên: BTI chết 13.145 → BTI có kèo ẩn 16.807 → 21.910. Kèo dương **4**, cao nhất **2,23%**, **2/4 là kèo góc**. Cùng một lần chạy mới so được — hai lần chạy cách nhau vài phút là hai ảnh chụp giá khác nhau | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
