@@ -22,6 +22,12 @@ export function resolveLiveStackEnvironment(environment, host, webPort) {
 }
 
 export function resolveApiNodeArgs(environment) {
+  // Opt-in CPU profile. The API has sat at 82-91% of one core and nothing in
+  // the diagnostics times a hop, so the hot code can only be named by
+  // profiling the process. Off unless FIELDLINE_API_CPU_PROF_DIR is set.
+  const profileDir = environment.FIELDLINE_API_CPU_PROF_DIR?.trim();
+  const profiling = profileDir !== undefined && profileDir.length > 0
+    ? ["--cpu-prof", "--cpu-prof-dir", profileDir] : [];
   const configured = environment.FIELDLINE_API_MAX_OLD_SPACE_MB?.trim();
   const megabytes = configured !== undefined && /^\d{3,4}$/u.test(configured)
     ? Number(configured)
@@ -29,5 +35,5 @@ export function resolveApiNodeArgs(environment) {
   const bounded = Number.isSafeInteger(megabytes) && megabytes >= 192 && megabytes <= 4_096
     ? megabytes
     : 512;
-  return [`--max-old-space-size=${bounded}`];
+  return [...profiling, `--max-old-space-size=${bounded}`];
 }
