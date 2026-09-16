@@ -12,7 +12,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const statsDefaults = { starts: 0, completed: 0, failed: 0,
     teardownVersion: 0, teardownSession: 0, lostSession: 0, paused: 0, fetchNull: 0,
     partFail: { live: 0, prematch: 0, early: 0 }, startedAtMs: 0, completedAtMs: 0,
-    earlyExpansionRefused: 0, earlyInitLeagues: -1, earlyInitNamed: -1,
+    earlyExpansionRefused: 0, earlyExpansionRuns: 0, earlyInitLeagues: -1, earlyInitNamed: -1,
     earlyExpandLeagues: -1, earlyExpandNamed: -1,
     doneEvents: 0, doneWithin24h: 0, doneLive: 0, donePrematch: 0, doneEarly: 0,
     gates: { live: '', prematch: '', early: '' },
@@ -287,7 +287,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       // Early runs on its initial slice when the expansion loses. These say how
       // much of the far calendar that costs, in leagues and in rows the decoder
       // can name, rather than leaving "thin" to be guessed at.
-      earlyExpansionRefused: stats.earlyExpansionRefused,
+      earlyExpansionRefused: stats.earlyExpansionRefused, earlyExpansionRuns: stats.earlyExpansionRuns,
       earlyInitLeagues: stats.earlyInitLeagues, earlyInitNamed: stats.earlyInitNamed,
       earlyExpandLeagues: stats.earlyExpandLeagues, earlyExpandNamed: stats.earlyExpandNamed,
       rosterPartFail: 'live:' + stats.partFail.live + ',pre:' + stats.partFail.prematch +
@@ -460,6 +460,10 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         // Counts only, so "thin" says which way it was thin. Measured
         // 2026-09-16: the expansion answered and still lost, and refusing it
         // read the same whether it came back shorter or came back unnamed.
+        // Counted in the same window as the refusals above it, so the two
+        // divide. rosterStarts spans back to the tab load instead, which is
+        // a different window and cannot be the denominator.
+        stats.earlyExpansionRuns += 1;
         stats.earlyInitLeagues = initial.payload.serializedData.length;
         stats.earlyInitNamed = namedRows(initial.payload);
         stats.earlyExpandLeagues = inventoryLeagues;
