@@ -6272,6 +6272,19 @@ export class NetworkObserver {
   async #ingestBtiRefreshEvaluation(source: ObservedSource, evaluation: unknown,
     verifiedDocument?: NonNullable<DirectHttpRequestMetadata["verifiedDocument"]>): Promise<boolean> {
     const value = nestedValue(evaluation, "result", "value");
+    // Coverage first, before any guard can drop it.
+    //
+    // It used to be read further down, past the check that the status is
+    // catalog-requested - so a collector reporting that it was paused, backing
+    // off or had lost its session had its own explanation thrown away on the
+    // way out, and surfaced as BTI_COV[none]: the same thing printed when no
+    // collector exists. Measured 2026-09-16: bti-eval-ok counted 47 successful
+    // evaluations while BTI_COV stayed none for nine hours. The collector was
+    // answering the whole time and this line was discarding the answer.
+    if (isRecord(value) && typeof value.coverage === "string" && value.coverage.length > 0 &&
+      value.coverage.length <= 4096 && /^[-A-Za-z0-9_":{},.]+$/u.test(value.coverage)) {
+      this.#btiCollectorCoverage.set(source.sourceId, value.coverage);
+    }
     if (!isRecord(value) || value.status !== "catalog-requested" ||
       typeof value.generation !== "string" || !/^bti:\d{10,16}:\d{1,9}$/u.test(value.generation) ||
       typeof value.origin !== "string" || !Array.isArray(value.responses)) return false;
