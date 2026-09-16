@@ -96,7 +96,17 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       authBlocked: detailState.authBlocked === true,
       requestPaused: requestsPaused(),
       requestStatus: Number(detailState.requestStatus) || 0,
-      requestRetryInMs: Math.max(0, Number(detailState.requestRetryAtMs) - Date.now()) }) });
+      requestRetryInMs: Math.max(0, Number(detailState.requestRetryAtMs) - Date.now()),
+      // ROSTER_BACKOFF is only twelve seconds, so sitting in it means the roster
+      // keeps failing - and a roster that fails without a single captured
+      // response can only have given up before it reached the network, which is
+      // what lostSession counts. Measured 2026-09-16: BTI reported
+      // phase:ROSTER_BACKOFF with nothing paused, nothing auth-blocked and
+      // HTTP_RESPONSE at zero for nine hours.
+      rosterRefreshFailed: detailState.rosterRefreshFailed === true,
+      rosterRetryInMs: Math.max(0, Number(detailState.rosterRetryAtMs) - Date.now()),
+      lostSession: Number(stats.lostSession) || 0,
+      fetchNull: Number(stats.fetchNull) || 0 }) });
   const publishResult = (result) => ownsSession() && result?.status === 'catalog-requested' &&
     detailState.committed?.generation === result.generation
       ? detailState.committed.snapshot() : result;

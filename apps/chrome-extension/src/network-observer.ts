@@ -10442,6 +10442,7 @@ function uniqueObjects<T>(items: readonly T[]): readonly T[] {
 const BTI_COVERAGE_FIELDS = ["phase", "failed", "rosterRefreshFailed", "authBlocked",
   "requestPaused", "requestStatus", "requestRetryInMs", "liveLeagues", "prematchLeagues",
   "earlyLeagues", "events", "validEvents", "detailPendingEvents", "detailFailedEvents",
+  "rosterRetryInMs", "lostSession", "fetchNull",
   "detailCoverageComplete"] as const;
 
 export function btiCoverageShape(reported: string | undefined): string {
