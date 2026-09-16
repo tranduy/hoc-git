@@ -106,7 +106,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       rosterRefreshFailed: detailState.rosterRefreshFailed === true,
       rosterRetryInMs: Math.max(0, Number(detailState.rosterRetryAtMs) - Date.now()),
       lostSession: Number(stats.lostSession) || 0,
-      fetchNull: Number(stats.fetchNull) || 0 }) });
+      fetchNull: Number(stats.fetchNull) || 0,
+      lastRosterFailure: String(detailState.lastRosterFailure || 'none') }) });
   const publishResult = (result) => ownsSession() && result?.status === 'catalog-requested' &&
     detailState.committed?.generation === result.generation
       ? detailState.committed.snapshot() : result;
@@ -407,6 +408,11 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     const requestId = (league) => masterId(league);
     let initial = await fetchList(plan.requestPath);
     if (!initial || !Array.isArray(initial.payload?.serializedData)) {
+      // Survives the invocation. The twelve-second backoff message that follows
+      // would otherwise overwrite the only record of why the roster failed:
+      // stats are rebuilt per call, so a reader sees ROSTER_BACKOFF and nothing
+      // about the failure it is backing off from.
+      detailState.lastRosterFailure = (initial ? 'no-rows-' : 'no-response-') + plan.partition;
       stats.partFail[plan.partition] += 1;
       rosterWorker.coverage.failed += 1;
       rosterWorker.coverage.phase = 'FAILED';
