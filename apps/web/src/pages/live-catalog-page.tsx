@@ -1025,6 +1025,12 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         activateSources(legacyCatalogSources(items.filter((account) =>
           account.capabilities.includes("CATALOG") && account.category !== null)));
       }
+      // Sources re-poll every two seconds; this did not re-poll at all after a
+      // success, so the availability list froze at whatever it read on mount.
+      // A book that was recovering when the page opened then stayed greyed out
+      // for the life of the tab, with its own catalog counts ticking up beside
+      // it, and only a reload cleared it.
+      accountRetryTimer = window.setTimeout(discoverAccounts, 2_000);
     }).catch(() => {
       if (cancelled) return;
       if (catalogSourceApi === undefined) setAccountsLoaded(true);
