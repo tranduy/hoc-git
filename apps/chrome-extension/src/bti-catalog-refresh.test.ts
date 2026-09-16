@@ -21,6 +21,7 @@ function harness(ids = ["e1"]) {
   let live: Row[] = [];
   let rosterOk = true;
   let earlyOk: boolean | undefined;
+  let early: Fetcher | undefined;
   let context = "synthetic-session-a";
   let list: Fetcher | undefined;
   let listReads = 0;
@@ -33,7 +34,10 @@ function harness(ids = ["e1"]) {
       return detail(path, init);
     }
     listReads += 1;
-    if (path.includes("/early")) return { ok: earlyOk ?? rosterOk, text: async () => '{"serializedData":[]}' };
+    if (path.includes("/early")) {
+      if (early) return early(path, init);
+      return { ok: earlyOk ?? rosterOk, text: async () => '{"serializedData":[]}' };
+    }
     if (list) return list(path, init);
     const league = Array(13).fill(null);
     league[12] = path.includes("prematch") ? roster : live;
@@ -55,6 +59,7 @@ function harness(ids = ["e1"]) {
     setRows: (prematch: Row[], liveRows: Row[] = []) => { roster = prematch; live = liveRows; },
     setRosterOk: (value: boolean) => { rosterOk = value; },
     setEarlyOk: (value: boolean | undefined) => { earlyOk = value; },
+    setEarly: (value: Fetcher | undefined) => { early = value; },
     setContext: (value: string) => { context = value; },
     setList: (value: Fetcher | undefined) => { list = value; },
     setDetail: (next: Fetcher) => { detail = next; } };
@@ -413,6 +418,45 @@ describe("BTI private collector regression", () => {
     expect(detailBodies(recoveredDetail)[0].fieldlineBtiDetails[0]).toMatchObject({
       generation: first.generation, observedAtMs: START + 14_000 });
     expect(JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!)).toMatchObject({ rosterRefreshFailed: true });
+  });
+
+  it("keeps early on its initial slice when the expansion comes back thinner", async () => {
+    // Measured 2026-09-16: the early expansion answered and still lost, and
+    // refusing it failed the whole partition. Detail planning is gated on all
+    // three partitions hydrating, so a narrower far calendar was costing BTI
+    // every hidden market it has -- paying everywhere to buy nothing.
+    const namedEvent = (id: string) => {
+      const value: Row = Array(34).fill(null);
+      value[0] = id;
+      value[1] = [["a", { EN: "Alpha" }], ["b", { EN: "Beta" }]];
+      value[2] = "Alpha v Beta";
+      return value;
+    };
+    const earlyLeague = (id: string, events: Row[]) => {
+      const league: Row = Array(13).fill(null);
+      league[0] = id; league[3] = id; league[12] = events;
+      return league;
+    };
+    const h = harness(["e1"]);
+    h.setEarly(async (path) => ({ ok: true, text: async () => JSON.stringify({
+      // The expansion answers with fewer leagues than the initial list already
+      // held, which is the case the counters now tell apart from an unnamed one.
+      serializedData: path.includes("/early/initial")
+        ? [earlyLeague("L1", [namedEvent("early-1")]), earlyLeague("L2", [namedEvent("early-2")])]
+        : [earlyLeague("L1", [namedEvent("early-1")])] }) }));
+
+    const result = await h.refresh();
+
+    expect(result.status).toBe("catalog-requested");
+    const coverage = JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!);
+    expect(coverage.lastRosterFailure).toBe("early-expansion-fewer-leagues");
+    expect(coverage.earlyExpansionRefused).toBe(1);
+    expect(coverage.earlyInitLeagues).toBe(2);
+    expect(coverage.earlyExpandLeagues).toBe(1);
+    // The partition hydrated on the initial slice, so nothing downstream is
+    // told the roster is missing a third of itself.
+    expect(coverage.earlyLeagues).toBe(2);
+    expect(coverage.phase).toBe("COMPLETE");
   });
 
   it("publishes live and prematch when only the early calendar fails", async () => {

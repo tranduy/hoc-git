@@ -12,6 +12,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const statsDefaults = { starts: 0, completed: 0, failed: 0,
     teardownVersion: 0, teardownSession: 0, lostSession: 0, paused: 0, fetchNull: 0,
     partFail: { live: 0, prematch: 0, early: 0 }, startedAtMs: 0, completedAtMs: 0,
+    earlyExpansionRefused: 0, earlyInitLeagues: -1, earlyInitNamed: -1,
+    earlyExpandLeagues: -1, earlyExpandNamed: -1,
     doneEvents: 0, doneWithin24h: 0, doneLive: 0, donePrematch: 0, doneEarly: 0,
     gates: { live: '', prematch: '', early: '' },
     bodyLiveKb: 0, bodyLiveInitKb: 0, bodyPrematchKb: 0,
@@ -277,6 +279,17 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       rosterTeardown: 'v' + stats.teardownVersion + '.s' + stats.teardownSession,
       rosterLostSession: stats.lostSession, rosterPaused: stats.paused,
       rosterFetchNull: stats.fetchNull,
+      // The refusal path already carried this. The success path did not, so a
+      // run that published live and prematch and lost early said nothing about
+      // which of early's exits fired -- the field simply was not there, which
+      // reads as no failure.
+      lastRosterFailure: String(detailState.lastRosterFailure || 'none'),
+      // Early runs on its initial slice when the expansion loses. These say how
+      // much of the far calendar that costs, in leagues and in rows the decoder
+      // can name, rather than leaving "thin" to be guessed at.
+      earlyExpansionRefused: stats.earlyExpansionRefused,
+      earlyInitLeagues: stats.earlyInitLeagues, earlyInitNamed: stats.earlyInitNamed,
+      earlyExpandLeagues: stats.earlyExpandLeagues, earlyExpandNamed: stats.earlyExpandNamed,
       rosterPartFail: 'live:' + stats.partFail.live + ',pre:' + stats.partFail.prematch +
         ',early:' + stats.partFail.early,
       rosterDoneEvents: stats.doneEvents, rosterDoneWithin24h: stats.doneWithin24h,
@@ -427,10 +440,10 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       (plan.partition === 'early' ? plan.canonicalPath : plan.initialCanonicalPath) +
       (plan.partition === 'early' ? earlyQuery + '&' : '?') + 'leagueIds=' + ids.join(',');
     // Early has one endpoint that answers a request for ten league ids with
-    // its full inventory, and it relies on that expansion: its initial response
-    // opens only ten leagues. A failed expansion is fatal for early and merely
+    // its full inventory, and it leans on that expansion: its initial response
+    // opens only ten leagues. A refused expansion leaves early on those ten and
     // leaves live and prematch on their own initial list, which the league
-    // discovery below then widens.
+    // discovery below then widens. Early has no such discovery step.
     if (initial.payload.serializedData.length > 0) {
       const identify = plan.partition === 'early' ? masterId : requestId;
       const expanded = initial.payload.serializedData.map(identify)
@@ -438,22 +451,37 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       const inventory = expanded.length > 0 ? await fetchList(hydrationPath(expanded)) : null;
       // More leagues is not more catalog. An expansion that returns a longer
       // list of rows the decoder cannot name is a loss, not a gain.
-      const usable = inventory !== null && Array.isArray(inventory.payload?.serializedData) &&
-        inventory.payload.serializedData.length >= initial.payload.serializedData.length &&
+      const inventoryLeagues = Array.isArray(inventory?.payload?.serializedData)
+        ? inventory.payload.serializedData.length : -1;
+      const usable = inventory !== null && inventoryLeagues >= 0 &&
+        inventoryLeagues >= initial.payload.serializedData.length &&
         namedRows(inventory.payload) >= namedRows(initial.payload);
+      if (plan.partition === 'early') {
+        // Counts only, so "thin" says which way it was thin. Measured
+        // 2026-09-16: the expansion answered and still lost, and refusing it
+        // read the same whether it came back shorter or came back unnamed.
+        stats.earlyInitLeagues = initial.payload.serializedData.length;
+        stats.earlyInitNamed = namedRows(initial.payload);
+        stats.earlyExpandLeagues = inventoryLeagues;
+        stats.earlyExpandNamed = inventory === null ? -1 : namedRows(inventory.payload);
+      }
       if (usable) initial = inventory;
       else if (plan.partition === 'early') {
-        // Three different things read identically as "unusable" and want
-        // opposite responses: no id survived the filter, the expansion request
-        // never answered, or it answered with fewer rows or fewer names than
-        // the initial list already had.
-        detailState.lastRosterFailure = expanded.length === 0 ? 'early-inventory-no-ids'
-          : inventory === null ? 'early-inventory-null' : 'early-inventory-thin';
-        stats.partFail[plan.partition] += 1;
-        rosterWorker.coverage.failed += 1;
-        rosterWorker.coverage.phase = 'FAILED';
+        // Four different things read identically as "unusable" and want
+        // different responses: no id survived the filter, the request never
+        // answered, it answered with fewer leagues, or it answered with as
+        // many leagues and fewer names the decoder can use.
+        detailState.lastRosterFailure = expanded.length === 0 ? 'early-expansion-no-ids'
+          : inventory === null ? 'early-expansion-null'
+          : inventoryLeagues < initial.payload.serializedData.length
+            ? 'early-expansion-fewer-leagues' : 'early-expansion-fewer-names';
+        // Not fatal any more. The initial slice is a real, fresh answer -- ten
+        // leagues of the far calendar instead of all of them. Failing the
+        // partition instead costs every partition its hidden detail, because
+        // detail planning is gated on all three hydrating, so refusing a
+        // narrower early was buying nothing and paying for it everywhere.
+        stats.earlyExpansionRefused += 1;
         publishCoverage();
-        return null;
       }
     }
     // The roster endpoint answers with whole rows, but only for the leagues it
@@ -714,7 +742,10 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   if (!hydratedEarly && (!detailState.lastRosterFailure || detailState.lastRosterFailure === 'none')) {
     detailState.lastRosterFailure = 'early-absent';
   }
-  if (hydratedEarly) detailState.lastRosterFailure = 'none';
+  // Clearing this on any hydrated early erased the shortfall the same run had
+  // just recorded: early keeps hydrating on its initial slice now, so hydrated
+  // no longer means whole. Only a run with nothing to report reports nothing.
+  if (hydratedEarly && stats.earlyExpansionRefused === 0) detailState.lastRosterFailure = 'none';
   const retainedPrematch = [today, early].filter((partition) => partition.payload.serializedData.length > 0);
   const prematchClocks = (retainedPrematch.length > 0 ? retainedPrematch : [today, early])
     .map((partition) => partition.payload.fieldlineBtiRoster);

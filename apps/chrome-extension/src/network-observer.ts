@@ -10443,6 +10443,8 @@ const BTI_COVERAGE_FIELDS = ["phase", "failed", "rosterRefreshFailed", "authBloc
   "requestPaused", "requestStatus", "requestRetryInMs", "liveLeagues", "prematchLeagues",
   "earlyLeagues", "events", "validEvents", "detailPendingEvents", "detailFailedEvents",
   "rosterRetryInMs", "lostSession", "fetchNull", "lastRosterFailure",
+  "earlyExpansionRefused", "earlyInitLeagues", "earlyInitNamed",
+  "earlyExpandLeagues", "earlyExpandNamed",
   "detailCoverageComplete"] as const;
 
 export function btiCoverageShape(reported: string | undefined): string {
