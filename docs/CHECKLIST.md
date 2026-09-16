@@ -51,6 +51,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 33 | Collector đang chờ tự khai là đang chờ | `cancelled()` trước trả **không có `coverage`** → `BTI_COV[none]`, giống hệt "không có collector". Giờ mang `phase:PAUSED\|ROSTER_BACKOFF\|SESSION_LOST\|CANCELLED` kèm `authBlocked`, `requestStatus`, backoff còn lại | `bti-coverage-shape.test.ts` |
 | 34 | Gắn vào `worker`/`service_worker` cho mọi sàn | Trước chỉ `iframe`, cộng `worker` riêng KSPORT/SABA. BTI chỉ có service worker nên không bao giờ được gắn | `network-observer.test.ts` |
 | 35 | Ghi kết quả dựng target con cho mọi sàn | Lỗi `Network.enable` trước chỉ ghi cho SABA, các sàn khác nuốt lặng. Nay `child[net-ok-worker:1]` — chính nó chốt được mục 29 | `catalogShape` |
+| 36 | Ghi kết quả bật Network trên chính tab | Trước `await` trần: hỏng là `start()` đứt và không ai biết. Nay `main-net-ok` / `main-net-<lý do>` — chính nó loại bỏ giả thuyết "gắn hỏng" | `catalogShape` |
 | 24 | BTI `UNPAIRED_OR_INVALID_NATIVE_SELECTIONS` — **không phải lỗ hổng** | 2.466 market/144 trận là bản tổng hợp trùng; **144/144 trận đã có sẵn** cả thang tài xỉu lẫn kèo chấp. **0** trận bị từ chối mà không có gì thay thế | `nativeDetail=summary` |
 | 23 | `OTHER_SCORE_DOMAIN_REQUIRED` — **trần thật** | APSPORT **0/805**, SBOBET **0/184** market có cửa vét "tỉ số khác". Không có cửa đó thì không định giá được | `nativeDetail=summary` |
 | 26 | CMD `EVENT_NOT_COMPARABLE` — tách 5 nguyên nhân | 1.170/130 trận họ kèo bị từ chối có chủ ý · 459/51 e-soccer · 190/10 còn sót. **`EVENT_STATISTIC_LEAGUE_UNRESOLVED` = 0** → không mất giải góc nào | `nativeDetail=summary` |
@@ -69,7 +70,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI: `HTTP_RESPONSE=0` — chưa biết vì sao** | Đã loại: service worker (`imageCacheBustingWorker.js`, chỉ lo ảnh, `caches: []`); trang không còn login; tab chết; collector vắng; treo ở `cancelled()`. Đã bịt 5 cửa im lặng (mục 30–35) và không cửa nào là nguyên nhân. `child[net-ok-worker:1]` xác nhận ta gắn được và bật Network thành công. Đối chứng: CMD không có worker, `HTTP_RESPONSE=298`. | **Chưa truy được.** Công cụ Claude không dùng chung tab được với extension (Chrome chỉ cho một debugger/tab), nên không đo được tab nguồn thật từ phía tôi |
+| 29 | **BTI `HTTP_RESPONSE=0` — giả thuyết dẫn đầu: SSE bị lọc bỏ** | `child[main-net-ok:1,net-ok-worker:1]` ⇒ `Network.enable` **thành công** trên cả tab lẫn worker, giống hệt CMD (`main-net-ok:1`, `http=375`). Ta không mù và không bị chặn. Bộ lọc response chỉ nhận `^(?:XHR|Fetch)$`. Bản dump mạng có `/api/master/sse/test` ⇒ BTI cập nhật trực tiếp bằng **SSE**. Khớp mọi số đo: `eventlist` chỉ chạy lúc **tải trang** (nên sáng nay có 82.942 kèo), sau đó chỉ còn SSE mà ta bỏ qua ⇒ catalog đóng băng tại lần tải cuối. | **Chưa xác nhận** — cần thấy `resourceType` thật của luồng SSE. Đã loại: service worker, login, tab, collector vắng, gắn hỏng, treo `cancelled()` |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
