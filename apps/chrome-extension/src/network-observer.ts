@@ -1238,6 +1238,8 @@ export class NetworkObserver {
    * page served live odds - and no record existed of what that attach did.
    */
   readonly #childSetupOutcomes = new Map<string, Map<string, number>>();
+  /** Server-sent event traffic per source: does any arrive, and how much. */
+  readonly #sseCensus = new Map<string, { messages: number; bytes: number }>();
   readonly #socketPathsSeen = new Map<string, Map<string, number>>();
   readonly #requestPartitions = new Map<string, ProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
@@ -7185,6 +7187,8 @@ export class NetworkObserver {
         .map(([type, count]) => `${type}:${count}`).join(",")}] ` +
       `child[${[...(this.#childSetupOutcomes.get(source.sourceId) ?? new Map())]
         .map(([outcome, count]) => `${outcome}:${count}`).join(",")}] ` +
+      `sse[${(() => { const census = this.#sseCensus.get(source.sourceId);
+        return census === undefined ? "" : `msgs:${census.messages},bytes:${census.bytes}`; })()}] ` +
       `sockets[${[...(this.#socketPathsSeen.get(source.sourceId) ?? new Map())]
         .map(([path, count]) => `${path}:${count}`).join(",")}] ` +
       (this.#lastCatalogShape.get(source.sourceId) ?? "");
@@ -7460,6 +7464,26 @@ export class NetworkObserver {
     sessionId?: string, sabaProbeBlockedAtReceipt = false): Promise<void> {
     const receiptBridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const params = isRecord(rawParams) ? rawParams : {};
+    // Server-sent events, counted before anything is built on them.
+    //
+    // The response handler only accepts resourceType XHR or Fetch, and a stream
+    // never fires loadingFinished anyway, so an SSE feed is invisible to every
+    // counter we have. BTI's network carries /api/master/sse/test, which is why
+    // eventlist appears once at page load and nothing after: measured
+    // 2026-09-16, BTI held 82,942 markets in the morning and HTTP_RESPONSE zero
+    // for the nine hours that followed while its page kept showing live prices.
+    //
+    // Shape only, and deliberately just a census: whether messages arrive at
+    // all, how many, and how large. Decoding waits until this says there is
+    // something to decode.
+    if (method === "Network.eventSourceMessageReceived") {
+      const census = this.#sseCensus.get(source.sourceId) ?? { messages: 0, bytes: 0 };
+      census.messages += 1;
+      const data = typeof params.data === "string" ? params.data : "";
+      census.bytes += data.length;
+      this.#sseCensus.set(source.sourceId, census);
+      return;
+    }
     if (method === "Network.webSocketCreated" && (source.lobby === "KSPORT" || source.lobby === "TSPORT")) {
       this.#wsAttachDiagnostic(source).webSocketCreated += 1;
       if (source.lobby === "TSPORT" && isApsportNonMainGroupSocket(String(params.url ?? ""))) {
