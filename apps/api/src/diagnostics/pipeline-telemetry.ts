@@ -370,9 +370,14 @@ export class PipelineTelemetry {
     let sample: SemanticChange | null = null;
     for (const quote of catalog.quotes) {
       if (next.size >= PIPELINE_TELEMETRY_LIMITS.maxSelectionsPerAccount) break;
-      // BTI and SBOBET retain readonly quote objects between deltas. Reuse
-      // their keys while allowing removed records to be garbage-collected.
-      const retained = catalog.provider === "BTI" || catalog.provider === "SBOBET";
+      // Every provider retains its unchanged quote objects now: the revision
+      // store puts the previous row back wherever the new one compares equal,
+      // so an identity-keyed cache hits for all six. Profiled 2026-09-17:
+      // recordCatalog was the largest cost in the API at 15.4% of samples with
+      // selectionKey another 3.7%, because four providers rebuilt every key and
+      // every wrapper object on every publication. Removed records are still
+      // collectable: the cache is a WeakMap keyed by the quote.
+      const retained = true;
       let key = retained ? this.#selectionKeys.get(quote) : undefined;
       if (key === undefined) {
         key = selectionKey(quote);
