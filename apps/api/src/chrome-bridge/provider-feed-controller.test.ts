@@ -95,6 +95,25 @@ function invalidate(atMs: number, sourceEpoch: string,
 }
 
 describe("ProviderFeedController", () => {
+  it("replaces only the exact current authoritative catalog without extending baseline clocks", () => {
+    const controller = controllerFor(SABA, 1_000);
+    const baseline = wsBaseline(1_000, "worker-a:0", "reset-1");
+    controller.accept(baseline);
+    const current = controller.read();
+    const next = { ...current, observedAtMs: 1_100 };
+    const replace = (controller as unknown as { replaceCurrentCatalog?:
+      (expected: ObservedProviderCatalog, replacement: ObservedProviderCatalog) => unknown }).replaceCurrentCatalog;
+    expect(typeof replace).toBe("function");
+
+    expect(replace!.call(controller, current, next)).toMatchObject({ accepted: true,
+      publish: { catalog: next, snapshotState: "FRESH" } });
+    expect(controller.read()).toBe(next);
+    expect(controller.snapshot()).toMatchObject({ lastCompleteBaselineAtMs: 1_000,
+      lastAuthoritativeEvidenceAtMs: 1_000, lastSemanticChangeAtMs: 1_100 });
+    expect(replace!.call(controller, current, { ...next, observedAtMs: 1_200 }))
+      .toMatchObject({ accepted: false, publish: null });
+  });
+
   it("does not promote restored data or tab heartbeats to LIVE", () => {
     const controller = controllerFor(SABA, 1_000);
     controller.restore(catalog({ observedAtMs: 100 }));
@@ -379,5 +398,31 @@ describe("ProviderFeedController", () => {
     expect(controller.accept(wsDelta(1_000, "worker-a:0"))).toMatchObject({ accepted: false });
     controller.accept(wsBaseline(1_001, "worker-a:0", "reset-1"));
     expect(controller.accept(wsDelta(1_002, "worker-a:0", "reset-2"))).toMatchObject({ accepted: false });
+  });
+});
+describe("a tab that was replaced without a tombstone", () => {
+  // Measured 2026-09-17: APSPORT sat dead for 80 minutes with its new tab
+  // attached and sending, because the controller binds to the first source it
+  // sees and only an explicit invalidation releases that binding. A tab that
+  // simply disappears leaves none, so every baseline the replacement sent was
+  // rejected while activeGeneration kept naming the tab that was gone.
+  const baselineFrom = (sourceId: string, sourceEpoch: string, atMs: number, generation: string) =>
+    ({ kind: "CATALOG" as const, accountId: SABA, sourceId, sourceEpoch, atMs, generation,
+      mode: "BASELINE" as const, provenance: "WS" as const, providerTimestampMs: null,
+      catalog: catalog({ observedAtMs: atMs }) });
+
+  it("refuses a second source while the owner is inside its deadline", () => {
+    const controller = controllerFor(SABA, 1_000);
+    expect(controller.accept(baselineFrom("chrome:SABA:7", "epoch-1", 1_000, "gen-1")).accepted).toBe(true);
+    clock.set(1_500);
+    expect(controller.accept(baselineFrom("chrome:SABA:9", "epoch-2", 1_500, "gen-2")).accepted).toBe(false);
+  });
+
+  it("adopts a replacement once the owner has missed its own baseline deadline", () => {
+    const controller = controllerFor(SABA, 1_000);
+    expect(controller.accept(baselineFrom("chrome:SABA:7", "epoch-1", 1_000, "gen-1")).accepted).toBe(true);
+    const late = 1_000 + policyFor(SABA).maxBaselineAgeMs + 1;
+    clock.set(late);
+    expect(controller.accept(baselineFrom("chrome:SABA:9", "epoch-2", late, "gen-2")).accepted).toBe(true);
   });
 });

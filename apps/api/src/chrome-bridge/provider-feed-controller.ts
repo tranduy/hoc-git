@@ -87,6 +87,20 @@ export class ProviderFeedController {
       stateChanged: stateBefore !== this.#state || reasonBefore !== this.#reason };
   }
 
+  replaceCurrentCatalog(expected: ObservedProviderCatalog,
+    replacement: ObservedProviderCatalog): FeedDecision {
+    if (expected.accountId !== this.#accountId || replacement.accountId !== this.#accountId ||
+      replacement.provider !== expected.provider || replacement.category !== expected.category ||
+      this.#latestCatalog !== expected) return rejected();
+    const replacesAuthoritative = this.#authoritativeCatalog === expected;
+    this.#latestCatalog = replacement;
+    if (replacesAuthoritative) this.#authoritativeCatalog = replacement;
+    this.#lastSemanticChangeAtMs = replacement.observedAtMs;
+    const snapshotState = replacesAuthoritative && this.#state === "LIVE" &&
+      this.#livePrerequisitesSatisfied(this.#now()) ? "FRESH" as const : "STALE" as const;
+    return { accepted: true, publish: { catalog: replacement, snapshotState }, stateChanged: false };
+  }
+
   sweep(nowMs = this.#now()): ProviderRecoveryRequest | null {
     if (!Number.isFinite(nowMs)) return null;
     if (this.#state === "LIVE" && !this.#livePrerequisitesSatisfied(nowMs)) {
@@ -194,7 +208,8 @@ export class ProviderFeedController {
       return { accepted: true, publish: { catalog: evidence.catalog, snapshotState: "STALE" }, stateChanged: false };
     }
     if (evidence.mode === "BASELINE") {
-      if (!this.#acceptSource(evidence.sourceId, evidence.sourceEpoch)) return rejected();
+      if (!this.#acceptSource(evidence.sourceId, evidence.sourceEpoch)
+        && !this.#adoptAbandonedSource(evidence)) return rejected();
       this.#latestCatalog = evidence.catalog;
       this.#authoritativeCatalog = evidence.catalog;
       this.#lastAuthoritativeEvidenceAtMs = evidence.atMs;
@@ -273,6 +288,25 @@ export class ProviderFeedController {
     }
     return this.#matchesCurrentSource(sourceId, sourceEpoch);
   }
+  /**
+   * A replaced tab arrives with a new sourceId, and the controller stays bound
+   * to the one it first saw, so every baseline the new tab sends is rejected
+   * and the book sits dead. The release path exists only for an explicit
+   * invalidation; a tab that simply disappears leaves no tombstone behind.
+   * Measured 2026-09-17: APSPORT sat like this for 80 minutes with its new tab
+   * attached and sending, while activeGeneration still named the old one.
+   *
+   * Only a complete baseline may take over, and only once the incumbent has
+   * already missed its own baseline deadline, so a healthy owner is never
+   * displaced by a second source. A retired epoch is still refused.
+   */
+  #adoptAbandonedSource(evidence: ProviderFeedEvidence): boolean {
+    if (!this.#baselineExpired(evidence.atMs) || this.#isRetired(evidence)) return false;
+    this.#sourceId = evidence.sourceId;
+    this.#sourceEpoch = evidence.sourceEpoch;
+    return true;
+  }
+
 
   #matchesCurrentSource(sourceId: string, sourceEpoch: string): boolean {
     return this.#sourceId === sourceId && this.#sourceEpoch === sourceEpoch;
