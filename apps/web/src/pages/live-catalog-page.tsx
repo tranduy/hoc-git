@@ -1155,7 +1155,14 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const timer=window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
       const now=Date.now();
-      const active=new Set(sourcesRef.current.filter(source => source.category === category && source.sessionState === "ACTIVE")
+      // The recurring read used the ACTIVE-only filter too, so a book carrying
+      // PROVIDER_VALIDATION_FAILED was read once at mount and never again:
+      // measured, CMD got one roster request and nothing for the next two
+      // minutes while the other books polled throughout. Its fixtures then
+      // never gained markets, so it dropped out of every comparison with
+      // "event not found" even though its roster held them.
+      const active=new Set(sourcesRef.current.filter(source => source.category === category &&
+        sessionUsableForComparison(source.sessionState, source.reason))
         .map(source => source.id));
       const ids=hydrationInputs.current.catalogs.filter(catalog => {
         if (!active.has(catalog.accountId)) return false;
