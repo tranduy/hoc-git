@@ -144,8 +144,22 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     root[detailBodiesKey] = cache;
   };
   const existingRosterWorker = root[rosterWorkerKey];
-  if (requestsPaused()) return detailState.committed?.snapshot?.() || cancelled('PAUSED');
-  if (!detailState.committed && now < detailState.rosterRetryAtMs) return cancelled('ROSTER_BACKOFF');
+  // Replaying a committed snapshot is right - the API keeps working from it -
+  // but it carried no coverage, so a paused collector looked exactly like one
+  // that published nothing. Measured 2026-09-16: bti-eval-ok counted 44
+  // successful evaluations while BTI_COV stayed none for nine hours, because
+  // this branch returns the snapshot and the named refusal sat on the far side
+  // of the ||. Say the phase either way.
+  if (requestsPaused()) {
+    const paused = cancelled('PAUSED');
+    const replay = detailState.committed?.snapshot?.();
+    return replay ? { ...replay, coverage: paused.coverage } : paused;
+  }
+  if (!detailState.committed && now < detailState.rosterRetryAtMs) {
+    const backoff = cancelled('ROSTER_BACKOFF');
+    const replay = detailState.committed?.snapshot?.();
+    return replay ? { ...replay, coverage: backoff.coverage } : backoff;
+  }
   if (existingRosterWorker && existingRosterWorker.result &&
     (now - Number(existingRosterWorker.completedAt || 0) <= 12000 || now < detailState.rosterRetryAtMs)) {
     existingRosterWorker.pump?.();
