@@ -69,7 +69,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI: trang vẽ từ cache service worker, không gọi mạng** | Chuỗi bằng chứng khép kín: `targets[service_worker:1]` (thấy worker) + `child[net-ok-worker:1]` (`Network.enable` **thành công** trên session worker) + `HTTP_RESPONSE=0` trên **cả** trang lẫn worker. Đối chứng: CMD `autoAttachEvents=0`, không worker nào, `HTTP_RESPONSE=298`. Không phải ta mù — **không có lưu lượng nào tồn tại**. Trang hiện 1.556 trận từ cache, catalog đóng băng **>9 tiếng**. | Người vận hành: đóng tab, xoá service worker của `prod20091.fxf774.com` (DevTools → Application → Service Workers → Unregister), mở lại từ sảnh |
+| 29 | **BTI: service worker phục vụ cache, trang không gọi mạng — ĐÃ CHỨNG MINH** | Gỡ service worker của `prod20091.fxf774.com` rồi nạp lại: trang lập tức gọi **28 request, tất cả 200**, gồm đúng ba đường dẫn adapter nhận diện (`/api/eventlist/asia/leagues/v2/1/live/initial`, `…/prematch/initial`, `…/early/initial`). Trước khi gỡ: **0** request. Đối chứng CMD: không service worker, `HTTP_RESPONSE=298`. | **Cách sửa (20 giây):** trên tab BTI → DevTools → Application → Service Workers → **Unregister** `prod20091.fxf774.com` → F5. Không được dùng công cụ Claude để làm hộ: Chrome chỉ cho **một** debugger mỗi tab, nên công cụ Claude gắn vào là extension của ta bị chặn — đó là lý do lần thử này `http` vẫn 0 dù trang đã gọi mạng thật |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
