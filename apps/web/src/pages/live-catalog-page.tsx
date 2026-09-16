@@ -149,6 +149,23 @@ function storedRecoverySnapshot(storage: Storage, provider: RecoverableProvider,
   };
 }
 
+/**
+ * PROVIDER_VALIDATION_FAILED is not a session failure: the data plane derives
+ * it when a feed goes quiet past a grace period, and the prices already
+ * collected stay usable. Measured 2026-09-17 on Cartagines v Deportivo
+ * Saprissa, six hours from kick-off: BetBurger paired BTI Odd 2.13 with CMD
+ * Even 1.91 for +0.70%, both legs sat in our catalogs, and CMD was dropped for
+ * this flag so the row fell back to SABA 1.86 and read -0.71%.
+ *
+ * Per-quote freshness is judged separately and still applies, so this widens
+ * no age threshold. An expired or schema-broken session is still refused.
+ */
+export function sessionUsableForComparison(sessionState: string,
+  reason: string | null | undefined): boolean {
+  return sessionState === "ACTIVE"
+    || (sessionState === "ACTION_REQUIRED" && reason === "PROVIDER_VALIDATION_FAILED");
+}
+
 function catalogReadPriority(id: string): number {
   const provider = /^catalog-source:([^:]+):/u.exec(id)?.[1];
   return ({ APSPORT: 0, SBOBET: 1, IM: 2, BTI: 3, SABA: 4, CMD: 5 } as Readonly<Record<string, number>>)
@@ -328,8 +345,8 @@ function ProviderSelector({ accounts, eventCounts, marketCounts, nativeCoverageC
     // of them. Per-quote freshness is judged separately and still applies, so
     // this widens no age threshold. A genuinely expired or schema-broken
     // session is still refused.
-    const activeAccounts = providerAccounts.filter((account) => account.sessionState === "ACTIVE"
-      || (account.sessionState === "ACTION_REQUIRED" && account.reason === "PROVIDER_VALIDATION_FAILED"));
+    const activeAccounts = providerAccounts.filter((account) =>
+      sessionUsableForComparison(account.sessionState, account.reason));
     const activeAccount = activeAccounts[0];
     const detail = providerAccounts.length === 0 ? (loaded ? "not connected" : "loading source…")
       : providerAccounts.some((account) => account.reason === "EXPIRED") ? "nguồn hết hạn"
@@ -969,11 +986,12 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const previousSources = sourcesRef.current;
       sourcesRef.current = nextSources;
       setSources(nextSources); setAccountsLoaded(true);
-      const availableCandidates = nextSources.filter((source) => source.sessionState === "ACTIVE");
+      const availableCandidates = nextSources.filter((source) =>
+        sessionUsableForComparison(source.sessionState, source.reason));
       const targetCategory = fixedCategory ?? category;
       if (sourcesInitialized.current) {
         const previousActive = new Set(previousSources.filter((source) => source.category === targetCategory &&
-          source.sessionState === "ACTIVE").map((source) => source.id));
+          sessionUsableForComparison(source.sessionState, source.reason)).map((source) => source.id));
         const newlyActive = availableCandidates.filter((source) => source.category === targetCategory &&
           !previousActive.has(source.id));
         if (newlyActive.length > 0) {
