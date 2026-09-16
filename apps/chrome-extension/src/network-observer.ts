@@ -1227,6 +1227,17 @@ export class NetworkObserver {
   // counts them all: two events with none observed says the type is not what is
   // expected, and nothing said what it was.
   readonly #targetTypesSeen = new Map<string, Map<string, number>>();
+  /**
+   * How setting a child target up ended, by outcome name.
+   *
+   * Network.enable failing on a child session was recorded for SABA and
+   * swallowed for every other book, so a page whose traffic lives in a service
+   * worker could go dark with nothing anywhere saying whether we had attached
+   * to it. Measured 2026-09-16: BTI showed one auto-attach event, a single
+   * service_worker target, and HTTP_RESPONSE at zero for nine hours while its
+   * page served live odds - and no record existed of what that attach did.
+   */
+  readonly #childSetupOutcomes = new Map<string, Map<string, number>>();
   readonly #socketPathsSeen = new Map<string, Map<string, number>>();
   readonly #requestPartitions = new Map<string, ProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
@@ -5433,10 +5444,12 @@ export class NetworkObserver {
         maxResourceBufferSize: 12 * 1024 * 1024,
         maxPostDataSize: 0
       }, sessionId));
+      this.#noteChildSetup(source, `net-ok-${targetType}`);
     } catch (error) {
       // A paused provider worker must never remain frozen merely because its
       // Chromium target does not expose the Network domain. Runtime access is
       // still enough to release it and to reconnect/terminate its socket.
+      this.#noteChildSetup(source, `net-${failureLabel(error)}-${targetType}`);
       if (source.lobby === "SABA") {
         this.#noteWsRecoveryOutcome(source, `child:network-${failureLabel(error)}`);
       }
@@ -7144,11 +7157,20 @@ export class NetworkObserver {
     return `KEEP[ok:${entry.ok};err:${entry.err};last:${entry.last}] `;
   }
 
+  #noteChildSetup(source: ObservedSource, outcome: string): void {
+    const seen = this.#childSetupOutcomes.get(source.sourceId) ?? new Map<string, number>();
+    const label = outcome.replace(/[^A-Za-z0-9_-]+/gu, "-").slice(0, 40);
+    seen.set(label, (seen.get(label) ?? 0) + 1);
+    this.#childSetupOutcomes.set(source.sourceId, seen);
+  }
+
   #catalogShapeDiagnostic(source: ObservedSource): string {
     const existing = this.#keepAliveDiagnostic(source.tabId) +
       `${this.#lastCaptureExit.get(source.sourceId) ?? "NONE"} ` +
       `targets[${[...(this.#targetTypesSeen.get(source.sourceId) ?? new Map())]
         .map(([type, count]) => `${type}:${count}`).join(",")}] ` +
+      `child[${[...(this.#childSetupOutcomes.get(source.sourceId) ?? new Map())]
+        .map(([outcome, count]) => `${outcome}:${count}`).join(",")}] ` +
       `sockets[${[...(this.#socketPathsSeen.get(source.sourceId) ?? new Map())]
         .map(([path, count]) => `${path}:${count}`).join(",")}] ` +
       (this.#lastCatalogShape.get(source.sourceId) ?? "");
