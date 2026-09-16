@@ -578,6 +578,19 @@ describe("SABA owner counts", () => {
   });
 
 
+  it("accepts the date-text shapes, backslashes intact", () => {
+    for (const dateText of ["99/99:103", "9999-99-99:40 99/99:12", "99/99+9999-99-99:7"]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), dateText }), dateText)
+        .toMatchObject({ dateText });
+    }
+    // Shapes only: a real date must never survive this guard.
+    for (const bad of ["", "abc:1", "99/99:d", "16/09:3", "2026-09-16:3"]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), dateText: bad }), bad)
+        .not.toHaveProperty("dateText");
+    }
+  });
+
+
   it("still refuses anything that is not a count", () => {
     for (const owners of ["td.md.dd,ed.md.dd", "Arsenal", "", "t1.m1.d1"]) {
       expect(sabaCollectorDiagnosticForTests(collector(owners))?.owners, owners).toBeUndefined();

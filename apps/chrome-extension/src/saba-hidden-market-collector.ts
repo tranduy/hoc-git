@@ -47,6 +47,8 @@ export interface SabaCollectorRosterOwner extends SabaCollectorReadClock {
   readonly kickoffDate: SabaCollectorKickoffDate;
   /** Attribute NAMES seen on the time cell, row and table for an undated row. Names only. */
   readonly dateAttrs?: string;
+  /** Date-like text SHAPES near the table for an undated row. Digits masked to 9. */
+  readonly dateText?: string;
 }
 
 export interface SabaCollectorRosterResult {
@@ -394,6 +396,25 @@ export class SabaHiddenMarketCollector {
       return `${period === "TODAY" ? "t" : "e"}${roster.length}.m${more.length}.d${due}`;
     }).join(",");
   }
+
+  /**
+   * The other half of the same question: no date attribute exists on those
+   * rows, so does the page carry one as text near the table at all. Shapes
+   * only, digits masked, so a date format is reported without a date value.
+   */
+  dateTextShapes(): string {
+    const shapes = new Map<string, number>();
+    for (const period of PERIODS) {
+      for (const owner of this.#periods[period].roster ?? []) {
+        const shape = owner.dateText ?? "";
+        if (shape === "") continue;
+        shapes.set(shape, (shapes.get(shape) ?? 0) + 1);
+      }
+    }
+    return [...shapes].sort((left, right) => right[1] - left[1]).slice(0, 4)
+      .map(([shape, count]) => `${shape}:${count}`).join(" ");
+  }
+
 
   /**
    * For rows that show only a clock: which attribute names the page actually

@@ -20,6 +20,7 @@ type RosterMetadata = { readonly documentToken: string; readonly rows: readonly 
     "UNDATED_KICKOFF"; readonly control: "ELIGIBLE_MORE" | "OPEN_MORE" |
     "NO_ELIGIBLE_CONTROL" | "UNSAFE";
   readonly dateAttrs?: string;
+  readonly dateText?: string;
   readonly kickoffDate: { readonly kind: "EXPLICIT"; readonly isoDate: string } |
     { readonly kind: "UNKNOWN" } }[] };
 type RosterMetadataRow = RosterMetadata["rows"][number];
@@ -152,8 +153,9 @@ const rosterMetadataExpression = (token: string,
     const controls=Array.from(row.querySelectorAll(':scope .c-btn.c-btn--more'));
     let control='NO_ELIGIBLE_CONTROL';
     if(controls.length>0){const candidate=controls.length===1?controls[0]:null;const safe=candidate&&candidate.tagName==='A'&&visible(candidate)&&!excluded(candidate)&&!candidate.hasAttribute('href');control=safe&&candidate.classList.contains('c-is-close')&&!candidate.classList.contains('c-is-open')?'ELIGIBLE_MORE':safe&&candidate.classList.contains('c-is-open')&&!candidate.classList.contains('c-is-close')?'OPEN_MORE':'UNSAFE'}
+    const dateText=(()=>{if(timeShape==='DATED_KICKOFF')return '';const table=row.closest('.c-odds-table--sport1');const shapes=new Set();const scan=(value)=>{const text=clean(value,400);if(!text)return;for(const m of text.matchAll(/[0-9]{1,4}[-/.][0-9]{1,2}(?:[-/.][0-9]{2,4})?/g)){const token=m[0].replace(/[0-9]/g,'9');if(token.length<=12)shapes.add(token)}};let node=table;for(let up=0;up<3&&node;up+=1){let sib=node.previousElementSibling;for(let back=0;back<3&&sib;back+=1){scan(sib.textContent);sib=sib.previousElementSibling}node=node.parentElement}for(const head of Array.from(document.querySelectorAll('.c-tab,.c-tabs,[class*="date" i],[class*="day" i]')).slice(0,12)){scan(head.textContent)}return [...shapes].sort().slice(0,6).join('+')})();
     const dateAttrs=(()=>{if(timeShape==='DATED_KICKOFF')return '';const table=row.closest('.c-odds-table--sport1');const names=new Set();for(const node of [time,row,table]){if(!node)continue;for(const attr of Array.from(node.attributes||[])){const name=String(attr.name||'');if(/^(?:data-|datetime$|title$)/.test(name)&&name.length<=32)names.add(name)}}return [...names].sort().slice(0,12).join('+')})();
-    rows.push({matchId,timeShape,control,dateAttrs,kickoffDate:explicitDate(row,time)});
+    rows.push({matchId,timeShape,control,dateAttrs,dateText,kickoffDate:explicitDate(row,time)});
   }
   return {documentToken:token,rows};
 })()`;
@@ -662,7 +664,7 @@ class SabaHiddenMarketPageAdapter implements SabaCollectorPageAdapter {
     const owners: SabaCollectorRosterOwner[] = before.rows.map((row) => ({
       ownerMatchId: row.matchId, record: records.get(row.matchId)!,
       control: row.control as "ELIGIBLE_MORE" | "NO_ELIGIBLE_CONTROL",
-      kickoffDate: row.kickoffDate, dateAttrs: row.dateAttrs ?? "", capturedAtMs, capturedMonotonicMs
+      kickoffDate: row.kickoffDate, dateAttrs: row.dateAttrs ?? "", dateText: row.dateText ?? "", capturedAtMs, capturedMonotonicMs
     }));
     return { binding: { ...this.#binding }, period, selectedPrematch: true, owners };
   }
