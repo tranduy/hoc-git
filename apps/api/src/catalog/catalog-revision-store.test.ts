@@ -54,7 +54,10 @@ describe("CatalogRevisionStore", () => {
     // per-record digest now, so they are read from cache and the count does
     // not move. This is the whole point of the block cache, finally true for
     // APSPORT as well.
-    expect(reads).toBe(257);
+    // 258, not 257: the replaced quote is compared field by field against the
+    // one it replaced, which reads its odds once. That single read is what
+    // buys back the 127 serialisations, and it is the only read added.
+    expect(reads).toBe(258);
     const cold = new CatalogRevisionStore({ now: () => 100 }); stores.push(cold);
     expect(changed.revision).toBe(cold.publish(replacement.accountId, replacement,
       { snapshotState: "FRESH", freshnessMs: 20 }).revision);

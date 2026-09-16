@@ -1,6 +1,7 @@
 import type { CatalogRevisionEntry } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { CatalogRevisionHasher } from "./catalog-revision-hasher.js";
+import { reuseUnchangedRecords } from "./reuse-unchanged-records.js";
 
 export interface StoredCatalogRevision extends CatalogRevisionEntry {
   readonly sequence: number;
@@ -94,6 +95,11 @@ export class CatalogRevisionStore {
     const current = this.#entries.get(accountId);
     if (current !== undefined && catalog.observedAtMs < current.observedAtMs) return current;
     let snapshotState = options.snapshotState;
+    // Put the previous row objects back where the new catalog says the same
+    // thing, so the hasher's per-record cache can hit for adapters that
+    // rebuild every row. The previous catalog is already retained here, so
+    // this swaps references and retains nothing new.
+    catalog = reuseUnchangedRecords(current?.catalog, catalog);
     let revision = this.#hasher.revisionFor(catalog, snapshotState);
     if (snapshotState === "FRESH" && freshUntilMs <= this.#now()) {
       snapshotState = "STALE";

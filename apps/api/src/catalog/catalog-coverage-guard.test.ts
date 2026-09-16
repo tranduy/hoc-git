@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { CatalogCoverageGuard } from "./catalog-coverage-guard.js";
 
 describe("CatalogCoverageGuard", () => {
-  const candidate = (generation: string, authoritativeBaseline: boolean, providerEventIds: readonly string[]) =>
-    ({ generation, authoritativeBaseline, providerEventIds });
+  const candidate = (generation: string, authoritativeBaseline: boolean, providerEventIds: readonly string[],
+    allowsRemoval = false) => ({ generation, authoritativeBaseline, providerEventIds, allowsRemoval });
 
   it("accepts only exactly proven APSPORT delta removals and commits reduced coverage", () => {
     const guard = new CatalogCoverageGuard();
@@ -93,6 +93,14 @@ describe("CatalogCoverageGuard", () => {
     expect(guard.accept("source", candidate("A", true, ["a", "b"]))).toBe(true);
     expect(guard.accept("source", candidate("B", true, ["b"]))).toBe(true);
     expect(guard.accept("source", candidate("A", true, ["a", "b"]))).toBe(false);
+  });
+
+  it("accepts a shrinking delta only when the adapter proves the removal", () => {
+    const guard = new CatalogCoverageGuard();
+    expect(guard.accept("source", candidate("A", true, ["1", "2", "3"]))).toBe(true);
+
+    expect(guard.accept("source", candidate("A", false, ["1", "2"], true))).toBe(true);
+    expect(guard.checkpoint().states.get("source")?.acceptedEventIds).toEqual(new Set(["1", "2"]));
   });
 
   it("tracks CMD cursors and same-cursor observations with one monotonic lineage", () => {
