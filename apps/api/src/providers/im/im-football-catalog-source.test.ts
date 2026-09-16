@@ -22,6 +22,37 @@ const event = {
   ]
 };
 
+describe("why an IM fixture is not comparable", () => {
+  // Measured 2026-09-16: IM reported EVENT_NOT_COMPARABLE on 26,865 markets
+  // across 1,035 fixtures -- more fixtures than its whole published catalog --
+  // under a single name covering six different conditions. CMD's equivalent
+  // bucket turned out to be mostly deliberate once split; IM's had never been
+  // split, so nothing could say whether these were e-soccer refused on purpose
+  // or fixtures being lost.
+  const reasonFor = (changes: Record<string, unknown>): string | undefined =>
+    observeNativeImFootballMarkets({ StatusCode: 100, sel: [{ ...event, ...changes }] }, 100)[0]?.reason;
+
+  it("names each condition separately", () => {
+    expect(reasonFor({ eid: null })).toBe("EVENT_ID_UNUSABLE");
+    expect(reasonFor({ iscyb: true })).toBe("EVENT_VIRTUAL_FOOTBALL");
+    expect(reasonFor({ atn: null })).toBe("EVENT_PARTICIPANTS_MISSING");
+    expect(reasonFor({ atn: event.htn })).toBe("EVENT_PARTICIPANTS_IDENTICAL");
+    expect(reasonFor({ cn: null })).toBe("EVENT_COMPETITION_UNRESOLVED");
+  });
+
+  it("keeps an absent cyber flag apart from one that is set", () => {
+    // An absent field is not evidence that a fixture is virtual. Counting it
+    // as e-soccer is how a collection loss gets filed as a deliberate refusal.
+    expect(reasonFor({ iscyb: undefined })).toBe("EVENT_CYBER_FLAG_MISSING");
+    expect(reasonFor({ iscyb: "false" })).toBe("EVENT_CYBER_FLAG_MISSING");
+  });
+
+  it("still reports a comparable fixture as mapped", () => {
+    expect(reasonFor({})).toBe("CANONICAL_MARKET_MAPPED");
+  });
+});
+
+
 describe("extractImFootballCatalog", () => {
   it("retains two-sided zero handicaps using native signed-line semantics through the adapter", () => {
     const source = { StatusCode: 100, sel: [{ ...event, mls: [

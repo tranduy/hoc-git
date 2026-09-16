@@ -289,8 +289,20 @@ readonly NativeMarketObservation[] {
     const event = record(candidate);
     if (event === null || !Array.isArray(event.mls)) continue;
     const providerEventId = identifier(event.eid) ?? `UNKNOWN_EVENT_${eventIndex}`;
-    const eventComparable = identifier(event.eid) !== null && event.iscyb === false && text(event.htn) !== null &&
-      text(event.atn) !== null && text(event.htn) !== text(event.atn) && text(event.cn) !== null;
+    // Six separate ways a fixture fails to be comparable, all reported under
+    // one name. Measured 2026-09-16: 26,865 refusals across 1,035 fixtures,
+    // more than IM's entire published catalog, and nothing said whether that
+    // was e-soccer refused on purpose or fixtures being lost. Split the way
+    // CMD's was, so the number can be attributed instead of argued about. A
+    // missing cyber flag is kept apart from one that is set: an absent field
+    // is not evidence that a fixture is virtual.
+    const incomparableReason = identifier(event.eid) === null ? "EVENT_ID_UNUSABLE"
+      : event.iscyb === true ? "EVENT_VIRTUAL_FOOTBALL"
+      : event.iscyb !== false ? "EVENT_CYBER_FLAG_MISSING"
+      : text(event.htn) === null || text(event.atn) === null ? "EVENT_PARTICIPANTS_MISSING"
+      : text(event.htn) === text(event.atn) ? "EVENT_PARTICIPANTS_IDENTICAL"
+      : text(event.cn) === null ? "EVENT_COMPETITION_UNRESOLVED" : null;
+    const eventComparable = incomparableReason === null;
     for (const [marketIndex, candidateMarket] of event.mls.entries()) {
       const item = record(candidateMarket);
       const bti = Number(item?.bti);
@@ -312,7 +324,7 @@ readonly NativeMarketObservation[] {
       const knownExcluded = Number.isSafeInteger(bti) && imKnownExcludedBetTypes.has(bti);
       const disposition: NativeMarketObservation["disposition"] = !eventComparable || knownExcluded ||
         (semantics !== null && normalized === null) ? "EXCLUDED" : semantics === null ? "UNMAPPED" : "NORMALIZED";
-      const reason = !eventComparable ? "EVENT_NOT_COMPARABLE"
+      const reason = incomparableReason !== null ? incomparableReason
         : knownExcluded ? (bti === 4 || bti === 39 ? "PUSH_OR_REFUND_SETTLEMENT"
           : bti === 3 ? "THREE_WAY_OUTCOME_DOMAIN" : "NON_BINARY_OUTCOME_DOMAIN")
         : semantics === null ? "NATIVE_TYPE_UNMAPPED"
