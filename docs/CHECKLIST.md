@@ -69,7 +69,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI: service worker phục vụ cache, trang không gọi mạng — ĐÃ CHỨNG MINH** | Gỡ service worker của `prod20091.fxf774.com` rồi nạp lại: trang lập tức gọi **28 request, tất cả 200**, gồm đúng ba đường dẫn adapter nhận diện (`/api/eventlist/asia/leagues/v2/1/live/initial`, `…/prematch/initial`, `…/early/initial`). Trước khi gỡ: **0** request. Đối chứng CMD: không service worker, `HTTP_RESPONSE=298`. | **Cách sửa (20 giây):** trên tab BTI → DevTools → Application → Service Workers → **Unregister** `prod20091.fxf774.com` → F5. Không được dùng công cụ Claude để làm hộ: Chrome chỉ cho **một** debugger mỗi tab, nên công cụ Claude gắn vào là extension của ta bị chặn — đó là lý do lần thử này `http` vẫn 0 dù trang đã gọi mạng thật |
+| 29 | **BTI: `HTTP_RESPONSE=0` — chưa biết vì sao** | Đã loại: service worker (`imageCacheBustingWorker.js`, chỉ lo ảnh, `caches: []`); trang không còn login; tab chết; collector vắng; treo ở `cancelled()`. Đã bịt 5 cửa im lặng (mục 30–35) và không cửa nào là nguyên nhân. `child[net-ok-worker:1]` xác nhận ta gắn được và bật Network thành công. Đối chứng: CMD không có worker, `HTTP_RESPONSE=298`. | **Chưa truy được.** Công cụ Claude không dùng chung tab được với extension (Chrome chỉ cho một debugger/tab), nên không đo được tab nguồn thật từ phía tôi |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
@@ -120,6 +120,10 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"16 chữ số thập phân = giá bịa"** — sai, 931/942 quote APSPORT đều vậy.
 - **"Ô chứa quote của line khác"** — sai, `candidates=1`, line khớp hết.
 - **"APSPORT live còn sàn khác prematch"** — sai, `rows split on phase: 0`.
+- **"Gỡ service worker làm BTI gọi mạng trở lại"** — SAI, và là lỗi phép đo. So
+  "0 request trước" với "28 sau" trong khi bộ theo dõi **mới bắt đầu ghi** và lần
+  tải trang là do chính tôi `navigate`. Service worker đó là
+  `imageCacheBustingWorker.js`, chỉ xử lý ảnh, không chạm API, `caches: []`.
 - **"BTI là sàn duy nhất không có target con"** — SAI. Bộ đếm `targets[]` khi đó
   chỉ ghi cho KSPORT và SABA; CMD/APSPORT cũng rỗng mà vẫn chạy. Đọc một **chỗ
   trống** thành một **sự thật**, đúng lỗi đã mắc với `BTI_COV[none]` cùng ngày.
