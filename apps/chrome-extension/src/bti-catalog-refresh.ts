@@ -650,17 +650,41 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         : [{ path: plan.initialCanonicalPath, body }]
     };
   };
-  const partitions = await Promise.all(initialPlans.map(hydratePartition));
+  // A partition that throws never reaches the every(Boolean) check below, so
+  // the three named exits inside hydratePartition all read clean while the
+  // roster still failed every twelve seconds. Measured 2026-09-16: BTI sat at
+  // rosterRefreshFailed with lastRosterFailure empty for hours, which is what
+  // an exception looks like from here.
+  const partitions = await Promise.all(initialPlans.map(async (plan) => {
+    try { return await hydratePartition(plan); }
+    catch (error) {
+      const name = error && error.name ? String(error.name) : 'Error';
+      detailState.lastRosterFailure = ('threw-' + name + '-' + plan.partition)
+        .replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 40);
+      return null;
+    }
+  }));
   if (!ownsSession()) return cancelled('SESSION_LOST');
   if (!partitions.every(Boolean)) {
     detailState.rosterRefreshFailed = true;
     detailState.rosterRetryAtMs = Date.now() + 12000;
+    // Which partitions came back empty, so the twelve-second backoff says what
+    // it is backing off from even when nothing threw.
+    if (!detailState.lastRosterFailure || detailState.lastRosterFailure === 'none') {
+      detailState.lastRosterFailure = 'null-' + initialPlans
+        .filter((plan, index) => !partitions[index]).map((plan) => plan.partition).join('-');
+    }
     const committed = detailState.committed;
     if (committed) {
       root[rosterWorkerKey] = committed;
       committed.pump();
       return committed.result;
     }
+    // Still a throw: leaving the worker without a result is what keeps the
+    // retry path correct, and returning a value here makes later calls treat
+    // the refusal as a usable snapshot. Only the reason is kept, on
+    // detailState, where the next invocation's coverage can still read it.
+    detailState.lastRosterFailure = String(detailState.lastRosterFailure || 'roster-unavailable');
     throw new Error('ROSTER_UNAVAILABLE');
   }
   detailState.rosterRefreshFailed = false;
