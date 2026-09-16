@@ -443,6 +443,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         namedRows(inventory.payload) >= namedRows(initial.payload);
       if (usable) initial = inventory;
       else if (plan.partition === 'early') {
+        detailState.lastRosterFailure = 'early-inventory-unusable';
         stats.partFail[plan.partition] += 1;
         rosterWorker.coverage.failed += 1;
         rosterWorker.coverage.phase = 'FAILED';
@@ -512,7 +513,13 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       }
     };
     await Promise.all(Array.from({ length: Math.min(2, batches.length) }, () => worker()));
-    if (failed || pages.some((page) => !page)) return null;
+    if (failed || pages.some((page) => !page)) {
+      // The third way a partition gives up, and the only one still silent.
+      // Expansion pages are fetched by two workers; one bad page loses the
+      // whole partition, and the twelve-second backoff then hides which.
+      detailState.lastRosterFailure = (failed ? 'pages-failed-' : 'page-missing-') + plan.partition;
+      return null;
+    }
     // Asking for a league is not the same as being given it. If the roster
     // endpoint answers a request for ten ids with only its own default set,
     // every batch after the first is wasted and coverage silently stops at ten
