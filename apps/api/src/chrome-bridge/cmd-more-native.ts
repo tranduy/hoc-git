@@ -96,6 +96,47 @@ export function normalizeCmdNativeMore(native: CmdNativeMore, owner: CmdCatalogI
           : terms.reason ?? (added.size > 0 ? "CANONICAL_MARKET_MAPPED" : "NATIVE_MARKET_CLOSED"), undefined, terms);
         return;
       }
+      if (period === "FT" && path === "3") {
+        // Verified 2026-09-16 against books that price it natively: CMD's More
+        // FT[3] is two clean-sheet markets bundled into one four-price row, in
+        // the order home YES, home NO, away YES, away NO. Against SBOBET's and
+        // APSPORT's own HOME/AWAY_FT_CLEAN_SHEET on 37 shared fixtures that
+        // order sits at a 3.7% median relative price gap, 143 of 148 prices
+        // within 10%; the reversed order sits at 28.8% and 23 of 148. Reading
+        // a market from its shape alone is how an inverted market becomes a
+        // phantom arbitrage, so the order is settled by the other books, not
+        // by the fact that a row happens to carry four prices.
+        const event = identity.events[0];
+        const goalEvent = event !== undefined && identity.events.length === 1 && !unsupportedPeriod &&
+          !/\s*-\s*(?:CORNERS|BOOKINGS)\s*(?:\(\s*loading\s*\))?\s*$/iu.test(owner.leagueName);
+        const cleanSheets = [
+          { marketType: "HOME_FT_CLEAN_SHEET", settlementProfile: "football-home-clean-sheet", at: 0 },
+          { marketType: "AWAY_FT_CLEAN_SHEET", settlementProfile: "football-away-clean-sheet", at: 2 }
+        ] as const;
+        let mapped = 0;
+        if (goalEvent && row.length === 4) for (const cleanSheet of cleanSheets) {
+          const prices = [row[cleanSheet.at], row[cleanSheet.at + 1]];
+          // -999 closes the pair, and so does any price nobody could take.
+          if (!prices.every(price => typeof price === "number" && Number.isFinite(price) && price > 1)) continue;
+          const providerMarketId = `${native.eventId}:more:FT:3:${cleanSheet.marketType}`;
+          markets.push({ provider: "CMD", category: "FOOTBALL", providerEventId: native.eventId,
+            providerMarketId, marketType: cleanSheet.marketType, scope: "FULL_TIME", line: null,
+            settlementProfile: cleanSheet.settlementProfile, status: "OPEN" });
+          quotes.push(...(["YES", "NO"] as const).map((selection, index) => ({
+            provider: "CMD" as const, category: "FOOTBALL" as const, providerEventId: native.eventId,
+            providerMarketId, providerSelectionId: `${providerMarketId}:${selection}`,
+            marketType: cleanSheet.marketType, scope: "FULL_TIME" as const, selection,
+            line: null, rawOdds: String(prices[index]), rawFormat: "DECIMAL" as const,
+            status: "OPEN" as const, isLive: event.isLive, sourceTimestampMs: null,
+            receivedMonotonicMs: receipt.receivedMonotonicMs, sequence: receipt.sequence })));
+          mapped += 1;
+        }
+        observe(row, path, mapped > 0 ? "NORMALIZED" : "EXCLUDED",
+          mapped > 0 ? "CANONICAL_MARKET_MAPPED"
+            : !goalEvent ? "EVENT_NOT_COMPARABLE"
+            : row.length !== 4 ? "INVALID_CLEAN_SHEET_SHAPE" : "NATIVE_MARKET_CLOSED");
+        return;
+      }
       if (path !== "0") {
         observe(row, path, "UNMAPPED", "NATIVE_TYPE_UNMAPPED");
         return;

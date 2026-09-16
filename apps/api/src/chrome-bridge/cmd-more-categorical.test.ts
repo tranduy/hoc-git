@@ -10,6 +10,42 @@ const receipt = { observedAtMs: fixture.observedAtMs, receivedMonotonicMs: 120, 
 const decode = (body = fixture.body, override = {}) => normalizeCmdNativeMore(parseCmdNativeMore(JSON.stringify(body))!, { ...owner, ...override }, receipt);
 
 describe("CMD native More categorical settlement terms", () => {
+  it("reads More FT[3] as the two clean-sheet markets, in the order the other books confirm", () => {
+    // Measured 2026-09-16: MORE:FT:3 was the largest unmapped native type in
+    // the system, 210 fixtures, and CMD prices no clean sheet anywhere else.
+    // The row is [home YES, home NO, away YES, away NO]. That order is not a
+    // guess from the shape: against SBOBET's and APSPORT's own clean-sheet
+    // prices on 37 shared fixtures it sits at a 3.7% median relative gap, 143
+    // of 148 prices within 10%, while the reversed reading sits at 28.8% and
+    // 23 of 148. An inverted market is a phantom arbitrage, so the order is
+    // pinned here rather than left to the next reader to infer.
+    const value = decode();
+    expect(value.quotes.filter(q => q.marketType === "HOME_FT_CLEAN_SHEET")
+      .map(q => [q.selection, q.rawOdds])).toEqual([["YES", "5.5"], ["NO", "1.14"]]);
+    expect(value.quotes.filter(q => q.marketType === "AWAY_FT_CLEAN_SHEET")
+      .map(q => [q.selection, q.rawOdds])).toEqual([["YES", "3.7"], ["NO", "1.28"]]);
+    expect(value.markets.find(m => m.marketType === "AWAY_FT_CLEAN_SHEET")).toMatchObject({
+      scope: "FULL_TIME", line: null, settlementProfile: "football-away-clean-sheet" });
+    expect(value.nativeMarketObservations!.find(o => o.nativeType === "MORE:FT:3"))
+      .toMatchObject({ disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" });
+  });
+
+  it("closes a clean-sheet pair on its own, and refuses the row for a corners event", () => {
+    // -999 closes one side at a time, and the pairs close independently.
+    const body = structuredClone(fixture.body);
+    body.d[2][3][1] = -999;
+    const halfClosed = decode(body);
+    expect(halfClosed.quotes.some(q => q.marketType === "HOME_FT_CLEAN_SHEET")).toBe(false);
+    expect(halfClosed.quotes.filter(q => q.marketType === "AWAY_FT_CLEAN_SHEET")).toHaveLength(2);
+
+    // Clean sheet counts goals. A corners event must not acquire one, the same
+    // guard the goal ranges already carry.
+    const corners = decode(fixture.body, { leagueName: `${owner.leagueName} - CORNERS` });
+    expect(corners.quotes.some(q => q.marketType.endsWith("_FT_CLEAN_SHEET"))).toBe(false);
+    expect(corners.nativeMarketObservations!.find(o => o.nativeType === "MORE:FT:3"))
+      .toMatchObject({ disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" });
+  });
+
   it("retains exact FT/FH score coordinates and native selection IDs, without treating AOS metadata as odds", () => {
     const value = decode();
     const ft = value.quotes.filter(q => q.marketType === "FT_CORRECT_SCORE");

@@ -525,7 +525,8 @@ export function marginBearingMarkets(built: readonly unknown[]): void {
  */
 export function unusedMarketTypes(built: readonly unknown[],
   catalogs: readonly { provider?: string;
-    quotes?: readonly { marketType?: string; providerEventId?: string }[] }[]): void {
+    quotes?: readonly { marketType?: string; providerEventId?: string }[];
+    nativeMarketObservations?: readonly { providerEventId?: string; disposition?: string; reason?: string }[] }[]): void {
   const inRows = new Set<string>();
   for (const event of built as readonly { rows: readonly { marketType: string }[] }[]) {
     for (const row of event.rows) inRows.add(row.marketType);
@@ -616,12 +617,27 @@ export function cornerCoverage(built: readonly unknown[],
   catalogs: readonly { provider?: string;
     quotes?: readonly { marketType?: string; providerEventId?: string }[] }[]): void {
   const cornerFixtures = new Map<string, Set<string>>();
+  // A book offering no corners on a fixture it was matched to is a ceiling
+  // only if we never refused anything of that book on that fixture. Counting
+  // the refusals per fixture separates "they do not price corners here" from
+  // "we dropped what they sent", and only the second one is ours to fix.
+  const refusedFixtures = new Map<string, Map<string, Set<string>>>();
   for (const catalog of catalogs) {
     const set = new Set<string>();
     for (const quote of catalog.quotes ?? []) {
       if (/^(?:HOME_|AWAY_)?CORNER_/u.test(String(quote.marketType))) set.add(String(quote.providerEventId));
     }
     cornerFixtures.set(String(catalog.provider), set);
+    const refused = new Map<string, Set<string>>();
+    for (const observation of catalog.nativeMarketObservations ?? []) {
+      if (observation.disposition === "NORMALIZED") continue;
+      if (observation.providerEventId === undefined) continue;
+      const fixture = String(observation.providerEventId);
+      const reasons = refused.get(fixture) ?? new Set<string>();
+      reasons.add(String(observation.reason ?? observation.disposition ?? "UNNAMED"));
+      refused.set(fixture, reasons);
+    }
+    refusedFixtures.set(String(catalog.provider), refused);
   }
   let matchedFixtures = 0;
   let withCornerAtOne = 0;
@@ -629,6 +645,8 @@ export function cornerCoverage(built: readonly unknown[],
   let cornerRows = 0;
   let cornerRowsCross = 0;
   const missedBooks = new Map<string, number>();
+  const missedWithRefusal = new Map<string, number>();
+  const missedReasons = new Map<string, Map<string, number>>();
   for (const event of built as readonly { providerEventIds?: Readonly<Record<string, string>>;
     rows: readonly { marketType: string; cells: readonly { provider?: string }[] }[] }[]) {
     const ids = event.providerEventIds ?? {};
@@ -644,6 +662,15 @@ export function cornerCoverage(built: readonly unknown[],
       for (const provider of Object.keys(ids)) {
         if (provider === booksWithCorner[0]) continue;
         missedBooks.set(provider, (missedBooks.get(provider) ?? 0) + 1);
+        const reasons = refusedFixtures.get(provider)?.get(String(ids[provider]));
+        if (reasons !== undefined) {
+          missedWithRefusal.set(provider, (missedWithRefusal.get(provider) ?? 0) + 1);
+          for (const reason of reasons) {
+            const byReason = missedReasons.get(provider) ?? new Map<string, number>();
+            byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
+            missedReasons.set(provider, byReason);
+          }
+        }
       }
     }
     for (const row of event.rows) {
@@ -662,8 +689,13 @@ export function cornerCoverage(built: readonly unknown[],
   process.stdout.write(`  corner rows (cross-book)               : ${cornerRows} (${cornerRowsCross})
 `);
   process.stdout.write("  matched to a corner fixture but offering none:\n");
+  process.stdout.write("      count, then how many of those we refused something on\n");
   for (const [provider, count] of [...missedBooks].sort((a, b) => b[1] - a[1])) {
-    process.stdout.write(`      ${provider.padEnd(10)} ${count}
+    process.stdout.write(`      ${provider.padEnd(10)} ${String(count).padEnd(5)} refused-on ${missedWithRefusal.get(provider) ?? 0}
 `);
+    const byReason = [...(missedReasons.get(provider) ?? new Map<string, number>())]
+      .sort((a, b) => b[1] - a[1]).slice(0, 4)
+      .map(([reason, hits]) => `${reason}:${hits}`).join(" ");
+    if (byReason.length > 0) process.stdout.write(`                 ${byReason}\n`);
   }
 }
