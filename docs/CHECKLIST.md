@@ -77,8 +77,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 43 | **SABA: bảng sập từ 649 xuống 131 trận** | Số của mục này lúc đầu đo **sai thời điểm** — lấy ngay sau khi restart API. Đo lại bằng 3 ảnh chụp có mốc thời gian: **37 trận** → **649 trận / 3.366 market** (+337s) → **131 trận** (+916s), id phân biệt, cả ba đều `FRESH`. Lấy mẫu 6 phút sau đó: đứng yên **130–131**. Tức 649 là thật chứ không phải ảo, và trạng thái ổn định đang mất **~518 trận**. Quan sát của collector cũng tụt theo: **760 → 235** trận. `NATIVE_TYPE_UNMAPPED` 572 trận / type `5`,`24`,`413`,`15`,`461`,`462` **chỉ tồn tại ở ảnh 649**; ở trạng thái ổn định **không có quan sát nào**. Nên gốc nằm ở thứ collector giao, không phải ở chỗ normalizer từ chối | Chưa làm |
-| 44 | SABA không có chuỗi census của collector | BTI có `BTI_COV[...]`, CMD có `CMD_NATIVE[...]`, SABA **không có gì** trong `catalogShape`. Nên cú sập 649→131 **không quy được về đâu**. Cùng cách đã ăn ba lần hôm nay: đặt tên trước, đọc sau | Chưa làm |
+| 43 | SABA: số trận công bố dao động 649 ↔ 131 | Ba ảnh chụp có mốc giờ: **37 → 649 trận / 3.366 market (+337s) → 131 (+916s)**, id phân biệt, cả ba `FRESH`; lấy mẫu 6 phút sau đó đứng yên **130–131**. Census của collector cho biết roster thật: `owners=t119.m106.d3, e20.m11.d5` → TODAY **119** trận, EARLY **20** — khớp với 131, **không khớp 649**. Nên 649 là ảnh chụp ngay sau restart API, chưa rõ nó gồm gì. **Chỉ là số trận, không liên quan kèo ẩn** (xem TRẦN) | Chưa làm |
 | — | **Cảnh báo phép đo:** lần census SABA đầu tiên lấy lúc SABA đang hồi phục (130 trận) và cho thứ hạng **sai** — `EVENT_TIME_UNRESOLVED` trông như gap lớn nhất. Đủ roster (649 trận) thì `NATIVE_TYPE_UNMAPPED` (572 trận) mới là lớn nhất. Đừng xếp hạng gap khi một sàn chưa hồi đủ | |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
@@ -152,6 +151,15 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"4 quote `HOME_AWAY` của APSPORT sai"** — sai quy mô. Là **nửa số trận đang đá**
   của APSPORT lệch sequence nội bộ; 4 quote chỉ là phần nhô lên trên mặt nước.
 - **"SABA gấp 2,6 lần là nhờ bản vá"** — sai, do extension nạp lại, không phải mã tôi sửa.
+- **"SABA không có chuỗi census" (mục 44) — SAI, đã xoá.** Census có sẵn và đã ra
+  `/api/diag/pipeline` từ trước: `sabaCollector` trong `wsAttach`, đủ `owners`, `captures`,
+  `collectorState`, `lastErrorCode`. Tôi chỉ grep `catalogShape`, không thấy, rồi kết luận
+  là **không có** — đúng lỗi đọc một **chỗ trống** thành một **sự thật**, lần thứ năm.
+- **Kèo ẩn SABA = 0 thì đã đóng từ trước**, nằm ở mục TRẦN NHÀ CÁI (*More mở ra rỗng 52/52*).
+  Census hôm nay xác nhận lại độc lập: `captures=o12.n12` — mở 12, rỗng 12. Mục 43/44 tôi
+  viết ra đã **đào lại thứ ghi rõ là đừng đào**.
+- **`domBlocked: true` KHÔNG phải triệu chứng.** Nó là cổng chặn xuất bản DOM **trong lúc**
+  collector quét (`collectorState: RUNNING`), xoá ngay sau đó. Suýt báo thành lỗi.
 - **"0 lệnh đặt được" là dòng TÔI tự viết, anh chưa bao giờ yêu cầu đặt lệnh.** Nó vào
   checklist ở commit `5ffb72b` do chính tôi tạo, rồi tôi nhắc lại nhiều lần như một thứ
   đang chặn và còn giục anh đăng nhập. Sai hai tầng: (a) anh không đặt việc đó, (b) nó
