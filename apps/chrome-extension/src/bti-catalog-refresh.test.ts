@@ -20,6 +20,7 @@ function harness(ids = ["e1"]) {
   let roster = ids.map(rosterRow);
   let live: Row[] = [];
   let rosterOk = true;
+  let earlyOk: boolean | undefined;
   let context = "synthetic-session-a";
   let list: Fetcher | undefined;
   let listReads = 0;
@@ -32,7 +33,7 @@ function harness(ids = ["e1"]) {
       return detail(path, init);
     }
     listReads += 1;
-    if (path.includes("/early")) return { ok: rosterOk, text: async () => '{"serializedData":[]}' };
+    if (path.includes("/early")) return { ok: earlyOk ?? rosterOk, text: async () => '{"serializedData":[]}' };
     if (list) return list(path, init);
     const league = Array(13).fill(null);
     league[12] = path.includes("prematch") ? roster : live;
@@ -53,6 +54,7 @@ function harness(ids = ["e1"]) {
     setRoster: (next: string[]) => { roster = next.map(rosterRow); },
     setRows: (prematch: Row[], liveRows: Row[] = []) => { roster = prematch; live = liveRows; },
     setRosterOk: (value: boolean) => { rosterOk = value; },
+    setEarlyOk: (value: boolean | undefined) => { earlyOk = value; },
     setContext: (value: string) => { context = value; },
     setList: (value: Fetcher | undefined) => { list = value; },
     setDetail: (next: Fetcher) => { detail = next; } };
@@ -411,6 +413,26 @@ describe("BTI private collector regression", () => {
     expect(detailBodies(recoveredDetail)[0].fieldlineBtiDetails[0]).toMatchObject({
       generation: first.generation, observedAtMs: START + 14_000 });
     expect(JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!)).toMatchObject({ rosterRefreshFailed: true });
+  });
+
+  it("publishes live and prematch when only the early calendar fails", async () => {
+    // Measured 2026-09-16: BTI held no catalog for eleven hours. Live and
+    // prematch had hydrated; the early inventory expansion had not, and the
+    // gate required all three, so two working partitions were thrown away with
+    // the third. Early is the far calendar -- losing it narrows the catalog,
+    // losing either of the other two empties it.
+    const h = harness(["e1"]);
+    h.setEarlyOk(false);
+    const result = await h.refresh();
+
+    expect(result.status).toBe("catalog-requested");
+    const prematch = result.responses.find((row: any) => row.url.includes("prematch/initial"));
+    expect(JSON.parse(prematch.body).serializedData).toHaveLength(1);
+    const coverage = JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!);
+    expect(coverage.rosterRefreshFailed).toBe(false);
+    // The shortfall is still named. A narrower catalog that reports itself as
+    // whole is the thing that would make this worse than the outage.
+    expect(coverage.rosterPartFail).toContain("early:1");
   });
 
   it("honors bootstrap roster failure backoff without a committed snapshot", async () => {

@@ -443,7 +443,12 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         namedRows(inventory.payload) >= namedRows(initial.payload);
       if (usable) initial = inventory;
       else if (plan.partition === 'early') {
-        detailState.lastRosterFailure = 'early-inventory-unusable';
+        // Three different things read identically as "unusable" and want
+        // opposite responses: no id survived the filter, the expansion request
+        // never answered, or it answered with fewer rows or fewer names than
+        // the initial list already had.
+        detailState.lastRosterFailure = expanded.length === 0 ? 'early-inventory-no-ids'
+          : inventory === null ? 'early-inventory-null' : 'early-inventory-thin';
         stats.partFail[plan.partition] += 1;
         rosterWorker.coverage.failed += 1;
         rosterWorker.coverage.phase = 'FAILED';
@@ -665,14 +670,22 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     }
   }));
   if (!ownsSession()) return cancelled('SESSION_LOST');
-  if (!partitions.every(Boolean)) {
+  // Early is the far calendar; live and prematch are the markets anything can
+  // actually be priced against. Measured 2026-09-16: BTI published no catalog
+  // for eleven hours because the early inventory expansion failed and this gate
+  // discarded the live and prematch rosters it had already hydrated. Losing
+  // early is a narrower catalog, losing either of the other two is no catalog,
+  // so only those two are required here.
+  const missingPartitions = initialPlans
+    .filter((plan, index) => !partitions[index] && plan.partition !== 'early')
+    .map((plan) => plan.partition);
+  if (missingPartitions.length > 0) {
     detailState.rosterRefreshFailed = true;
     detailState.rosterRetryAtMs = Date.now() + 12000;
     // Which partitions came back empty, so the twelve-second backoff says what
     // it is backing off from even when nothing threw.
     if (!detailState.lastRosterFailure || detailState.lastRosterFailure === 'none') {
-      detailState.lastRosterFailure = 'null-' + initialPlans
-        .filter((plan, index) => !partitions[index]).map((plan) => plan.partition).join('-');
+      detailState.lastRosterFailure = 'null-' + missingPartitions.join('-');
     }
     const committed = detailState.committed;
     if (committed) {
@@ -689,8 +702,19 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   }
   detailState.rosterRefreshFailed = false;
   detailState.rosterRetryAtMs = 0;
-  const today = partitions.find((partition) => partition.partition === 'prematch');
-  const early = partitions.find((partition) => partition.partition === 'early');
+  const today = partitions.find((partition) => partition && partition.partition === 'prematch');
+  const hydratedEarly = partitions.find((partition) => partition && partition.partition === 'early');
+  // An absent early partition stands in as an empty one rather than as the last
+  // one that worked: its fixtures leave the catalog instead of holding prices
+  // nothing has confirmed since. The clock is borrowed from today only so the
+  // shape matches; it dates no row, because the filter below drops a partition
+  // with no rows before any clock is read from it.
+  const early = hydratedEarly || { partition: 'early', responses: [],
+    payload: { serializedData: [], fieldlineBtiRoster: today.payload.fieldlineBtiRoster } };
+  if (!hydratedEarly && (!detailState.lastRosterFailure || detailState.lastRosterFailure === 'none')) {
+    detailState.lastRosterFailure = 'early-absent';
+  }
+  if (hydratedEarly) detailState.lastRosterFailure = 'none';
   const retainedPrematch = [today, early].filter((partition) => partition.payload.serializedData.length > 0);
   const prematchClocks = (retainedPrematch.length > 0 ? retainedPrematch : [today, early])
     .map((partition) => partition.payload.fieldlineBtiRoster);
@@ -725,7 +749,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     });
     return next;
   };
-  const listResponses = [...partitions.find((partition) => partition.partition === 'live').responses,
+  const listResponses = [...partitions.find((partition) => partition && partition.partition === 'live').responses,
     { path: listBase + 'prematch/initial', body: JSON.stringify({
       serializedData: [...today.payload.serializedData, ...early.payload.serializedData].map(compactRosterLeague),
       fieldlineBtiRoster: prematchClock }) }];
@@ -741,7 +765,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const seen = new Set();
   const prematchEventIds = [];
   const seenPrematch = new Set();
-  const liveIds = new Set(partitions.flatMap((entry) => entry.payload.serializedData.flatMap((league) =>
+  const liveIds = new Set(partitions.filter(Boolean).flatMap((entry) => entry.payload.serializedData.flatMap((league) =>
     (Array.isArray(league?.[12]) ? league[12] : []).flatMap((event) =>
       event?.[5] === true ? [String(event[0])] : []))));
   const unnamedShapeCounts = new Map();
