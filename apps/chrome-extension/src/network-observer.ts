@@ -1947,11 +1947,25 @@ export class NetworkObserver {
       waitForDebuggerOnStart: source.lobby === "SABA" || source.lobby === "KSPORT",
       flatten: true
     }));
-    await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Network.enable", {
-      maxTotalBufferSize: 16 * 1024 * 1024,
-      maxResourceBufferSize: 12 * 1024 * 1024,
-      maxPostDataSize: 0
-    }));
+    // Enabling Network on the tab itself was the one step with no record.
+    // Child sessions report their outcome, the page reports its captures, and
+    // this - the command every HTTP_RESPONSE depends on - threw into start()
+    // and told nobody. Measured 2026-09-16: BTI sat at HTTP_RESPONSE zero for
+    // nine hours across three separate tabs, one of which no tooling but ours
+    // had ever touched, while CMD on the same extension captured hundreds.
+    // The outcome is recorded either way; the failure still propagates exactly
+    // as it did before.
+    try {
+      await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Network.enable", {
+        maxTotalBufferSize: 16 * 1024 * 1024,
+        maxResourceBufferSize: 12 * 1024 * 1024,
+        maxPostDataSize: 0
+      }));
+      this.#noteChildSetup(source, "main-net-ok");
+    } catch (error) {
+      this.#noteChildSetup(source, `main-net-${failureLabel(error)}`);
+      throw error;
+    }
     if (source.lobby === "KSPORT" || source.lobby === "TSPORT" || source.lobby === "SABA") {
       this.#preexistingSocketReconnectSources.set(source.sourceId, source);
       this.#schedulePreexistingSocketReconnect(source);
