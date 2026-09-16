@@ -12,11 +12,19 @@ const apiProxy: ProxyOptions = {
   }
 };
 
+// The dashboard freezes for ~800ms per polling round and the work is pure
+// main-thread computation, not network, payload or JSON. Chrome refuses the
+// JS Self-Profiling API without this header, which left the hot function
+// unknowable from outside and cost three wrong diagnoses. Same-origin, our
+// own dashboard only.
+const profilingHeaders = { "Document-Policy": "js-profiling" };
+
 const config = {
   plugins: [react()],
   server: {
     host: "127.0.0.1",
     port: 4311,
+    headers: profilingHeaders,
     strictPort: true,
     allowedHosts: ["live.babiesbo.uk"],
     // Vite 8 enables browser-console forwarding when it detects an agent.
@@ -28,6 +36,19 @@ const config = {
       "/api": apiProxy
     }
   },
+  preview: {
+    host: "127.0.0.1",
+    port: 4311,
+    strictPort: true,
+    allowedHosts: ["live.babiesbo.uk"],
+    headers: profilingHeaders,
+    proxy: { "/api": apiProxy }
+  },
+  // Minified frames read as te/gu/cd in a profile, which is unusable for
+  // finding a hot function. The dashboard is served from loopback to one
+  // operator; a sourcemap costs nothing here and is the difference between
+  // naming the cost and guessing at it.
+  build: { sourcemap: true },
   test: {
     environment: "jsdom"
   }
