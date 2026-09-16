@@ -757,7 +757,34 @@ function footballOrientationScore(leftA: string, leftB: string, rightA: string, 
     ? (scores[0]! + scores[1]!) / 2 : null;
 }
 
+/**
+ * Profiled 2026-09-16: the single hottest line on the main thread at 2.2% of
+ * samples. It runs per event per pass, and a pass runs on every polling round
+ * and every freshness boundary, yet it reads only five fields of the event and
+ * those do not change between passes. The body does an HTML entity decode, an
+ * NFKD normalisation, two Unicode-property regexes and a competition identity
+ * for each one.
+ *
+ * Keyed on exactly the fields the body reads, so a cached answer is the answer
+ * it would have computed. Bounded, cleared whole on overflow, because clearing
+ * only costs a recompute.
+ */
+const comparableFootballProducts = new Map<string, boolean>();
+const COMPARABLE_PRODUCT_LIMIT = 50_000;
+
 function comparableFootballProduct(event: ProviderEvent): boolean {
+  if (event.category !== "FOOTBALL") return true;
+  const cacheKey = [event.eventScope, event.competition, event.participantA,
+    event.participantB].join(String.fromCharCode(31));
+  const cached = comparableFootballProducts.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const computed = computeComparableFootballProduct(event);
+  if (comparableFootballProducts.size >= COMPARABLE_PRODUCT_LIMIT) comparableFootballProducts.clear();
+  comparableFootballProducts.set(cacheKey, computed);
+  return computed;
+}
+
+function computeComparableFootballProduct(event: ProviderEvent): boolean {
   if (event.category !== "FOOTBALL") return true;
   // Cached/provider payloads have labelled ET/PEN fixtures as REGULATION.
   // These explicit settlement markers must not become optional name tokens
