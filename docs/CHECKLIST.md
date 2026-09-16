@@ -70,7 +70,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI `HTTP_RESPONSE=0` — giả thuyết dẫn đầu: SSE bị lọc bỏ** | `child[main-net-ok:1,net-ok-worker:1]` ⇒ `Network.enable` **thành công** trên cả tab lẫn worker, giống hệt CMD (`main-net-ok:1`, `http=375`). Ta không mù và không bị chặn. Bộ lọc response chỉ nhận `^(?:XHR|Fetch)$`. Bản dump mạng có `/api/master/sse/test` ⇒ BTI cập nhật trực tiếp bằng **SSE**. Khớp mọi số đo: `eventlist` chỉ chạy lúc **tải trang** (nên sáng nay có 82.942 kèo), sau đó chỉ còn SSE mà ta bỏ qua ⇒ catalog đóng băng tại lần tải cuối. | **Chưa xác nhận** — cần thấy `resourceType` thật của luồng SSE. Đã loại: service worker, login, tab, collector vắng, gắn hỏng, treo `cancelled()` |
+| 29 | **BTI: tab không phát mạng ở bất kỳ kênh nào** | Đo đủ mọi kênh: XHR/Fetch **0**, SSE **0** (`sse[]`), WebSocket **0**, chỉ còn `TAB_STATE`. `Network.enable` thành công trên **cả** tab lẫn worker (`child[main-net-ok:1,net-ok-worker:1]`). Đối chứng CMD cùng extension: **374**. Đã loại **bốn** giả thuyết: service worker, SSE bị lọc, tranh debugger, collector vắng/treo. | **Hết đường từ phía mã.** Mọi cửa đã tự khai và đều báo bình thường. Còn lại là trạng thái của chính tab đó |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
@@ -121,6 +121,8 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"16 chữ số thập phân = giá bịa"** — sai, 931/942 quote APSPORT đều vậy.
 - **"Ô chứa quote của line khác"** — sai, `candidates=1`, line khớp hết.
 - **"APSPORT live còn sàn khác prematch"** — sai, `rows split on phase: 0`.
+- **"BTI dùng SSE nên bị bộ lọc XHR/Fetch bỏ qua"** — SAI. Sau khi đếm:
+  `sse[]` rỗng, **0 tin nhắn**. Tab không phát mạng ở kênh nào cả.
 - **"Gỡ service worker làm BTI gọi mạng trở lại"** — SAI, và là lỗi phép đo. So
   "0 request trước" với "28 sau" trong khi bộ theo dõi **mới bắt đầu ghi** và lần
   tải trang là do chính tôi `navigate`. Service worker đó là
