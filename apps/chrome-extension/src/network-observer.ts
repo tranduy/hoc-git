@@ -4451,9 +4451,30 @@ export class NetworkObserver {
       // Always address the current top-level main world directly. Cached CDP
       // execution-context ids are invalidated on provider-side redirects and a
       // stale id otherwise makes every later refresh a silent no-op.
+      // Swallowing this into {} is where the chain died and said nothing.
+      //
+      // The collector reports its own phase, the child session reports its
+      // setup, the tab reports whether Network was enabled - and the one call
+      // that actually runs the collector turned every failure into an empty
+      // object. Measured 2026-09-16: BTI showed BTI_COV[none] for nine hours
+      // through a forced refresh, a reload and three tabs, which reads as "the
+      // collector published nothing" whether it ran and failed, timed out, or
+      // was never reached at all.
+      //
+      // Shape only: whether the evaluation returned, and if it threw, the class
+      // of failure - never the expression, the page, or any value.
       const topEvaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
         expression: BTI_CATALOG_REFRESH_EXPRESSION, returnByValue: true, awaitPromise: true
-      }), this.#btiCatalogRefreshTimeoutMs).catch(() => ({}));
+      }), this.#btiCatalogRefreshTimeoutMs).then((value) => {
+        const record = isRecord(value) ? value : {};
+        const thrown = isRecord(record.exceptionDetails);
+        const returned = isRecord(record.result) && record.result.value !== undefined;
+        this.#noteChildSetup(source, `bti-eval-${thrown ? "threw" : returned ? "ok" : "no-value"}`);
+        return value;
+      }).catch((error: unknown) => {
+        this.#noteChildSetup(source, `bti-eval-${failureLabel(error)}`);
+        return {};
+      });
       if (await this.#ingestBtiRefreshEvaluation(source, topEvaluation,
         verifiedDocumentForDescriptor(frameDescriptors[0]))) return;
       if (frameIds.length <= 1) return;
