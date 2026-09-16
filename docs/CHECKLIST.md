@@ -70,7 +70,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 29 | **BTI: tab không phát mạng ở bất kỳ kênh nào** | Đo đủ mọi kênh: XHR/Fetch **0**, SSE **0** (`sse[]`), WebSocket **0**, chỉ còn `TAB_STATE`. `Network.enable` thành công trên **cả** tab lẫn worker (`child[main-net-ok:1,net-ok-worker:1]`). Đối chứng CMD cùng extension: **374**. Đã loại **bốn** giả thuyết: service worker, SSE bị lọc, tranh debugger, collector vắng/treo. | **Hết đường từ phía mã.** Mọi cửa đã tự khai và đều báo bình thường. Còn lại là trạng thái của chính tab đó |
+| 29 | **BTI: roster hỏng lại mỗi 12 giây, chưa biết ở nhánh nào** | Chuỗi đã thu hẹp còn một điểm: `BTI_COV[phase:ROSTER_BACKOFF;rosterRefreshFailed:1;authBlocked:0;requestPaused:0;requestStatus:0;rosterRetryInMs:~5000;lostSession:0;fetchNull:0]`. Không chặn xác thực, không tạm dừng, không lỗi HTTP, `Network.enable` ok trên tab lẫn worker, `bti-eval-ok` đếm 55 lần chạy thành công. Backoff chỉ 12 giây nên việc nó luôn còn hạn = **hỏng mới liên tục**. Đã gắn tên cho 3 lối thoát của `hydratePartition`, cả 3 **không được chạm** (`lastRosterFailure` vẫn rỗng) ⇒ hỏng đi qua nhánh `throw new Error('ROSTER_UNAVAILABLE')` chưa gắn. | **Bước tiếp theo, một chỗ:** gắn tên cho nhánh throw đó rồi đọc lại |
 | 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** một lần đăng nhập FABET. `FABET_LOCAL_WARP_AUTH=1` là thứ đáng thử tiếp theo, **không phải bản vá chắc chắn** — lý do hỏng của từng egress đi ra console không đọc được |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
