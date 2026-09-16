@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | **11.694** dòng / 999 trận *(BTI chết, xem mục 29)*; mức đủ 6 sàn **19.253** / 2.025 trận | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | Cùng phiên 2026-09-16: BTI chết **13.145** dòng / 1.291 trận → BTI đủ kèo ẩn **16.807** / 2.057 trận. Ghép của riêng BTI: SBOBET **9.590**, APSPORT **9.430**, IM **8.705**, CMD **7.343**, SABA **382** | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
@@ -43,7 +43,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 15 | Ráp phân hoạch bị sàn tách thành nhiều market gốc | HT/FT 72 → **180** sau khi ráp | `partitionRowsForTest` |
 | 19 | Kèo có nhánh hoàn tiền (DNB, first-corner) | **0 → 126** dòng; tách bảng riêng, `hasVoidBranch` phân biệt | `by market type` |
 | 20 | Vì sao 20% bảng không có giá | **3.408/3.408** là "một sàn tốt nhất ở mọi cửa" — đúng thiết kế. 0 dòng thiếu chân | `whyUnpriced` |
-| 21 | Trần kèo góc, đo qua bộ ghép thật | **49** trận / 2.025 khi đủ 6 sàn; **31** / 999 khi thiếu BTI | `cornerCoverage` |
+| 21 | Trần kèo góc, đo qua bộ ghép thật | **49** trận / 2.025 khi đủ 6 sàn; **31** / 999 khi thiếu BTI. Đo lại 2026-09-16: BTI chỉ có kèo chính **55** / 1.291 (377 dòng góc) → BTI có cả kèo ẩn **67** / 2.057 (**485** dòng góc) | `cornerCoverage` |
 | 22 | Kèo góc có bị thu sót không | **Không.** SBOBET **0**, CMD **0** kèo góc thấy-mà-không-chuẩn-hoá-được | `nativeMarketObservations` |
 | 30 | BTI collector giờ tự khai | `BTI_COV[chars:N]` → `BTI_COV[phase:…;failed:…;requestStatus:…;authBlocked:…]`. Chính nó cho ra `none` và chốt được chẩn đoán mục 29 | `catalogShape` trong `/api/diag/pipeline` |
 | 31 | Sweep gia hạn tự giữ backoff | 8 lần thử/giờ → **1 lần mỗi 5→60 phút**, và nói rõ đợi bao lâu | `%LOCALAPPDATA%/tool-chenh/maintenance/events.jsonl` |
@@ -56,13 +56,13 @@ curl -s http://127.0.0.1:4310/api/sessions
 | 23 | `OTHER_SCORE_DOMAIN_REQUIRED` — **trần thật** | APSPORT **0/805**, SBOBET **0/184** market có cửa vét "tỉ số khác". Không có cửa đó thì không định giá được | `nativeDetail=summary` |
 | 37 | Tên lối thoát roster bị chính bộ lọc hiển thị nuốt | `lastRosterFailure` in ra `none` rồi **biến mất** đúng lúc collector bắt đầu đặt tên. Bộ lọc chỉ cho qua `[A-Za-z_]`; mọi tên thật (`early-inventory-null`, `threw-TypeError-live`) đều có gạch nối. Một trường **biến mất** bị đọc thành **không có lỗi** — đúng cái bẫy đã mắc 4 lần | `bti-coverage-shape.test.ts` |
 | 29 | **BTI tối 11 giờ: lịch xa kéo theo cả live và prematch** | Đọc được tên thật: `early-inventory-unusable`. Cổng sau `Promise.all` đòi **đủ 3** phân hoạch, nên `early` hỏng thì **vứt luôn** live + prematch đã dựng xong. Nay chỉ live + prematch là bắt buộc; `early` vắng thì đứng thế bằng **rỗng**, không phải bằng bản cũ — trận rời khỏi danh mục chứ không giữ giá không ai xác nhận. **`catalogAgeMs` 39.481.000 → 10.513**; BTI **380 trận / 2.732 market / 6.193 quote**, ghép **1.191 dòng với IM, 1.017 CMD, 965 APSPORT, 961 SBOBET, 18 SABA** | `catalogShape` + `measure-cross-book-rows.ts` |
+| 38 | **BTI: mở rộng `early` mỏng hơn làm mất TOÀN BỘ kèo ẩn** | Tên thật: `early-inventory-thin` — request mở rộng **có trả lời**, chỉ ít giải hơn hoặc ít dòng đọc được tên hơn danh sách ban đầu. Từ chối nó làm hỏng cả phân hoạch `early`, mà lập kế hoạch detail + `COMPLETE` + tái dùng cache detail **đều gán điều kiện đủ 3 phân hoạch**, nên lịch xa hẹp đi đang trả giá bằng **mọi kèo ẩn của BTI**. Nay từ chối thì `early` giữ lát cắt ban đầu (10 giải thật, tươi — không phải bản cũ phát lại). Đo được: mỏng **không cố định** — lần chạy sau tự mở rộng 10 → **192 giải**, 120 = 120 dòng có tên. BTI **380 → 1.531 trận, 2.732 → 29.729 market, 6.193 → 65.076 quote**, `detailCoverageComplete:1` | `catalogShape` + `measure-cross-book-rows.ts` |
 | 26 | CMD `EVENT_NOT_COMPARABLE` — tách 5 nguyên nhân | 1.170/130 trận họ kèo bị từ chối có chủ ý · 459/51 e-soccer · 190/10 còn sót. **`EVENT_STATISTIC_LEAGUE_UNRESOLVED` = 0** → không mất giải góc nào | `nativeDetail=summary` |
 
 ## ĐANG CHẠY — đã giao nhưng **chưa** chứng minh hết
 
 | # | Việc | Tình trạng thật |
 |---|---|---|
-| 38 | BTI: `early` vẫn hỏng, kèo ẩn vẫn tắt | `earlyLeagues:0`, `lastRosterFailure` nay chỉ đúng một trong ba: `early-inventory-no-ids` / `-null` / `-thin`. `COMPLETE`, lập kế hoạch detail và tái dùng cache detail **vẫn đòi đủ 3** phân hoạch, nên BTI hiện chỉ có kèo chính (2.732 market/380 trận ≈ 7 mỗi trận), chưa có kèo ẩn. Chưa đo được nó đáng bao nhiêu dòng. |
 | 11 | ~~SABA: set ảnh chụp DOM bị xé~~ | **Chẩn đoán SAI, đã rút.** `dom-chunk-1/2/3-of-4-awaiting-rest` bằng nhau và không có `4-of-4` là hình dạng của **ráp THÀNH CÔNG** — mảnh cuối hoàn tất nên không ghi note. 774 lần bằng nhau = 774 lần ráp xong. SABA đói baseline vì `BASELINE_TIMEOUT`, không phải vì mất mảnh. Phần giữ lại: cửa xé set giờ tự khai tên nếu thật sự xảy ra. |
 
 ## CHƯA LÀM — chỉ còn thứ thật sự chặn
