@@ -77,7 +77,6 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 14–16 | 0 lệnh đặt được | 61 phiên, **0 dùng được** | **Cần anh:** 2026-09-16 anh nói bỏ FABET, dùng đường đăng nhập khác — chưa biết là đường nào. `FABET_LOCAL_WARP_AUTH` **không còn là hướng đi** |
 | 43 | **SABA: bảng sập từ 649 xuống 131 trận** | Số của mục này lúc đầu đo **sai thời điểm** — lấy ngay sau khi restart API. Đo lại bằng 3 ảnh chụp có mốc thời gian: **37 trận** → **649 trận / 3.366 market** (+337s) → **131 trận** (+916s), id phân biệt, cả ba đều `FRESH`. Lấy mẫu 6 phút sau đó: đứng yên **130–131**. Tức 649 là thật chứ không phải ảo, và trạng thái ổn định đang mất **~518 trận**. Quan sát của collector cũng tụt theo: **760 → 235** trận. `NATIVE_TYPE_UNMAPPED` 572 trận / type `5`,`24`,`413`,`15`,`461`,`462` **chỉ tồn tại ở ảnh 649**; ở trạng thái ổn định **không có quan sát nào**. Nên gốc nằm ở thứ collector giao, không phải ở chỗ normalizer từ chối | Chưa làm |
 | 44 | SABA không có chuỗi census của collector | BTI có `BTI_COV[...]`, CMD có `CMD_NATIVE[...]`, SABA **không có gì** trong `catalogShape`. Nên cú sập 649→131 **không quy được về đâu**. Cùng cách đã ăn ba lần hôm nay: đặt tên trước, đọc sau | Chưa làm |
 | — | **Cảnh báo phép đo:** lần census SABA đầu tiên lấy lúc SABA đang hồi phục (130 trận) và cho thứ hạng **sai** — `EVENT_TIME_UNRESOLVED` trông như gap lớn nhất. Đủ roster (649 trận) thì `NATIVE_TYPE_UNMAPPED` (572 trận) mới là lớn nhất. Đừng xếp hạng gap khi một sàn chưa hồi đủ | |
@@ -153,4 +152,18 @@ curl -s http://127.0.0.1:4310/api/sessions
 - **"4 quote `HOME_AWAY` của APSPORT sai"** — sai quy mô. Là **nửa số trận đang đá**
   của APSPORT lệch sequence nội bộ; 4 quote chỉ là phần nhô lên trên mặt nước.
 - **"SABA gấp 2,6 lần là nhờ bản vá"** — sai, do extension nạp lại, không phải mã tôi sửa.
+- **"0 lệnh đặt được" là dòng TÔI tự viết, anh chưa bao giờ yêu cầu đặt lệnh.** Nó vào
+  checklist ở commit `5ffb72b` do chính tôi tạo, rồi tôi nhắc lại nhiều lần như một thứ
+  đang chặn và còn giục anh đăng nhập. Sai hai tầng: (a) anh không đặt việc đó, (b) nó
+  trái nguyên tắc đầu tiên của dự án — *"Chỉ đọc. Không đặt cược"* — và trái chính plan
+  (`2026-08-12-exact-first-half-market-evidence.md`: *"never select a ticket, enter stake,
+  submit"*). Mã thật chỉ có `provider-preflight-dry-run-adapter.ts`, tức **chạy khô**,
+  không đặt. Con số "61 phiên, 0 dùng được" cũng đã cũ: hiện 6/6 phiên `ACTIVE`. Đã xoá dòng.
+- **"0 lệnh đặt được" là dòng TÔI tự viết, anh chưa bao giờ yêu cầu đặt lệnh.** Nó vào
+  checklist ở commit `5ffb72b` do chính tôi tạo, rồi tôi nhắc lại nhiều lần như một thứ
+  đang chặn và còn giục anh đăng nhập. Sai hai tầng: (a) anh không đặt việc đó, (b) nó
+  trái nguyên tắc đầu tiên của dự án — *"Chỉ đọc. Không đặt cược"* — và trái chính plan
+  (`2026-08-12-exact-first-half-market-evidence.md`: *"never select a ticket, enter stake,
+  submit"*). Mã thật chỉ có `provider-preflight-dry-run-adapter.ts`, tức **chạy khô**,
+  không đặt. Con số "61 phiên, 0 dùng được" cũng đã cũ: hiện 6/6 phiên `ACTIVE`. Đã xoá dòng.
 - Không thấy log `[fabet-auth]` **không chứng minh được gì**: child stderr đi `stdio: "inherit"`, không vào file.
