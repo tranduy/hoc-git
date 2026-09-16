@@ -10443,6 +10443,9 @@ const BTI_COVERAGE_FIELDS = ["phase", "failed", "rosterRefreshFailed", "authBloc
   "requestPaused", "requestStatus", "requestRetryInMs", "liveLeagues", "prematchLeagues",
   "earlyLeagues", "events", "validEvents", "detailPendingEvents", "detailFailedEvents",
   "rosterRetryInMs", "lostSession", "fetchNull", "lastRosterFailure",
+  // A refusal count with no denominator cannot say how often. rosterStarts
+  // is the denominator, and both survive across runs on the page root.
+  "rosterStarts", "rosterCompleted",
   "earlyExpansionRefused", "earlyInitLeagues", "earlyInitNamed",
   "earlyExpandLeagues", "earlyExpandNamed",
   "detailCoverageComplete"] as const;
