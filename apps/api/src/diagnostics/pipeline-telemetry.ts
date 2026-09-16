@@ -714,6 +714,8 @@ interface SabaCollectorDiagnostic {
   readonly drive?: string;
   /** Today restorations checked, refused, the id gap each way, and walks restarted. */
   readonly restore?: string;
+  /** Per period: roster size, how many carry an explicit kick-off date, how many do not. */
+  readonly dates?: string;
   /** Why the collector is frozen, if it is. */
   readonly frozen?: string;
 }
@@ -740,6 +742,9 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     ...(typeof entry.owners === "string" &&
       /^t-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5},e-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5}$/u.test(entry.owners)
       ? { owners: entry.owners } : {}),
+    ...(typeof entry.dates === "string" &&
+      /^t\d{1,5}\.x\d{1,5}\.n\d{1,5},e\d{1,5}\.x\d{1,5}\.n\d{1,5}$/u.test(entry.dates)
+      ? { dates: entry.dates } : {}),
     ...(typeof entry.captures === "string" &&
       /^o\d{1,6}\.n\d{1,6}\.a\d{1,6}\.g\d{1,6}\.r\d{1,7}\.x\d{1,6}\.s\d{1,6}$/u.test(entry.captures) ? { captures: entry.captures } : {}),
     ...(typeof entry.drive === "string" &&

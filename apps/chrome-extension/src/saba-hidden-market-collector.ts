@@ -394,6 +394,25 @@ export class SabaHiddenMarketCollector {
   }
 
   /**
+   * Per period: roster size, how many carry an explicit kick-off date, and how
+   * many do not. A SABA row that shows only a clock needs the page to supply
+   * the calendar date; without one the fixture is refused rather than dated by
+   * guess, which is correct but invisible. Measured 2026-09-16: 927 markets
+   * across 96 fixtures refused as EVENT_KICKOFF_DATE_UNKNOWN and nothing
+   * outside the browser could say whether the page offers no date attribute at
+   * all or offers two that disagree.
+   */
+  dateCounts(): string {
+    return PERIODS.map((period) => {
+      const roster = this.#periods[period].roster ?? [];
+      const explicit = roster.filter((owner) => owner.kickoffDate.kind === "EXPLICIT").length;
+      return `${period === "TODAY" ? "t" : "e"}${roster.length}.x${explicit}` +
+        `.n${roster.length - explicit}`;
+    }).join(",");
+  }
+
+
+  /**
    * Today restorations checked, refused, the id gap each way when refused, and
    * main roster walks restarted because the list moved under the walk.
    */

@@ -537,6 +537,23 @@ describe("SABA owner counts", () => {
     }
   });
 
+  it("accepts the kick-off date counts, backslashes intact", () => {
+    // Measured 2026-09-16: 927 SABA markets across 96 fixtures refused as
+    // EVENT_KICKOFF_DATE_UNKNOWN. A row showing only a clock needs the page to
+    // supply the calendar date; refusing it rather than guessing is correct but
+    // was invisible from outside the browser. This guard is the third of its
+    // kind, and the previous ones shipped matching a literal "d".
+    for (const dates of ["t119.x119.n0,e20.x20.n0", "t0.x0.n0,e0.x0.n0", "t94.x3.n91,e12.x0.n12"]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), dates }), dates)
+        .toMatchObject({ dates });
+    }
+    for (const bad of ["td.xd.nd,ed.xd.nd", "t1.x1,e1.x1", "t1.x1.n1", "", "t1.x1.n1,e1.x1.n1 "]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), dates: bad }), bad)
+        .not.toHaveProperty("dates");
+    }
+  });
+
+
   it("still refuses anything that is not a count", () => {
     for (const owners of ["td.md.dd,ed.md.dd", "Arsenal", "", "t1.m1.d1"]) {
       expect(sabaCollectorDiagnosticForTests(collector(owners))?.owners, owners).toBeUndefined();
