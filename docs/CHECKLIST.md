@@ -80,7 +80,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 47 | **Tab bị thay không chiếm lại được quyền — sàn nằm chết vô hạn** | Đo trên IM lúc 2026-09-16: `HOP1 sourceId=chrome:IM:2105837094 disposition=CANDIDATE`, đã gắn **452s**, nhưng `HOP6 activeGeneration=im:**2105836970**:404` — **tab cũ**. `HOP3 byTransport={TAB_STATE:117, HTTP_RESPONSE:0}` trong khi `requiredTransport=HTTP_RESPONSE`. Vòng kẹt: tab mới vào dạng `CANDIDATE` → API chỉ điều khiển `ACTIVE` → không có HTTP → không dựng được catalog → không có `BASELINE` → mà **chỉ `BASELINE` mới ghi đè `activeGeneration`** (`provider-feed-controller.ts:218`) → mãi không lên `ACTIVE`. Hôm nay APSPORT nằm **80 phút** rồi mới tự thoát, IM đang **28 phút**. Recovery tự động không cứu được: đường reload tab là `BROWSER_REFRESH_DISABLED`, `navigate-lobby` đòi source đã gắn. Mục 32 có cơ chế hỏi lại ứng viên sau 60s — **không đủ** | `diag/pipeline` HOP1 vs HOP6 |
+| 47 | **Tab bị thay không chiếm lại được quyền — sàn nằm chết vô hạn** *(đo trên IM vì nó tiện, nhưng IM đã bỏ; thứ đáng lo là APSPORT đã dính 80 phút hôm nay)* | Đo trên IM lúc 2026-09-16: `HOP1 sourceId=chrome:IM:2105837094 disposition=CANDIDATE`, đã gắn **452s**, nhưng `HOP6 activeGeneration=im:**2105836970**:404` — **tab cũ**. `HOP3 byTransport={TAB_STATE:117, HTTP_RESPONSE:0}` trong khi `requiredTransport=HTTP_RESPONSE`. Vòng kẹt: tab mới vào dạng `CANDIDATE` → API chỉ điều khiển `ACTIVE` → không có HTTP → không dựng được catalog → không có `BASELINE` → mà **chỉ `BASELINE` mới ghi đè `activeGeneration`** (`provider-feed-controller.ts:218`) → mãi không lên `ACTIVE`. Hôm nay APSPORT nằm **80 phút** rồi mới tự thoát, IM đang **28 phút**. Recovery tự động không cứu được: đường reload tab là `BROWSER_REFRESH_DISABLED`, `navigate-lobby` đòi source đã gắn. Mục 32 có cơ chế hỏi lại ứng viên sau 60s — **không đủ** | `diag/pipeline` HOP1 vs HOP6 |
 | — | **Cảnh báo phép đo:** lần census SABA đầu tiên lấy lúc SABA đang hồi phục (130 trận) và cho thứ hạng **sai** — `EVENT_TIME_UNRESOLVED` trông như gap lớn nhất. Đủ roster (649 trận) thì `NATIVE_TYPE_UNMAPPED` (572 trận) mới là lớn nhất. Đừng xếp hạng gap khi một sàn chưa hồi đủ | |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
@@ -121,7 +121,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 | **SABA: 100/114 trận HÔM NAY không có ngày — từ chối là ĐÚNG** | Truy 4 bước, mỗi bước một phép đo: `EVENT_KICKOFF_DATE_UNKNOWN` **103 trận** → `dates=t114.x0.n114` (**0** dòng có ngày) → `dateAttrs=data-matchid:100` (**không** `data-date`/`datetime`/`data-start-time`/`data-kickoff`/`title` — không có thuộc tính nào để đọc) → `dateText=9.99:100` (thứ duy nhất giống ngày cạnh bảng là **số thập phân**, tức giá kèo). Trang in ngày inline cho **14/114** dòng nên "đồng hồ trần = hôm nay" trông có vẻ an toàn — **đo thì không**: `undatedClocks=b100.m58`, **58/100 dòng là giờ rạng sáng**, trong tab HÔM NAY thì phần lớn thuộc **ngày mai**. Đoán "hôm nay" sẽ ghi sai ngày cho 58 trận = đúng cơ chế chế ra chênh lệch ảo. **Không sửa được bằng mã, trừ khi tìm ra nguồn ngày khác** |
 | SABA: More mở ra rỗng | 52/52 |
 | SABA: giải góc trong feed | 0 |
-| IM | Anh bảo bỏ |
+| IM | **Anh bảo bỏ.** IM chết thì **KHÔNG phải lỗi, không báo, không sửa, không tính vào "sàn không LIVE"**. Bảng đủ sàn là **5**: CMD · SABA · SBOBET · APSPORT · BTI |
 
 ---
 
