@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | 2026-09-16, đủ 6 sàn: **22.988 dòng / 2.290 trận**. Trong phiên: BTI chết 13.145 → BTI có kèo ẩn 16.807 → **22.988**. Kèo dương **10**, cao nhất **2,01%**. Chỉ so trong **cùng một lần chạy** — hai lần cách nhau vài phút là hai ảnh chụp giá khác nhau | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | 2026-09-17 02:5x, 5 sàn (IM đã bỏ): **15.269 dòng / 1.175 trận**, kèo dương **2**, cao nhất **0,54%**, in-play **0**. Cùng phiên hôm trước đạt **24.435 / 2.290**; số dao động theo giờ và theo trạng thái từng sàn, chỉ so trong **cùng một lần chạy** | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
