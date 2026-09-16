@@ -28,7 +28,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Kiểm bằng |
 |---|---|---|---|
-| 1 | Đo được bảng ghép ngoài trình duyệt | 2026-09-17 ~05:00, 5 sàn (IM đã bỏ), catalog 0–3s: **16.297 dòng / 1.063 trận**, kèo dương **5**, cao nhất **1,03%**, in-play **0**. Cùng phiên: 24.435 / 2.290 lúc nhiều trận. Số dao động theo giờ — chỉ so trong **cùng một lần chạy** | `measure-cross-book-rows.ts` |
+| 1 | Đo được bảng ghép ngoài trình duyệt | 2026-09-17 ~05:30, 5 sàn (IM đã bỏ): **16.553 dòng / 1.210 trận**, kèo dương **4**, cao nhất **2,08%** (`FH_TOTAL 1.5` Sevilla v Barcelona — cùng line, mỗi sàn đủ cặp cửa riêng, overround 3,33–5,26%, thang line khớp 4 sàn), **in-play 0**. Cùng phiên đạt 24.435 / 2.290 lúc nhiều trận; số dao động theo giờ, chỉ so trong **cùng một lần chạy** | `measure-cross-book-rows.ts` |
 | 2 | Chặn sàn chết khỏi ghép (IM cũ 55,7 giờ) | kèo dương **80 → 13** | khối `by edge` |
 | 3 | Phiên quá hạn phải tự khai | **6/6** sàn báo `reason=EXPIRED` | `/api/catalog/sources` |
 | 4 | Feed sống không được bảo lãnh cho phiên chết | `overlayStatuses` giữ `EXPIRED` | `/api/catalog/sources` |
