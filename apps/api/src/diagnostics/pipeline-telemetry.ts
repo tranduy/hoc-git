@@ -722,6 +722,8 @@ interface SabaCollectorDiagnostic {
   readonly dateAttrs?: string;
   /** Date-like text shapes near the table, digits masked to 9. */
   readonly dateText?: string;
+  /** Bare-clock rows, and how many of those read as an after-midnight kick-off. */
+  readonly undatedClocks?: string;
   /** Why the collector is frozen, if it is. */
   readonly frozen?: string;
 }
@@ -748,6 +750,9 @@ function sabaCollectorDiagnostic(value: unknown): SabaCollectorDiagnostic | unde
     ...(typeof entry.owners === "string" &&
       /^t-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5},e-?\d{1,5}\.m-?\d{1,5}\.d-?\d{1,5}$/u.test(entry.owners)
       ? { owners: entry.owners } : {}),
+    ...(typeof entry.undatedClocks === "string" &&
+      /^b[0-9]{1,5}[.]m[0-9]{1,5}$/u.test(entry.undatedClocks)
+      ? { undatedClocks: entry.undatedClocks } : {}),
     ...(typeof entry.dateText === "string" && entry.dateText.length <= 200 &&
       /^(?:[9\/\-.]{3,12}(?:\+[9\/\-.]{3,12}){0,5}:\d{1,5})(?: [9\/\-.]{3,12}(?:\+[9\/\-.]{3,12}){0,5}:\d{1,5}){0,3}$/u.test(entry.dateText)
       ? { dateText: entry.dateText } : {}),

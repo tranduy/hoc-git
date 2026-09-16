@@ -591,6 +591,18 @@ describe("SABA owner counts", () => {
   });
 
 
+  it("accepts the bare-clock counts, backslashes intact", () => {
+    for (const undatedClocks of ["b100.m0", "b0.m0", "b103.m7"]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), undatedClocks }), undatedClocks)
+        .toMatchObject({ undatedClocks });
+    }
+    for (const bad of ["", "bd.md", "b1", "b1.m", "B1.M1"]) {
+      expect(sabaCollectorDiagnosticForTests({ ...collector("t1.m1.d1,e1.m1.d1"), undatedClocks: bad }), bad)
+        .not.toHaveProperty("undatedClocks");
+    }
+  });
+
+
   it("still refuses anything that is not a count", () => {
     for (const owners of ["td.md.dd,ed.md.dd", "Arsenal", "", "t1.m1.d1"]) {
       expect(sabaCollectorDiagnosticForTests(collector(owners))?.owners, owners).toBeUndefined();

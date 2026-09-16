@@ -398,6 +398,34 @@ export class SabaHiddenMarketCollector {
   }
 
   /**
+   * Of the rows showing only a clock: how many read as an after-midnight
+   * kick-off. The TODAY tab shows a bare clock and the page prints a date only
+   * on rows that need one, which would make "bare clock means today" look safe
+   * -- except a 01:45AM row in the today tab belongs to tomorrow, and that
+   * exact mistake is why the explicit-date requirement exists. If none of the
+   * bare-clock rows sit after midnight the rule holds for what is on the
+   * board; if any do, it cannot be applied. Counts decide it, not reasoning.
+   */
+  undatedClockCounts(): string {
+    let bare = 0;
+    let afterMidnight = 0;
+    for (const period of PERIODS) {
+      for (const owner of this.#periods[period].roster ?? []) {
+        const text = owner.record.timeText.trim().toUpperCase();
+        const clock = /^(?:TRUC TIEP |TR[^ ]* TI[^ ]* )?([0-9]{1,2}):([0-9]{2})(AM|PM)?$/u.exec(text);
+        if (clock === null) continue;
+        bare += 1;
+        const raw = Number(clock[1]);
+        const hour = clock[3] === undefined ? raw
+          : clock[3] === "PM" ? (raw % 12) + 12 : raw % 12;
+        if (hour < 6) afterMidnight += 1;
+      }
+    }
+    return `b${bare}.m${afterMidnight}`;
+  }
+
+
+  /**
    * The other half of the same question: no date attribute exists on those
    * rows, so does the page carry one as text near the table at all. Shapes
    * only, digits masked, so a date format is reported without a date value.
