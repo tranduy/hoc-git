@@ -77,7 +77,6 @@ curl -s http://127.0.0.1:4310/api/sessions
 
 | # | Việc | Số đo được | Ai làm được |
 |---|---|---|---|
-| 43 | **SABA mất 103/117 trận HÔM NAY vì không có ngày** | Census mới trả lời dứt điểm. `dates=t117.x0.n117,e115.x0.n115` — **0/232 dòng roster có ngày**; `explicitDate()` đọc `data-date`/`datetime`/`data-start-time`/`data-kickoff` trên ô giờ, hàng và bảng, **không bao giờ** thấy giá trị hợp lệ. Mẫu số `timeShapes=t14.u103,e115.u0` cho biết điều đó tốn gì: **EARLY 115/115 tự mang ngày trong text → không mất gì**; **TODAY chỉ 14/117 mang ngày, 103 dòng còn lại chỉ có đồng hồ → mất sạch 103**. Khớp đúng số từ chối: `EVENT_KICKOFF_DATE_UNKNOWN` **103 trận**. Tức SABA mất **88% bảng hôm nay** — đúng phần trận gần giờ, giá trị nhất. **Không được chữa bằng cách đoán "là hôm nay"**: tab TODAY có trận 01:45AM thuộc ngày mai, đó chính là lý do `requireExplicitDateForUndatedKickoff` tồn tại. Phải tìm chỗ trang SABA thật sự để ngày | `sabaCollector.dates` + `.timeShapes`. **Đã truy tiếp:** `dateAttrs=data-matchid:103` — cả 103 dòng chỉ mang **duy nhất** `data-matchid` trên ô giờ/hàng/bảng. **Không** `data-date`, `datetime`, `data-start-time`, `data-kickoff`, `title`. Tức collector **không đọc nhầm thuộc tính — không có thuộc tính nào để đọc**. Sửa bằng cách đổi tên thuộc tính là vô ích. **Còn lại một khả năng chưa loại trừ:** ngày nằm ở chỗ khác trên trang dưới dạng **chữ** (tiêu đề ngày / nhãn tab), mà phép dò này không chạm tới — chỉ dò 3 nút đó |
 | — | **Cảnh báo phép đo:** lần census SABA đầu tiên lấy lúc SABA đang hồi phục (130 trận) và cho thứ hạng **sai** — `EVENT_TIME_UNRESOLVED` trông như gap lớn nhất. Đủ roster (649 trận) thì `NATIVE_TYPE_UNMAPPED` (572 trận) mới là lớn nhất. Đừng xếp hạng gap khi một sàn chưa hồi đủ | |
 
 ## ĐÃ ĐÓNG — đo rồi, không đáng làm
@@ -115,6 +114,7 @@ curl -s http://127.0.0.1:4310/api/sessions
 |---|---|
 | **Kèo góc: trận có góc ở ≥2 sàn** | **49** / 2.025. Không phải lỗi thu thập — SBOBET và CMD bỏ sót **0** kèo góc |
 | CMD: trận ngoài 72h bị chính sách PASSIVE loại | **392** (cố ý) |
+| **SABA: 100/114 trận HÔM NAY không có ngày — từ chối là ĐÚNG** | Truy 4 bước, mỗi bước một phép đo: `EVENT_KICKOFF_DATE_UNKNOWN` **103 trận** → `dates=t114.x0.n114` (**0** dòng có ngày) → `dateAttrs=data-matchid:100` (**không** `data-date`/`datetime`/`data-start-time`/`data-kickoff`/`title` — không có thuộc tính nào để đọc) → `dateText=9.99:100` (thứ duy nhất giống ngày cạnh bảng là **số thập phân**, tức giá kèo). Trang in ngày inline cho **14/114** dòng nên "đồng hồ trần = hôm nay" trông có vẻ an toàn — **đo thì không**: `undatedClocks=b100.m58`, **58/100 dòng là giờ rạng sáng**, trong tab HÔM NAY thì phần lớn thuộc **ngày mai**. Đoán "hôm nay" sẽ ghi sai ngày cho 58 trận = đúng cơ chế chế ra chênh lệch ảo. **Không sửa được bằng mã, trừ khi tìm ra nguồn ngày khác** |
 | SABA: More mở ra rỗng | 52/52 |
 | SABA: giải góc trong feed | 0 |
 | IM | Anh bảo bỏ |
