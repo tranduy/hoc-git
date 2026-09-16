@@ -121,6 +121,7 @@ async function main(): Promise<void> {
   unusedMarketTypes(built as readonly unknown[], catalogs as never);
   whyUnpriced(built as readonly unknown[]);
   cornerCoverage(built as readonly unknown[], catalogs as never);
+  cleanSheetValue(built as readonly unknown[]);
   top(pairCounts, "by book pair", 15);
   top(marketCounts, "by market type", 15);
 }
@@ -698,4 +699,36 @@ export function cornerCoverage(built: readonly unknown[],
       .map(([reason, hits]) => `${reason}:${hits}`).join(" ");
     if (byReason.length > 0) process.stdout.write(`                 ${byReason}\n`);
   }
+}
+
+
+/**
+ * CMD prices no clean sheet of its own; the market arrives bundled inside one
+ * four-price native row. A mapping is only worth its risk if the rows it makes
+ * actually carry a CMD side, so count those rather than the whole market type -
+ * SBOBET, APSPORT and BTI already paired clean sheets between themselves.
+ */
+export function cleanSheetValue(built: readonly unknown[]): void {
+  let rows = 0;
+  let withCmd = 0;
+  let onlyCmd = 0;
+  let cmdIsBest = 0;
+  for (const event of built as readonly { rows: readonly { marketType: string;
+    best?: Readonly<Record<string, string>>; cells: readonly { provider?: string }[] }[] }[]) {
+    for (const row of event.rows) {
+      if (!row.marketType.endsWith("_FT_CLEAN_SHEET")) continue;
+      rows += 1;
+      if (!row.cells.some((cell) => String(cell.provider) === "CMD")) continue;
+      withCmd += 1;
+      if (new Set(row.cells.filter((cell) => String(cell.provider) !== "CMD")
+        .map((cell) => String(cell.provider))).size < 2) onlyCmd += 1;
+      if (Object.values(row.best ?? {}).includes("CMD")) cmdIsBest += 1;
+    }
+  }
+  process.stdout.write("\nclean sheet, the market CMD only ships bundled\n");
+  process.stdout.write(`  cross-book rows            : ${rows}
+`);
+  process.stdout.write(`  of those carrying a CMD side: ${withCmd}, of which ${onlyCmd} exist only because of it\n`);
+  process.stdout.write(`  CMD best on at least one cell: ${cmdIsBest}
+`);
 }
