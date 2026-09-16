@@ -59,7 +59,31 @@ function plain(value: Decimal): string {
   return value.toFixed(value.decimalPlaces());
 }
 
+/**
+ * Decoding a price is a pure function of its raw text and format, and Decimal
+ * is immutable, so the same pair always yields the same instance-equivalent
+ * value. Profiled 2026-09-16: decimal.js was the largest single file on the
+ * main thread at 4.8% of samples, because every ranking pass re-parsed every
+ * quote of every row. Caching the decode changes no result; it only stops the
+ * same string being parsed thousands of times per polling round.
+ *
+ * Bounded so a long session cannot grow it without limit. Clearing whole is
+ * safe: the next call simply decodes again.
+ */
+const decodedOdds = new Map<string, Decimal | null>();
+const DECODED_ODDS_LIMIT = 50_000;
+
 function oddsOf(quote: ProviderQuote): Decimal | null {
+  const cacheKey = quote.rawFormat + '|' + quote.rawOdds;
+  const cached = decodedOdds.get(cacheKey);
+  if (cached !== undefined || decodedOdds.has(cacheKey)) return cached ?? null;
+  const decoded = decodeOdds(quote);
+  if (decodedOdds.size >= DECODED_ODDS_LIMIT) decodedOdds.clear();
+  decodedOdds.set(cacheKey, decoded);
+  return decoded;
+}
+
+function decodeOdds(quote: ProviderQuote): Decimal | null {
   try {
     const raw = new Decimal(quote.rawOdds);
     if (!raw.isFinite()) return null;
