@@ -455,6 +455,43 @@ describe("targeted manual provider refresh ownership", () => {
   });
 });
 
+describe("catalog observation feedback", () => {
+  it("applies a correction immediately and coalesces its targeted provider refresh", async () => {
+    const pending = deferred<number>();
+    const reconcile = vi.fn(() => true);
+    const refreshProvider = vi.fn(() => pending.promise);
+    const create = (serverModule as unknown as { createSelectionObservationHandler?: (options: {
+      reconcileSelectionObservation(observation: unknown): boolean;
+      refreshProvider(provider: TestRefreshableProvider): Promise<number>;
+    }) => (observation: unknown) => void }).createSelectionObservationHandler;
+    expect(typeof create).toBe("function");
+    const handle = create!({ reconcileSelectionObservation: reconcile, refreshProvider });
+    const observation = { kind: "FOUND", provider: "SABA", accountId: SABA };
+
+    handle(observation);
+    handle(observation);
+
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(refreshProvider).toHaveBeenCalledExactlyOnceWith("SABA");
+    pending.resolve(1);
+    await pending.promise;
+  });
+
+  it("does not refresh when compare-and-swap rejects a stale observation", () => {
+    const refreshProvider = vi.fn(async () => 1);
+    const create = (serverModule as unknown as { createSelectionObservationHandler?: (options: {
+      reconcileSelectionObservation(observation: unknown): boolean;
+      refreshProvider(provider: TestRefreshableProvider): Promise<number>;
+    }) => (observation: unknown) => void }).createSelectionObservationHandler;
+    expect(typeof create).toBe("function");
+    const handle = create!({ reconcileSelectionObservation: () => false, refreshProvider });
+
+    handle({ kind: "REMOVE", provider: "APSPORT", accountId: APSPORT });
+
+    expect(refreshProvider).not.toHaveBeenCalled();
+  });
+});
+
 describe("extension reload announcement", () => {
   const identity = `sha256:${"e".repeat(64)}`;
 

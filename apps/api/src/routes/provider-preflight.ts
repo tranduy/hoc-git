@@ -6,6 +6,7 @@ import { ProviderTicketPreflightRequestSchema, ProviderTicketPreflightSchema,
   type TicketRealtimeDisplayedLeg } from "@tool-chenh/contracts";
 import { Decimal, toDecimal } from "@tool-chenh/core";
 import type { FastifyInstance } from "fastify";
+import type { SelectionCatalogObservation } from "../chrome-bridge/catalog-source-reconciliation.js";
 
 export interface TicketReportRequest {
   readonly eventKey: string;
@@ -90,6 +91,7 @@ export interface ProviderPreflightRouteOptions {
     readonly selection: string; readonly line: string | null;
     readonly requestedAtMs: number }): Promise<{ readonly rawOdds: string; readonly observedAtMs: number;
       readonly method: "DOM" | "IN_PAGE_FETCH" }> };
+  readonly onSelectionObservation?: (observation: SelectionCatalogObservation) => void;
 }
 
 function identityMatches(displayed: TicketRealtimeDisplayedLeg, direct: ProviderTicketPreflight): boolean {
@@ -250,6 +252,12 @@ async function checkTicket(preflight: ProviderPreflightLike, input: TicketRealti
   const checked = await Promise.all(input.legs.map((leg) =>
     checkLeg(preflight, leg, clock, timeoutMs, options.visiblePriceProbe, input.capturedAtMs, input)));
   const legs = checked as [TicketRealtimeCheckLegResult, TicketRealtimeCheckLegResult];
+  for (const leg of legs) {
+    const observation = selectionObservation(leg);
+    if (observation === null) continue;
+    try { options.onSelectionObservation?.(observation); }
+    catch { /* catalog feedback cannot turn valid direct evidence into an HTTP failure */ }
+  }
   const completedAtMs = clock.nowMs();
   // Preserve per-check write order even for journals that do not serialize
   // append calls. A slow or failed write never claims confirmed persistence.
@@ -263,6 +271,29 @@ async function checkTicket(preflight: ProviderPreflightLike, input: TicketRealti
     participantA: input.participantA, participantB: input.participantB,
     marketType: input.marketType, scope: input.scope, capturedAtMs: input.capturedAtMs,
     completedAtMs, persisted, legs });
+}
+
+function selectionObservation(result: TicketRealtimeCheckLegResult): SelectionCatalogObservation | null {
+  const displayed = result.displayed;
+  const base = { accountId: displayed.accountId, provider: displayed.provider,
+    providerEventId: displayed.providerEventId, providerMarketId: displayed.providerMarketId,
+    providerSelectionId: displayed.providerSelectionId,
+    line: displayed.providerLine === undefined ? displayed.line : displayed.providerLine,
+    expectedCatalogObservedAtMs: displayed.providerObservedAtMs, expectedRawOdds: displayed.rawOdds,
+    observedAtMs: result.direct?.providerObservedAtMs ?? result.completedAtMs,
+    receivedMonotonicMs: result.direct?.receivedMonotonicMs ?? performance.now() };
+  if (result.status === "ODDS_CHANGED" && result.direct !== null) {
+    return { ...base, kind: "FOUND", rawOdds: result.direct.rawOdds };
+  }
+  let reason: Extract<SelectionCatalogObservation, { readonly kind: "REMOVE" }>["reason"] | null = null;
+  if (result.status === "MARKET_NOT_OPEN") reason = "MARKET_NOT_OPEN";
+  else if (result.status === "TIMEOUT") reason = "TIMEOUT";
+  else if (result.status === "SOURCE_UNAVAILABLE") reason = "SOURCE_UNAVAILABLE";
+  else if (result.status === "IDENTITY_MISMATCH") {
+    reason = result.verificationStatus === "AMBIGUOUS" ? "AMBIGUOUS"
+      : result.direct === null ? "NOT_FOUND" : "IDENTITY_MISMATCH";
+  }
+  return reason === null ? null : { ...base, kind: "REMOVE", reason };
 }
 
 export function registerProviderPreflightRoutes(app: FastifyInstance, preflight: ProviderPreflightLike,

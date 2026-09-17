@@ -803,6 +803,7 @@ describe("TsportWsCatalogAdapter", () => {
       [{ ...current, "10": "Suspended" }], 3, "DETAIL", false, "apsport:7:1", 24, "EVENT_CHANGE"
     ))[0] as AuthorityUpdate;
 
+    expect(update).toMatchObject({ evidenceMode: "DELTA", authoritativeRemovalEvidence: true });
     expect((update.value.events as readonly { readonly providerEventId?: string }[])
       .some((candidate) => candidate.providerEventId === "110")).toBe(false);
     expect(update.value.quotes.some((quote) => quote.providerEventId === "110")).toBe(false);

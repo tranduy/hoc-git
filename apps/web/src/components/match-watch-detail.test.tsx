@@ -6,6 +6,7 @@ import { MatchWatchDetail, type ComparisonBook } from "./match-watch-detail.js";
 import { buildComparisonEvents } from "../catalog/comparison.js";
 import { buildFixedBaseStakePlan } from "../watch/fixed-base-stake.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
+import { rankedTicketQuoteVersion } from "../watch/ranked-tickets.js";
 
 const event: ProviderEvent = {
   provider: "CMD", category: "FOOTBALL", providerEventId: "event-1", competition: "Premier Test",
@@ -307,6 +308,22 @@ describe("MatchWatchDetail", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "SBOBET available for this match" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "SBOBET available for this match" }));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("removes the alert and compact price row for an invalidated quote version", () => {
+    const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
+    const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
+    const comparison = buildComparisonEvents([saba, sbobet])[0]!;
+    const signal = activeSignal(comparison);
+    const version = rankedTicketQuoteVersion({ key: signal.row.key, row: signal.row, plan: signal.plan })!;
+
+    render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read: vi.fn() }}
+      comparisonCatalogs={[saba, sbobet]} comparisonEvent={comparison} initialCatalog={saba}
+      invalidatedTicketVersions={new Set([version])} lagSignals={[signal]} onBack={() => undefined}
+      providerEventId="SABA-total-event" />);
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByLabelText("Gross preflight FT_AH line -0.5")).toBeNull();
   });
 
   it("removes an active candidate immediately when monitoring stops", () => {

@@ -262,4 +262,88 @@ describe("provider preflight route", () => {
     ] });
     await app.close();
   });
+
+  it("emits a catalog price observation only for a changed exact quote", async () => {
+    const observations: unknown[] = [];
+    const app = Fastify();
+    const displayed = { provider: "SABA" as const, accountId: "account-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", selection: "OVER", line: "2.5",
+      rawOdds: "1.2", rawFormat: "HK" as const, decimalOdds: "2.2", quoteStatus: "OPEN" as const,
+      providerObservedAtMs: 900, receivedMonotonicMs: 70, sequence: 17, requestedStake: "100000" };
+    registerProviderPreflightRoutes(app, { preflight: async () => result }, {
+      visiblePriceProbe: { probe: async (input) => ({
+        rawOdds: input.provider === "SABA" ? "1.2" : "0.9", observedAtMs: 1_020, method: "DOM"
+      }) }, onSelectionObservation: (observation: unknown) => { observations.push(observation); }
+    });
+
+    const response = await app.inject({ method: "POST", url: "/api/preflight/realtime-check", payload: {
+      eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
+      legs: [displayed, { ...displayed, provider: "CMD", accountId: "account-2", providerEventId: "event-2",
+        providerMarketId: "market-2", providerSelectionId: "selection-2", selection: "UNDER",
+        rawOdds: "1.1", decimalOdds: "2.1" }]
+    } });
+
+    expect(response.statusCode).toBe(200);
+    expect(observations).toEqual([expect.objectContaining({ kind: "FOUND", provider: "CMD",
+      accountId: "account-2", providerEventId: "event-2", providerMarketId: "market-2",
+      providerSelectionId: "selection-2", line: "2.5", expectedCatalogObservedAtMs: 900,
+      expectedRawOdds: "1.1", rawOdds: "0.9", observedAtMs: 1_020 })]);
+    await app.close();
+  });
+
+  it("emits fail-closed removals for an exact miss and a probe timeout", async () => {
+    const observations: unknown[] = [];
+    const app = Fastify();
+    const displayed = { provider: "SABA" as const, accountId: "account-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", selection: "OVER", line: "2.5",
+      rawOdds: "1.2", rawFormat: "HK" as const, decimalOdds: "2.2", quoteStatus: "OPEN" as const,
+      providerObservedAtMs: 900, receivedMonotonicMs: 70, sequence: 17, requestedStake: "100000" };
+    registerProviderPreflightRoutes(app, { preflight: async () => result }, {
+      visiblePriceProbe: { probe: async (input) => {
+        throw Object.assign(new Error(input.provider === "SABA" ? "VISIBLE_PRICE_NOT_FOUND" :
+          "VISIBLE_PRICE_PROBE_TIMEOUT"), { method: "DOM" });
+      } }, onSelectionObservation: (observation: unknown) => { observations.push(observation); }
+    });
+
+    const response = await app.inject({ method: "POST", url: "/api/preflight/realtime-check", payload: {
+      eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
+      legs: [displayed, { ...displayed, provider: "BTI", accountId: "account-2", providerEventId: "event-2",
+        providerMarketId: "market-2", providerSelectionId: "selection-2", selection: "UNDER" }]
+    } });
+
+    expect(response.statusCode).toBe(200);
+    expect(observations).toEqual([
+      expect.objectContaining({ kind: "REMOVE", provider: "SABA", reason: "NOT_FOUND" }),
+      expect.objectContaining({ kind: "REMOVE", provider: "BTI", reason: "TIMEOUT" })
+    ]);
+    await app.close();
+  });
+
+  it("emits fail-closed removals when the visible provider source cannot be loaded", async () => {
+    const observations: unknown[] = [];
+    const app = Fastify();
+    const displayed = { provider: "SABA" as const, accountId: "account-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", selection: "OVER", line: "2.5",
+      rawOdds: "1.2", rawFormat: "HK" as const, decimalOdds: "2.2", quoteStatus: "OPEN" as const,
+      providerObservedAtMs: 900, receivedMonotonicMs: 70, sequence: 17, requestedStake: "100000" };
+    registerProviderPreflightRoutes(app, { preflight: async () => result }, {
+      visiblePriceProbe: { probe: async () => { throw new Error("VISIBLE_PRICE_SOURCE_NOT_LIVE"); } },
+      onSelectionObservation: (observation: unknown) => { observations.push(observation); }
+    });
+
+    await app.inject({ method: "POST", url: "/api/preflight/realtime-check", payload: {
+      eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
+      legs: [displayed, { ...displayed, provider: "CMD", accountId: "account-2", providerEventId: "event-2",
+        providerMarketId: "market-2", providerSelectionId: "selection-2", selection: "UNDER" }]
+    } });
+
+    expect(observations).toEqual([
+      expect.objectContaining({ kind: "REMOVE", provider: "SABA", reason: "SOURCE_UNAVAILABLE" }),
+      expect.objectContaining({ kind: "REMOVE", provider: "CMD", reason: "SOURCE_UNAVAILABLE" })
+    ]);
+    await app.close();
+  });
 });

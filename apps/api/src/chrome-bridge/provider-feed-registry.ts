@@ -85,6 +85,15 @@ export class ProviderFeedRegistry {
     return decision;
   }
 
+  replaceCurrentCatalog(expected: ObservedProviderCatalog,
+    replacement: ObservedProviderCatalog): FeedDecision {
+    const controller = this.#controllers.get(expected.accountId);
+    if (controller === undefined) return rejected();
+    const decision = controller.replaceCurrentCatalog(expected, replacement);
+    if (decision.accepted || decision.stateChanged) this.#queueNotification(controller.snapshot());
+    return decision;
+  }
+
   read(accountId: string): ObservedProviderCatalog {
     const controller = this.#controller(accountId);
     const before = controller.snapshot();
