@@ -710,6 +710,41 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByText("ROI 0.50%")).toBeNull();
   });
 
+  it("shows at most five negative cards while keeping the least negative rates", async () => {
+    const source = (provider: "SABA" | "SBOBET"): CatalogSourceStatus => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+    });
+    const lines = Array.from({ length: 12 }, (_unused, index) => `-${index + 0.5}`);
+    const providerCatalog = (provider: "SABA" | "SBOBET"): LiveCatalogResponse => {
+      const providerEventId = `${provider}-event`;
+      return { ...catalog, accountId: `catalog-source:${provider}:FOOTBALL`, provider,
+        events: [{ ...event, provider, providerEventId }],
+        markets: lines.map((line) => ({ ...market, provider, providerEventId,
+          providerMarketId: `${provider}-${line}`, line })),
+        // Both best legs stay below 2.00, so every exact pair loses money.
+        quotes: lines.flatMap((line, lineIndex) => (["HOME", "AWAY"] as const).map((selection, quoteIndex) => ({
+          ...quotes[quoteIndex]!, provider, providerEventId, providerMarketId: `${provider}-${line}`,
+          providerSelectionId: `${provider}-${line}-${selection}`, line,
+          rawOdds: (provider === "SABA") === (selection === "HOME")
+            ? (1.8 + lineIndex / 100).toFixed(2)
+            : "1.1"
+        }))) };
+    };
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [source("SABA"), source("SBOBET")] }}
+      catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
+
+    await vi.waitFor(() => expect(screen.getAllByRole("button", { name: "Compare Alpha vs Beta" })).toHaveLength(5));
+    const cards = screen.getAllByRole("button", { name: "Compare Alpha vs Beta" });
+    for (const card of cards) {
+      expect(card.className).toContain("catalog-event--roi-negative");
+    }
+    // 1.91/1.91 is the least negative pair and must survive the cap; 1.80/1.80 is dropped.
+    expect(within(cards[0]!).getByText("ROI -4.50%")).toBeTruthy();
+    expect(screen.queryByText("ROI -10.00%")).toBeNull();
+  });
+
   it("shows provider buttons only after the profitable match is opened in detail", async () => {
     const source = (provider: "SABA" | "CMD"): CatalogSourceStatus => ({
       id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",

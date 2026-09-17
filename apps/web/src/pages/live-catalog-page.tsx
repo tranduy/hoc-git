@@ -69,6 +69,8 @@ const catalogFailureGraceMs = 5_000;
 // book is dropped by it, and silence can no longer pass for a live price.
 const comparisonMaxCatalogAgeMs = 120_000;
 const catalogAgeSweepIntervalMs = 15_000;
+/** Losing rows shown for context only; more of them just hide the real edges. */
+const MAX_NEGATIVE_TICKET_CARDS = 5;
 const executableProfileMaxAgeMs = 30_000;
 const catalogCategoryStorageKey = "tool-chenh.live-catalog.category.v1";
 const eventPhaseStorageKey = "tool-chenh.live-catalog.event-phase.v1";
@@ -1255,12 +1257,28 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   [events, eventPhases, rankingNowMs, selectedProviderIds]);
   const comparisonCounts = useMemo(() => {
     const visibleCounts = summarizeComparisonCounts(visibleEvents);
-    // Worker counts are the full matched set before top-rate truncation. Prefer
-    // them only while the visible projection still has cross-book pairs; once
-    // stale filtering removes the opposing books, fall back to visible counts.
-    if (workerComparisonCounts === null || visibleCounts.crossBookPairCount === 0) return visibleCounts;
+    // Worker counts describe the full matched set before top-rate truncation, so
+    // they are only true for the same books and phases the worker measured. Any
+    // local reduction - an unchecked book, a stale source, a phase filter, a
+    // kickoff cutoff - makes them a different question, and the exact visible
+    // counts must answer instead. A bigger number is not a better number.
+    const shape = (list: readonly ComparisonEvent[]): string => {
+      let rows = 0;
+      let cells = 0;
+      const providers = new Set<ProviderId>();
+      for (const item of list) {
+        rows += item.rows.length;
+        for (const row of item.rows) {
+          cells += row.cells.length;
+          for (const cell of row.cells) providers.add(cell.provider);
+        }
+      }
+      return JSON.stringify([list.length, rows, cells, [...providers].sort()]);
+    };
+    const reducedLocally = staleAccountIds.size > 0 || shape(visibleEvents) !== shape(events);
+    if (workerComparisonCounts === null || reducedLocally) return visibleCounts;
     return workerComparisonCounts;
-  }, [visibleEvents, workerComparisonCounts]);
+  }, [events, staleAccountIds, visibleEvents, workerComparisonCounts]);
   useEffect(() => {
     const deadlineMs = nextRankingDeadlineMs({ events, verified: verifiedTickets,
       nowMs: rankingNowMs, urgentEventKeys });
@@ -1281,7 +1299,19 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const rankedByEvent = new Map(rankedEvents.map((item) => [item.event.key, item]));
   // This workspace is an exact cross-book comparison list. Never pad it with
   // one-book observations: those rows cannot be balanced across two providers.
-  const displayTicketItems = useMemo(() => topRankedTicketItems(rankedEvents, 20), [rankedEvents]);
+  // Losing rows are kept only as context for the rates above them. Past a few
+  // they push real edges off the screen, so the list carries at most the five
+  // least negative ones and never drops a positive or break-even ticket.
+  const displayTicketItems = useMemo(() => {
+    let negativeCount = 0;
+    return topRankedTicketItems(rankedEvents, 20).filter((item) => {
+      const summary = ticketEdgeSummary(item.ticket.plan === null && item.ticket.historicalPlan != null
+        ? { ...item.ticket, plan: item.ticket.historicalPlan } : item.ticket);
+      if (summary === null || roiTone(summary.roiPercent, summary.worstCaseProfit) !== "negative") return true;
+      negativeCount += 1;
+      return negativeCount <= MAX_NEGATIVE_TICKET_CARDS;
+    });
+  }, [rankedEvents]);
   const crossBookEventCount = displayTicketItems.length;
   useLayoutEffect(() => {
     const list = matchListRef.current;

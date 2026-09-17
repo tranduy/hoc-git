@@ -35,7 +35,8 @@ function catalog(provider: "SABA" | "SBOBET" | "CMD", entries: readonly {
 }[]): LiveCatalogResponse {
   return {
     dataMode: "LIVE", accountId: `catalog-source:${provider}:FOOTBALL`, provider, category: "FOOTBALL",
-    comparisonState: "READY", snapshotState: "FRESH", observedAtMs: 1_000, rejectedMarketCount: 0,
+    comparisonState: "AWAITING_SECOND_PROVIDER", snapshotState: "FRESH",
+    observedAtMs: 1_000, rejectedMarketCount: 0,
     events: entries.map((entry) => event(provider, entry.id)),
     markets: entries.map((entry) => market(provider, entry.id)),
     quotes: entries.flatMap((entry) => quotes(provider, entry.id, entry.over, entry.under))
