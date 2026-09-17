@@ -3,6 +3,7 @@ import { playerComparisonKey, sameNativePlayer } from "@tool-chenh/contracts";
 import { buildComparisonEvents, createCompetitionLinkMemory, exactTwoWayOutcomeDomain,
   isFocusedTwoWayTicket, isAvailableTwoWayTicket, type ComparisonEvent } from "./comparison.js";
 import type { ComparisonProjection, ComparisonWorkerCommand, ComparisonWorkerOutput } from "./comparison-worker-protocol.js";
+import { selectTopRateWorkerOutput } from "./comparison-worker-top.js";
 
 function project(event: ComparisonEvent, historicalMarkets?: ReadonlySet<LiveCatalogResponse["markets"][number]>): ComparisonProjection {
   const { catalogs, ...comparison } = event;
@@ -78,9 +79,11 @@ export class ComparisonWorkerEngine {
     // supported market is complete, which is most of the time. Comparing a list twice
     // spends the same 227ms to reach the answer already in hand - 44 times a
     // minute at the sizes measured 2026-08-29, a third of a core for nothing.
-    const output = { generation: command.generation, displayEvents,
-      freshEvents: sameCatalogs(displayCatalogs, freshCatalogs) ? displayEvents
-        : buildComparisonEvents(freshCatalogs, this.#competitionMemory, { playerComparisonsOnly: true }).map(event => project(event)) };
+    const freshEvents = sameCatalogs(displayCatalogs, freshCatalogs) ? displayEvents
+      : buildComparisonEvents(freshCatalogs, this.#competitionMemory, { playerComparisonsOnly: true }).map(event => project(event));
+    const top = selectTopRateWorkerOutput(displayEvents, freshEvents);
+    const output = { generation: command.generation, displayEvents: top.displayEvents,
+      freshEvents: top.freshEvents, comparisonCounts: top.comparisonCounts };
     // Sent only when the proven set grows, because it rides on every catalog
     // update and most of them prove nothing new.
     const confirmed = this.#competitionMemory.confirmed();

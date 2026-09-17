@@ -19,6 +19,7 @@ export interface HydratedComparisonWorkerOutput {
   readonly isLatest?: boolean;
   readonly displayEvents: readonly ComparisonEvent[];
   readonly freshEvents: readonly ComparisonEvent[];
+  readonly comparisonCounts?: ComparisonWorkerOutput["comparisonCounts"];
 }
 
 function defaultWorker(): WorkerLike {
@@ -415,7 +416,8 @@ export class ComparisonWorkerClient {
         };
         const displayEvents = projected.displayEvents.map(project);
         this.#onResult({ generation: event.data.generation, isLatest, displayEvents,
-          freshEvents: projected.freshEvents === projected.displayEvents ? displayEvents : projected.freshEvents.map(project) });
+          freshEvents: projected.freshEvents === projected.displayEvents ? displayEvents : projected.freshEvents.map(project),
+          ...(event.data.comparisonCounts === undefined ? {} : { comparisonCounts: event.data.comparisonCounts }) });
       }
       this.#inFlightGeneration = null;
       this.#inFlightCatalogs = null;

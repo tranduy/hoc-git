@@ -23,6 +23,12 @@ export interface ComparisonWorkerOutput {
   readonly generation: number;
   readonly displayEvents: readonly ComparisonProjection[];
   readonly freshEvents: readonly ComparisonProjection[];
+  /** Full matched counts before top-rate truncation for postMessage. */
+  readonly comparisonCounts?: {
+    readonly matchedContractCount: number;
+    readonly matchedSourceMarketCount: number;
+    readonly crossBookPairCount: number;
+  };
   /** Present only when the proven set grew, so it is worth storing again. */
   readonly competitionLinks?: readonly string[];
 }

@@ -111,3 +111,32 @@ it("uses output snapshot clocks and clears current and pending preflight evidenc
   expect(signals.mock.calls.at(-1)![1]).toEqual(new Set());
   expect(movements.mock.calls.at(-1)![1]).toBe(0);
 });
+
+it("keeps the last exact pair while an intermediate empty worker result arrives", async () => {
+  const { row } = capturedRefundExample("handicap");
+  const now = Date.now();
+  const catalogs: LiveCatalogResponse[] = row.cells.map(cell => ({
+    accountId: `catalog-source:${cell.provider}:FOOTBALL`, provider: cell.provider,
+    category: "FOOTBALL", dataMode: "LIVE", comparisonState: "AWAITING_SECOND_PROVIDER",
+    snapshotState: "FRESH", observedAtMs: now, rejectedMarketCount: 0,
+    markets: [cell.market], quotes: cell.quotes,
+    events: [{ provider: cell.provider, category: "FOOTBALL", providerEventId: cell.market.providerEventId,
+      competition: "League", participantA: "Alpha", participantB: "Beta", startAtUtcMs: now + 3_600_000,
+      eventScope: "REGULATION", seasonStage: null, bestOf: null, rematchCandidate: false,
+      fixtureDiscriminator: null, isVirtual: false, sportVariant: "FOOTBALL", isLive: false, liveState: null }]
+  }));
+  const sources = catalogs.map(catalog => ({ id: catalog.accountId, provider: catalog.provider, category: "FOOTBALL",
+    alias: catalog.provider, sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: now, reason: null })) as CatalogSourceStatus[];
+  const read = vi.fn(async (id: string) => catalogs.find(catalog => catalog.accountId === id)!);
+  render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ list: async () => [],
+    register: async () => { throw new Error("unused"); }, refresh: async () => { throw new Error("unused"); } }}
+    catalogSourceApi={{ list: async () => sources }} catalogApi={{ read }} />);
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  const events = buildComparisonEvents(catalogs);
+  expect(events.some(event => event.rows.length > 0)).toBe(true);
+  await act(async () => { worker.result!({ generation: 1, isLatest: true, displayEvents: events, freshEvents: events }); });
+  expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+  await act(async () => { worker.result!({ generation: 2, isLatest: false, displayEvents: [], freshEvents: [] }); });
+  expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+  expect(screen.queryByText("No exact two-book comparison is currently available")).toBeNull();
+});

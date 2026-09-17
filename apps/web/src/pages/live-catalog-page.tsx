@@ -12,7 +12,7 @@ import { decimalOdds, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, observedTicketAsComparisonRow, selectionLabel, ticketMarketLabel,
   type ComparisonEvent, type ComparisonRow, type EventPhase } from "../catalog/comparison.js";
 import { formatDisplayDecimal } from "../catalog/display-format.js";
-import { selectComparisonProviders, summarizeComparisonCounts } from "../catalog/comparison-counts.js";
+import { selectComparisonProviders, summarizeComparisonCounts, type ComparisonCounts } from "../catalog/comparison-counts.js";
 import { PROVIDER_DISPLAY_ORDER, sortProviderItems } from "../catalog/provider-order.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
 import { ProfitToastStack } from "../components/profit-toast-stack.js";
@@ -574,6 +574,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
   const [rosters, setRosters] = useState<readonly LiveCatalogResponse[]>([]);
   const [comparisonEvents, setComparisonEvents] = useState<readonly ComparisonEvent[]>([]);
+  const [workerComparisonCounts, setWorkerComparisonCounts] = useState<ComparisonCounts | null>(null);
   const [staleAccountIds, setStaleAccountIds] = useState<ReadonlySet<string>>(new Set());
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
   const [movements, setMovements] = useState<readonly ObservedPriceMovement[]>([]);
@@ -671,7 +672,17 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         const displayByKey = new Map(output.displayEvents.filter((item) =>
           item.catalogs.every((catalog) => !staleAccountIdsRef.current.has(catalog.accountId)))
           .map((item) => [sourceGroupKey(item), item]));
-        setComparisonEvents(output.freshEvents.map((item) => displayByKey.get(sourceGroupKey(item)) ?? item));
+        const nextEvents = output.freshEvents.map((item) => displayByKey.get(sourceGroupKey(item)) ?? item);
+        // An in-flight generation can publish an empty intermediate while BTI
+        // (or another large book) is still rebuilding. Clearing here blanks the
+        // top-rate list even though the previous exact pairs remain valid until
+        // a latest result replaces them. Keep the last committed list instead.
+        const keepPreviousTop = nextEvents.length === 0 && output.isLatest === false;
+        setComparisonEvents((previous) =>
+          keepPreviousTop && previous.length > 0 ? previous : nextEvents);
+        if (!keepPreviousTop) {
+          setWorkerComparisonCounts(output.comparisonCounts ?? null);
+        }
         latestPreflightGeneration.current = output.isLatest === false ? -1 : output.generation;
         const freshCatalogs = catalogsRef.current.filter((catalog) =>
           !staleAccountIdsRef.current.has(catalog.accountId));
@@ -1242,7 +1253,14 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, rankingNowMs) &&
     matchesEventPhase(item.event, eventPhases)).map(item => selectComparisonProviders(item, selectedProviderIds)),
   [events, eventPhases, rankingNowMs, selectedProviderIds]);
-  const comparisonCounts = useMemo(() => summarizeComparisonCounts(visibleEvents), [visibleEvents]);
+  const comparisonCounts = useMemo(() => {
+    const visibleCounts = summarizeComparisonCounts(visibleEvents);
+    // Worker counts are the full matched set before top-rate truncation. Prefer
+    // them only while the visible projection still has cross-book pairs; once
+    // stale filtering removes the opposing books, fall back to visible counts.
+    if (workerComparisonCounts === null || visibleCounts.crossBookPairCount === 0) return visibleCounts;
+    return workerComparisonCounts;
+  }, [visibleEvents, workerComparisonCounts]);
   useEffect(() => {
     const deadlineMs = nextRankingDeadlineMs({ events, verified: verifiedTickets,
       nowMs: rankingNowMs, urgentEventKeys });
